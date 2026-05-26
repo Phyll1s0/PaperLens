@@ -27,6 +27,11 @@ const els = {
 };
 
 const PROVIDERS = {
+  deepseek: {
+    baseUrl: "https://api.deepseek.com",
+    model: "deepseek-v4-flash",
+    hint: "DeepSeek OpenAI-compatible API。可改用 deepseek-v4-pro 获得更强模型。",
+  },
   "kimi-code": {
     baseUrl: "https://api.kimi.com/coding/v1",
     model: "kimi-for-coding",
@@ -70,7 +75,7 @@ function bindEvents() {
 }
 
 function loadSettings() {
-  const provider = sessionStorage.getItem("paper-reader-provider") || "kimi-code";
+  const provider = sessionStorage.getItem("paper-reader-provider") || "deepseek";
   els.providerSelect.value = provider;
   applyProvider(provider);
   els.baseUrlInput.value = sessionStorage.getItem("paper-reader-base-url") || els.baseUrlInput.value;

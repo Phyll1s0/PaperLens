@@ -27,6 +27,8 @@ http://127.0.0.1:3000
 
 支持 OpenAI-compatible `/chat/completions` 接口：
 
+- DeepSeek Base URL：`https://api.deepseek.com`
+- DeepSeek Model：`deepseek-v4-flash` 或 `deepseek-v4-pro`
 - Kimi Code Base URL：`https://api.kimi.com/coding/v1`
 - Kimi Code Model：`kimi-for-coding`
 - Kimi 开放平台 Base URL：`https://api.moonshot.cn/v1`
@@ -47,6 +49,7 @@ http://127.0.0.1:3000
 │   └── styles.css
 ├── scripts/
 │   ├── extract_pdf_text.swift
+│   ├── diagnose_deepseek_key.mjs
 │   ├── diagnose_kimi_code_key.mjs
 │   ├── diagnose_kimi_key.mjs
 │   └── check_kimi_key.mjs

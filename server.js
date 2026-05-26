@@ -529,6 +529,7 @@ async function callModel(settings, messages, options = {}) {
           model: cleanSettings.model,
           messages,
           temperature: 0.2,
+          ...getProviderPayloadOptions(cleanSettings),
           ...(options.maxTokens ? { max_tokens: options.maxTokens } : {}),
         }),
       });
@@ -546,7 +547,8 @@ async function callModel(settings, messages, options = {}) {
     }
 
     const data = JSON.parse(text);
-    const content = data.choices?.[0]?.message?.content;
+    const message = data.choices?.[0]?.message;
+    const content = message?.content || message?.reasoning_content;
     if (!content) {
       throw new Error("Model response did not include message content.");
     }
@@ -555,6 +557,18 @@ async function callModel(settings, messages, options = {}) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function getProviderPayloadOptions(settings) {
+  if (settings.baseUrl.includes("api.deepseek.com")) {
+    return {
+      thinking: {
+        type: "disabled",
+      },
+    };
+  }
+
+  return {};
 }
 
 function formatModelError(status, body) {
