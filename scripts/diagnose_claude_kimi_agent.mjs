@@ -44,24 +44,9 @@ if (!apiKey) {
 
 const attempts = [
   {
-    name: "auth_token_kimi_for_coding",
-    env: { ANTHROPIC_AUTH_TOKEN: apiKey },
-    model: "kimi-for-coding",
-  },
-  {
     name: "api_key_kimi_for_coding",
     env: { ANTHROPIC_API_KEY: apiKey },
     model: "kimi-for-coding",
-  },
-  {
-    name: "auth_token_kimi_k2_5",
-    env: { ANTHROPIC_AUTH_TOKEN: apiKey },
-    model: "kimi-k2.5",
-  },
-  {
-    name: "api_key_kimi_k2_5",
-    env: { ANTHROPIC_API_KEY: apiKey },
-    model: "kimi-k2.5",
   },
 ];
 
@@ -97,6 +82,8 @@ function runClaudeAttempt(attempt) {
       attempt.model,
       "--output-format",
       "json",
+      "--max-budget-usd",
+      "500",
     ], {
       cwd: process.cwd(),
       timeout: 60_000,

@@ -9,6 +9,7 @@ const els = {
   baseUrlInput: document.querySelector("#baseUrlInput"),
   modelInput: document.querySelector("#modelInput"),
   apiKeyInput: document.querySelector("#apiKeyInput"),
+  agentBudgetInput: document.querySelector("#agentBudgetInput"),
   modelStatusText: document.querySelector("#modelStatusText"),
   modelDiagnosticsText: document.querySelector("#modelDiagnosticsText"),
   providerHintText: document.querySelector("#providerHintText"),
@@ -35,7 +36,12 @@ const PROVIDERS = {
   "claude-kimi-agent": {
     baseUrl: "local:claude-kimi",
     model: "kimi-for-coding",
-    hint: "通过本机 Claude Code CLI 调用 Kimi Code Key。需要已安装 claude；后端会禁用 Claude Code 工具，只传文本。",
+    hint: "通过本机 Claude Code CLI 调用你在页面输入的 Kimi Code Key。后端会禁用 Claude Code 工具，只传文本；预算上限可能仍受 Kimi Code 服务端控制。",
+  },
+  "claude-local": {
+    baseUrl: "local:claude-config",
+    model: "sonnet",
+    hint: "通过本机 Claude Code 已登录/已配置的账号或 key 调用，不使用页面 API Key。",
   },
   "kimi-code": {
     baseUrl: "https://api.kimi.com/coding/v1",
@@ -71,7 +77,7 @@ function bindEvents() {
     renderPaper();
   });
 
-  for (const input of [els.baseUrlInput, els.modelInput, els.apiKeyInput]) {
+  for (const input of [els.baseUrlInput, els.modelInput, els.apiKeyInput, els.agentBudgetInput]) {
     input.addEventListener("input", () => {
       saveSettings();
       updateModelDiagnostics();
@@ -86,6 +92,7 @@ function loadSettings() {
   els.baseUrlInput.value = sessionStorage.getItem("paper-reader-base-url") || els.baseUrlInput.value;
   els.modelInput.value = sessionStorage.getItem("paper-reader-model") || els.modelInput.value;
   els.apiKeyInput.value = sessionStorage.getItem("paper-reader-api-key") || "";
+  els.agentBudgetInput.value = sessionStorage.getItem("paper-reader-agent-budget") || "500";
 }
 
 function saveSettings() {
@@ -93,6 +100,7 @@ function saveSettings() {
   sessionStorage.setItem("paper-reader-base-url", els.baseUrlInput.value.trim());
   sessionStorage.setItem("paper-reader-model", els.modelInput.value.trim());
   sessionStorage.setItem("paper-reader-api-key", els.apiKeyInput.value.trim());
+  sessionStorage.setItem("paper-reader-agent-budget", els.agentBudgetInput.value.trim());
 }
 
 function getSettings() {
@@ -100,6 +108,7 @@ function getSettings() {
     baseUrl: els.baseUrlInput.value.trim(),
     model: normalizeModelNameInput(els.modelInput.value),
     apiKey: normalizeApiKeyInput(els.apiKeyInput.value),
+    agentBudgetUsd: Number(els.agentBudgetInput.value || 500),
   };
 }
 
@@ -154,7 +163,11 @@ function updateModelDiagnostics(remoteDiagnostics) {
 
 function getChatEndpoint(baseUrl) {
   if (baseUrl === "local:claude-kimi") {
-    return "local claude CLI -> https://api.kimi.com/coding/";
+    return "local claude CLI + page Kimi key -> https://api.kimi.com/coding/";
+  }
+
+  if (baseUrl === "local:claude-config") {
+    return "local claude CLI configured auth";
   }
 
   const clean = baseUrl.replace(/\/+$/, "");
@@ -358,8 +371,8 @@ async function askParagraph(paragraphId, input) {
 }
 
 function ensureModelSettings() {
-  const { apiKey, model } = getSettings();
-  if (!apiKey) {
+  const { apiKey, model, baseUrl } = getSettings();
+  if (!apiKey && baseUrl !== "local:claude-config") {
     setStatus("请输入 API Key", true);
     return false;
   }

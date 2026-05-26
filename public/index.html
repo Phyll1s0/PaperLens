@@ -23,7 +23,8 @@
             Provider
             <select id="providerSelect">
               <option value="deepseek">DeepSeek</option>
-              <option value="claude-kimi-agent">Claude Code + Kimi Code</option>
+              <option value="claude-kimi-agent">Claude Code + Kimi Code Key</option>
+              <option value="claude-local">Claude Code 本机配置</option>
               <option value="kimi-code">Kimi Code</option>
               <option value="kimi-platform">Kimi 开放平台</option>
               <option value="openai">OpenAI</option>
@@ -41,6 +42,10 @@
           <label>
             API Key
             <input id="apiKeyInput" type="password" autocomplete="off">
+          </label>
+          <label>
+            Agent Budget USD
+            <input id="agentBudgetInput" type="number" min="0" step="1" value="500">
           </label>
           <button id="pingButton" class="secondary-button full-width" type="button">测试连接</button>
           <p id="modelStatusText" class="status-text">尚未测试</p>

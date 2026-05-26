@@ -512,7 +512,11 @@ async function extractPdfText(pdfPath) {
 async function callModel(settings, messages, options = {}) {
   const cleanSettings = normalizeSettings(settings);
   if (cleanSettings.baseUrl === "local:claude-kimi") {
-    return callClaudeKimiAgent(cleanSettings, messages);
+    return callClaudeAgent(cleanSettings, messages, { usePageKimiKey: true });
+  }
+
+  if (cleanSettings.baseUrl === "local:claude-config") {
+    return callClaudeAgent(cleanSettings, messages, { usePageKimiKey: false });
   }
 
   const endpoint = getChatCompletionsEndpoint(cleanSettings.baseUrl);
@@ -563,7 +567,7 @@ async function callModel(settings, messages, options = {}) {
   }
 }
 
-function callClaudeKimiAgent(settings, messages) {
+function callClaudeAgent(settings, messages, options = {}) {
   const systemPrompt = messages
     .filter((message) => message.role === "system")
     .map((message) => message.content)
@@ -574,7 +578,7 @@ function callClaudeKimiAgent(settings, messages) {
     .join("\n\n");
 
   return new Promise((resolve, reject) => {
-    const child = spawn("claude", [
+    const args = [
       "-p",
       prompt,
       "--bare",
@@ -587,12 +591,25 @@ function callClaudeKimiAgent(settings, messages) {
       "json",
       "--system-prompt",
       systemPrompt,
-    ], {
+      "--max-budget-usd",
+      String(settings.agentBudgetUsd || 500),
+    ];
+
+    if (!options.usePageKimiKey) {
+      const bareIndex = args.indexOf("--bare");
+      if (bareIndex !== -1) {
+        args.splice(bareIndex, 1);
+      }
+    }
+
+    const child = spawn("claude", args, {
       cwd: __dirname,
       env: {
         ...process.env,
-        ANTHROPIC_BASE_URL: "https://api.kimi.com/coding/",
-        ANTHROPIC_API_KEY: settings.apiKey,
+        ...(options.usePageKimiKey ? {
+          ANTHROPIC_BASE_URL: "https://api.kimi.com/coding/",
+          ANTHROPIC_API_KEY: settings.apiKey,
+        } : {}),
         ENABLE_TOOL_SEARCH: "false",
       },
       stdio: ["pipe", "pipe", "pipe"],
@@ -742,8 +759,9 @@ function normalizeSettings(settings = {}) {
   const apiKey = String(settings.apiKey || "").trim();
   const model = normalizeModelName(String(settings.model || "").trim());
   const baseUrl = String(settings.baseUrl || "https://api.openai.com/v1").trim();
+  const agentBudgetUsd = Number(settings.agentBudgetUsd || 500);
 
-  if (!apiKey) {
+  if (!apiKey && baseUrl !== "local:claude-config") {
     throw new Error("API Key is required.");
   }
 
@@ -751,7 +769,7 @@ function normalizeSettings(settings = {}) {
     throw new Error("Model name is required.");
   }
 
-  return { apiKey: normalizeApiKey(apiKey), model, baseUrl };
+  return { apiKey: normalizeApiKey(apiKey), model, baseUrl, agentBudgetUsd };
 }
 
 function normalizeModelName(model) {
@@ -789,7 +807,9 @@ function getSettingsDiagnostics(settings = {}) {
 
   return {
     endpoint: baseUrl === "local:claude-kimi"
-      ? "local claude CLI -> https://api.kimi.com/coding/"
+      ? "local claude CLI + page Kimi key -> https://api.kimi.com/coding/"
+      : baseUrl === "local:claude-config"
+        ? "local claude CLI configured auth"
       : getChatCompletionsEndpoint(baseUrl),
     model,
     keyPresent: Boolean(apiKey),
