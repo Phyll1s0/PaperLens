@@ -756,10 +756,19 @@ function parseProviderError(body) {
 }
 
 function normalizeSettings(settings = {}) {
+  const provider = String(settings.provider || "").trim();
   const apiKey = String(settings.apiKey || "").trim();
   const model = normalizeModelName(String(settings.model || "").trim());
-  const baseUrl = String(settings.baseUrl || "https://api.openai.com/v1").trim();
+  let baseUrl = String(settings.baseUrl || "https://api.openai.com/v1").trim();
   const agentBudgetUsd = Number(settings.agentBudgetUsd || 500);
+
+  if (provider === "claude-kimi-agent") {
+    baseUrl = "local:claude-kimi";
+  }
+
+  if (provider === "claude-local") {
+    baseUrl = "local:claude-config";
+  }
 
   if (!apiKey && baseUrl !== "local:claude-config") {
     throw new Error("API Key is required.");
@@ -769,7 +778,7 @@ function normalizeSettings(settings = {}) {
     throw new Error("Model name is required.");
   }
 
-  return { apiKey: normalizeApiKey(apiKey), model, baseUrl, agentBudgetUsd };
+  return { provider, apiKey: normalizeApiKey(apiKey), model, baseUrl, agentBudgetUsd };
 }
 
 function normalizeModelName(model) {
@@ -796,6 +805,7 @@ function normalizeApiKey(apiKey) {
 }
 
 function getSettingsDiagnostics(settings = {}) {
+  const provider = String(settings.provider || "").trim();
   const baseUrl = String(settings.baseUrl || "https://api.openai.com/v1").trim();
   const model = normalizeModelName(String(settings.model || "").trim());
   const apiKey = normalizeApiKey(String(settings.apiKey || ""));
@@ -806,6 +816,7 @@ function getSettingsDiagnostics(settings = {}) {
       : apiKey ? "unknown" : "missing";
 
   return {
+    provider,
     endpoint: baseUrl === "local:claude-kimi"
       ? "local claude CLI + page Kimi key -> https://api.kimi.com/coding/"
       : baseUrl === "local:claude-config"

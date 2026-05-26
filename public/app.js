@@ -88,11 +88,14 @@ function bindEvents() {
 function loadSettings() {
   const provider = sessionStorage.getItem("paper-reader-provider") || "deepseek";
   els.providerSelect.value = provider;
-  applyProvider(provider);
-  els.baseUrlInput.value = sessionStorage.getItem("paper-reader-base-url") || els.baseUrlInput.value;
-  els.modelInput.value = sessionStorage.getItem("paper-reader-model") || els.modelInput.value;
   els.apiKeyInput.value = sessionStorage.getItem("paper-reader-api-key") || "";
   els.agentBudgetInput.value = sessionStorage.getItem("paper-reader-agent-budget") || "500";
+  applyProvider(provider);
+
+  if (!PROVIDERS[provider]) {
+    els.baseUrlInput.value = sessionStorage.getItem("paper-reader-base-url") || els.baseUrlInput.value;
+    els.modelInput.value = sessionStorage.getItem("paper-reader-model") || els.modelInput.value;
+  }
 }
 
 function saveSettings() {
@@ -105,6 +108,7 @@ function saveSettings() {
 
 function getSettings() {
   return {
+    provider: els.providerSelect.value,
     baseUrl: els.baseUrlInput.value.trim(),
     model: normalizeModelNameInput(els.modelInput.value),
     apiKey: normalizeApiKeyInput(els.apiKeyInput.value),
@@ -147,6 +151,7 @@ function updateModelDiagnostics(remoteDiagnostics) {
       : settings.apiKey ? "unknown" : "missing";
   const keyLength = settings.apiKey.length;
   const diagnostics = remoteDiagnostics || {
+    provider: settings.provider,
     endpoint,
     model: settings.model,
     keyPresent: Boolean(settings.apiKey),
@@ -155,6 +160,7 @@ function updateModelDiagnostics(remoteDiagnostics) {
   };
 
   els.modelDiagnosticsText.textContent = [
+    `Provider: ${diagnostics.provider || settings.provider}`,
     `Endpoint: ${diagnostics.endpoint}`,
     `Model: ${diagnostics.model}`,
     `Key: ${diagnostics.keyPresent ? `${diagnostics.keyPrefix}, ${diagnostics.keyLength} chars` : "missing"}`,
