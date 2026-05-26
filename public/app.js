@@ -731,7 +731,10 @@ function renderParagraphCard(paragraph) {
 
   const kicker = document.createElement("div");
   kicker.className = "paragraph-kicker";
-  kicker.textContent = `P${paragraph.order + 1} · 第 ${paragraph.pageNumber} 页`;
+  const pageLabel = paragraph.pageEndNumber && paragraph.pageEndNumber !== paragraph.pageNumber
+    ? `第 ${paragraph.pageNumber}-${paragraph.pageEndNumber} 页`
+    : `第 ${paragraph.pageNumber} 页`;
+  kicker.textContent = `P${paragraph.order + 1} · ${pageLabel}`;
 
   const status = document.createElement("span");
   status.className = `paragraph-status ${getAnalysisStatus(paragraph)}`;

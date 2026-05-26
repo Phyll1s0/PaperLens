@@ -364,7 +364,6 @@ function buildPaperRecord({ id, filename, pdfPath, extraction }) {
 
 function splitIntoParagraphs(pages) {
   const paragraphs = [];
-  let order = 0;
 
   for (const page of pages) {
     const blocks = getReadablePageBlocks(page);
@@ -375,11 +374,12 @@ function splitIntoParagraphs(pages) {
         continue;
       }
 
-      paragraphs.push({
-        id: `para_${order}_${randomUUID().slice(0, 8)}`,
+      appendParagraph(paragraphs, {
+        id: `para_${paragraphs.length}_${randomUUID().slice(0, 8)}`,
         kind: isLikelyHeading(clean) ? "heading" : "paragraph",
-        order,
+        order: paragraphs.length,
         pageNumber: page.pageNumber,
+        pageEndNumber: page.pageNumber,
         sectionId: "section_0",
         sourceText: clean,
         translation: "",
@@ -389,11 +389,69 @@ function splitIntoParagraphs(pages) {
         analysisStatus: "pending",
         analysisError: "",
       });
-      order += 1;
     }
   }
 
+  paragraphs.forEach((paragraph, index) => {
+    paragraph.order = index;
+  });
+
   return paragraphs;
+}
+
+function appendParagraph(paragraphs, paragraph) {
+  const previous = paragraphs.at(-1);
+  if (shouldMergeAcrossPage(previous, paragraph)) {
+    previous.sourceText = mergeParagraphText(previous.sourceText, paragraph.sourceText);
+    previous.pageEndNumber = paragraph.pageEndNumber;
+    return;
+  }
+
+  paragraphs.push(paragraph);
+}
+
+function shouldMergeAcrossPage(previous, paragraph) {
+  if (!previous || previous.kind !== "paragraph" || paragraph.kind !== "paragraph") {
+    return false;
+  }
+
+  const previousEndPage = previous.pageEndNumber || previous.pageNumber;
+  if (paragraph.pageNumber === previousEndPage) {
+    return previous.sourceText.endsWith("-") && startsLikeContinuation(paragraph.sourceText);
+  }
+
+  if (paragraph.pageNumber !== previousEndPage + 1) {
+    return false;
+  }
+
+  if (isLikelyHeading(paragraph.sourceText) || isLikelySectionOpening(paragraph.sourceText)) {
+    return false;
+  }
+
+  return previous.sourceText.endsWith("-") ||
+    !endsWithSentence(previous.sourceText) ||
+    startsLikeContinuation(paragraph.sourceText);
+}
+
+function mergeParagraphText(previous, next) {
+  if (previous.endsWith("-") && /^[a-z]/.test(next)) {
+    return `${previous.slice(0, -1)}${next}`;
+  }
+
+  return `${previous} ${next}`.replace(/\s+/g, " ").trim();
+}
+
+function endsWithSentence(text) {
+  return /[.!?。！？]["')\]]*$/.test(String(text || "").trim());
+}
+
+function startsLikeContinuation(text) {
+  return /^[a-z,;:)\]]/.test(String(text || "").trim());
+}
+
+function isLikelySectionOpening(text) {
+  return /^(abstract|introduction|related work|background|method|methods|methodology|experiments|results|discussion|conclusion|references|appendix)\b/i
+    .test(String(text || "").trim());
 }
 
 function getReadablePageBlocks(page) {
@@ -415,13 +473,14 @@ function getReadablePageBlocks(page) {
 }
 
 function isLikelyNonReadingBlock(block) {
-  const text = normalizeParagraph(block.text || "");
-  if (!text) {
+  const rawText = String(block.text || "").replace(/\s+/g, " ").trim();
+  if (/^(figure|fig\.|table)\s+\d+/i.test(rawText)) {
     return true;
   }
 
-  if (/^(figure|fig\.|table)\s+\d+/i.test(text)) {
-    return false;
+  const text = normalizeParagraph(rawText);
+  if (!text) {
+    return true;
   }
 
   if (/^[∗*†‡]/.test(text)) {
@@ -436,8 +495,11 @@ function isLikelyNonReadingBlock(block) {
   const averageLineLength = text.length / Math.max(1, lineCount);
   const sentenceLike = /[.!?。！？][)"'\]]?(\s|$)/.test(text);
   const manyDiagramTokens = /\b(LLM|Query|Chunk|Task|Final|Summary|Checker|Architect|Engineer|Code)\b/i.test(text);
+  const codeKeywords = (text.match(/\b(function|class|def|return|import|from|const|let|var|public|private|void|int|float|string)\b/gi) || []).length;
+  const codeSymbols = (text.match(/[{};=<>]/g) || []).length;
 
-  return lineCount >= 6 && averageLineLength < 34 && (!sentenceLike || manyDiagramTokens);
+  return (lineCount >= 6 && averageLineLength < 34 && (!sentenceLike || manyDiagramTokens)) ||
+    (lineCount >= 3 && codeKeywords >= 2 && codeSymbols >= 4 && averageLineLength < 90);
 }
 
 function extractTextBlocks(text) {
@@ -500,6 +562,8 @@ function extractTextBlocks(text) {
 
 function normalizeParagraph(text) {
   return String(text || "")
+    .replace(/^(?:Figure|Fig\.|Table)\s+\d+[a-z]?\s*:[^.!?。！？]*(?:[.!?。！？]|$)/i, " ")
+    .replace(/\s+(?:Figure|Fig\.|Table)\s+\d+[a-z]?\s*:[^.!?。！？]*(?:[.!?。！？]|$)/gi, " ")
     .replace(/[ \t]*\n[ \t]*/g, " ")
     .replace(/\s+/g, " ")
     .trim();
