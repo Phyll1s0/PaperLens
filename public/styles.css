@@ -375,6 +375,43 @@ select:focus {
   background: #fff;
 }
 
+.page-artifacts {
+  display: grid;
+  gap: 8px;
+}
+
+.page-artifact {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid #e0e6e1;
+  border-radius: 8px;
+  background: #f8faf7;
+}
+
+.page-artifact-meta {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 780;
+}
+
+.page-artifact p,
+.page-artifact pre {
+  margin: 0;
+  color: #2f3c38;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.page-artifact pre {
+  overflow: auto;
+  padding: 9px;
+  border-radius: 6px;
+  background: #ffffff;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
 .paragraph-card {
   border: 1px solid var(--line);
   border-radius: 8px;

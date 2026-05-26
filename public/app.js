@@ -662,7 +662,7 @@ function renderParagraphs(paper) {
     if (paragraph.pageNumber !== lastPageNumber) {
       const pageImage = getPageImage(paper, paragraph.pageNumber);
       if (pageImage) {
-        fragment.append(renderPagePreview(pageImage));
+        fragment.append(renderPagePreview(pageImage, getPageArtifacts(paper, paragraph.pageNumber)));
       }
       lastPageNumber = paragraph.pageNumber;
     }
@@ -685,7 +685,13 @@ function getPageImage(paper, pageNumber) {
   return (paper.pageImages || []).find((item) => item.pageNumber === pageNumber);
 }
 
-function renderPagePreview(pageImage) {
+function getPageArtifacts(paper, pageNumber) {
+  return (paper.pageArtifacts || [])
+    .filter((item) => item.pageNumber === pageNumber && item.type !== "figure-text")
+    .slice(0, 8);
+}
+
+function renderPagePreview(pageImage, artifacts = []) {
   const wrapper = document.createElement("section");
   wrapper.className = "page-preview";
 
@@ -704,7 +710,44 @@ function renderPagePreview(pageImage) {
   }
 
   wrapper.append(header, image);
+
+  if (artifacts.length) {
+    const artifactList = document.createElement("div");
+    artifactList.className = "page-artifacts";
+    for (const artifact of artifacts) {
+      artifactList.append(renderPageArtifact(artifact));
+    }
+    wrapper.append(artifactList);
+  }
+
   return wrapper;
+}
+
+function renderPageArtifact(artifact) {
+  const card = document.createElement("div");
+  card.className = `page-artifact ${artifact.type}`;
+
+  const meta = document.createElement("div");
+  meta.className = "page-artifact-meta";
+  meta.textContent = getArtifactLabel(artifact.type);
+
+  const body = artifact.type === "code" || artifact.type === "formula"
+    ? document.createElement("pre")
+    : document.createElement("p");
+  body.textContent = artifact.text;
+
+  card.append(meta, body);
+  return card;
+}
+
+function getArtifactLabel(type) {
+  const labels = {
+    caption: "图表说明",
+    code: "代码块",
+    formula: "公式",
+  };
+
+  return labels[type] || "页面材料";
 }
 
 function getReadingParagraphs(paper) {

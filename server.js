@@ -344,6 +344,7 @@ function buildPaperRecord({ id, filename, pdfPath, extraction }) {
     text: page.text || "",
     blocks: Array.isArray(page.blocks) ? page.blocks : [],
   }));
+  const pageArtifacts = extractPageArtifacts(extraction.pages);
 
   return {
     id,
@@ -356,6 +357,7 @@ function buildPaperRecord({ id, filename, pdfPath, extraction }) {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     pageImages,
+    pageArtifacts,
     extractionPages,
     sections,
     paragraphs,
@@ -474,7 +476,7 @@ function getReadablePageBlocks(page) {
 
 function isLikelyNonReadingBlock(block) {
   const rawText = String(block.text || "").replace(/\s+/g, " ").trim();
-  if (/^(figure|fig\.|table)\s+\d+/i.test(rawText)) {
+  if (classifyPageArtifact(block)) {
     return true;
   }
 
@@ -495,11 +497,99 @@ function isLikelyNonReadingBlock(block) {
   const averageLineLength = text.length / Math.max(1, lineCount);
   const sentenceLike = /[.!?。！？][)"'\]]?(\s|$)/.test(text);
   const manyDiagramTokens = /\b(LLM|Query|Chunk|Task|Final|Summary|Checker|Architect|Engineer|Code)\b/i.test(text);
-  const codeKeywords = (text.match(/\b(function|class|def|return|import|from|const|let|var|public|private|void|int|float|string)\b/gi) || []).length;
+  return lineCount >= 6 && averageLineLength < 34 && (!sentenceLike || manyDiagramTokens);
+}
+
+function extractPageArtifacts(pages) {
+  const artifacts = [];
+
+  for (const page of pages) {
+    const blocks = Array.isArray(page.blocks) ? page.blocks : [];
+    blocks.forEach((block, index) => {
+      const type = classifyPageArtifact(block);
+      if (!type) {
+        return;
+      }
+
+      const text = normalizeArtifactText(block.text);
+      if (!text) {
+        return;
+      }
+
+      artifacts.push({
+        id: `artifact_${page.pageNumber}_${index}`,
+        type,
+        pageNumber: page.pageNumber,
+        text,
+        x: block.x ?? null,
+        y: block.y ?? null,
+        width: block.width ?? null,
+        height: block.height ?? null,
+        lineCount: block.lineCount || 1,
+      });
+    });
+  }
+
+  return artifacts;
+}
+
+function classifyPageArtifact(block) {
+  const text = normalizeArtifactText(block?.text || "");
+  if (!text) {
+    return "";
+  }
+
+  if (/^(figure|fig\.|table)\s+\d+[a-z]?\s*:/i.test(text)) {
+    return "caption";
+  }
+
+  if (isLikelyFormulaBlock(text, block)) {
+    return "formula";
+  }
+
+  if (isLikelyCodeBlock(text, block)) {
+    return "code";
+  }
+
+  if (isLikelyFigureTextBlock(text, block)) {
+    return "figure-text";
+  }
+
+  return "";
+}
+
+function isLikelyFormulaBlock(text, block = {}) {
+  const lineCount = Number(block.lineCount || 1);
+  const mathTokens = (text.match(/[=≤≥≠≈∑∏∫√∞→←↔±×÷∂λμσγαβθΩΔ]|\b(argmin|argmax|softmax|log|exp|min|max)\b/gi) || []).length;
+  const sentenceCount = (text.match(/[.!?。！？]/g) || []).length;
+
+  return text.length <= 260 && lineCount <= 5 && mathTokens >= 2 && sentenceCount <= 1;
+}
+
+function isLikelyCodeBlock(text, block = {}) {
+  const lineCount = Number(block.lineCount || 1);
+  if (/^(import|from|def|class|function|const|let|var)\b/i.test(text)) {
+    return true;
+  }
+
+  const codeKeywords = (text.match(/\b(function|class|def|return|import|from|const|let|var|public|private|void|int|float|string|for|while|if|else)\b/gi) || []).length;
   const codeSymbols = (text.match(/[{};=<>]/g) || []).length;
 
-  return (lineCount >= 6 && averageLineLength < 34 && (!sentenceLike || manyDiagramTokens)) ||
-    (lineCount >= 3 && codeKeywords >= 2 && codeSymbols >= 4 && averageLineLength < 90);
+  return lineCount >= 3 && codeKeywords >= 2 && codeSymbols >= 4 && text.length <= 1800;
+}
+
+function isLikelyFigureTextBlock(text, block = {}) {
+  const lineCount = Number(block.lineCount || 1);
+  const averageLineLength = text.length / Math.max(1, lineCount);
+  const diagramTokens = /\b(LLM|Query|Chunk|Task|Final|Summary|Checker|Architect|Engineer|Code|Message Passing)\b/i.test(text);
+
+  return lineCount >= 6 && averageLineLength < 34 && diagramTokens;
+}
+
+function normalizeArtifactText(text) {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function extractTextBlocks(text) {
