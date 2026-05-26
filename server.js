@@ -759,16 +759,8 @@ function normalizeSettings(settings = {}) {
   const provider = String(settings.provider || "").trim();
   const apiKey = String(settings.apiKey || "").trim();
   const model = normalizeModelName(String(settings.model || "").trim());
-  let baseUrl = String(settings.baseUrl || "https://api.openai.com/v1").trim();
+  const baseUrl = resolveBaseUrlForProvider(provider, String(settings.baseUrl || "https://api.openai.com/v1").trim());
   const agentBudgetUsd = Number(settings.agentBudgetUsd || 500);
-
-  if (provider === "claude-kimi-agent") {
-    baseUrl = "local:claude-kimi";
-  }
-
-  if (provider === "claude-local") {
-    baseUrl = "local:claude-config";
-  }
 
   if (!apiKey && baseUrl !== "local:claude-config") {
     throw new Error("API Key is required.");
@@ -806,7 +798,7 @@ function normalizeApiKey(apiKey) {
 
 function getSettingsDiagnostics(settings = {}) {
   const provider = String(settings.provider || "").trim();
-  const baseUrl = String(settings.baseUrl || "https://api.openai.com/v1").trim();
+  const baseUrl = resolveBaseUrlForProvider(provider, String(settings.baseUrl || "https://api.openai.com/v1").trim());
   const model = normalizeModelName(String(settings.model || "").trim());
   const apiKey = normalizeApiKey(String(settings.apiKey || ""));
   const keyPrefix = apiKey.startsWith("sk-kimi-")
@@ -827,6 +819,18 @@ function getSettingsDiagnostics(settings = {}) {
     keyPrefix,
     keyLength: apiKey.length,
   };
+}
+
+function resolveBaseUrlForProvider(provider, baseUrl) {
+  if (provider === "claude-kimi-agent") {
+    return "local:claude-kimi";
+  }
+
+  if (provider === "claude-local") {
+    return "local:claude-config";
+  }
+
+  return baseUrl;
 }
 
 function getChatCompletionsEndpoint(baseUrl) {
