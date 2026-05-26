@@ -29,6 +29,7 @@ http://127.0.0.1:3000
 
 - DeepSeek Base URL：`https://api.deepseek.com`
 - DeepSeek Model：`deepseek-v4-flash` 或 `deepseek-v4-pro`
+- Claude Code + Kimi Code：本机 `claude` CLI + Kimi Code Key，Base URL 显示为 `local:claude-kimi`
 - Kimi Code Base URL：`https://api.kimi.com/coding/v1`
 - Kimi Code Model：`kimi-for-coding`
 - Kimi 开放平台 Base URL：`https://api.moonshot.cn/v1`
@@ -38,6 +39,8 @@ http://127.0.0.1:3000
 - API Key 只保存在当前浏览器 `sessionStorage`，不会写入项目文件。
 
 注意：`www.kimi.com/code/console` 生成的是 Kimi Code Key，它和 Kimi 开放平台 Key 不通用。Kimi Code Key 使用 `https://api.kimi.com/coding/v1` 和 `kimi-for-coding`，但官方可能限制它只给 Coding Agent 使用。论文阅读这类普通应用建议使用 Kimi 开放平台 Key。
+
+如果要在 PaperLens 中使用 Kimi Code Key，可以选择 `Claude Code + Kimi Code` Provider。它不会直接从网页伪装调用 Kimi Code API，而是让后端调用本机已安装的 Claude Code CLI，并通过 Anthropic-compatible endpoint `https://api.kimi.com/coding/` 访问 Kimi Code。为降低风险，PaperLens 调用时会使用 `--bare`、`--no-session-persistence`、`--tools ""`，只传入文本任务。
 
 ## 项目结构
 

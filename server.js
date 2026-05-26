@@ -1,5 +1,5 @@
 import http from "node:http";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile, stat } from "node:fs/promises";
 import path from "node:path";
@@ -511,6 +511,10 @@ async function extractPdfText(pdfPath) {
 
 async function callModel(settings, messages, options = {}) {
   const cleanSettings = normalizeSettings(settings);
+  if (cleanSettings.baseUrl === "local:claude-kimi") {
+    return callClaudeKimiAgent(cleanSettings, messages);
+  }
+
   const endpoint = getChatCompletionsEndpoint(cleanSettings.baseUrl);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 90_000);
@@ -557,6 +561,124 @@ async function callModel(settings, messages, options = {}) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function callClaudeKimiAgent(settings, messages) {
+  const systemPrompt = messages
+    .filter((message) => message.role === "system")
+    .map((message) => message.content)
+    .join("\n\n") || "你是一个严谨的论文阅读助手。";
+  const prompt = messages
+    .filter((message) => message.role !== "system")
+    .map((message) => `${message.role.toUpperCase()}:\n${message.content}`)
+    .join("\n\n");
+
+  return new Promise((resolve, reject) => {
+    const child = spawn("claude", [
+      "-p",
+      prompt,
+      "--bare",
+      "--no-session-persistence",
+      "--tools",
+      "",
+      "--model",
+      settings.model || "kimi-for-coding",
+      "--output-format",
+      "json",
+      "--system-prompt",
+      systemPrompt,
+    ], {
+      cwd: __dirname,
+      env: {
+        ...process.env,
+        ANTHROPIC_BASE_URL: "https://api.kimi.com/coding/",
+        ANTHROPIC_API_KEY: settings.apiKey,
+        ENABLE_TOOL_SEARCH: "false",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    const timeout = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new Error("Claude Code 本地 Agent 调用超时。"));
+    }, 180_000);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      if (error.code === "ENOENT") {
+        reject(new Error("未找到 claude CLI。请先安装并配置 Claude Code。"));
+        return;
+      }
+
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      const result = parseClaudeJsonResult(stdout);
+
+      if (code !== 0) {
+        reject(new Error(formatClaudeAgentError(result, stderr, code)));
+        return;
+      }
+
+      if (!result) {
+        reject(new Error(`Claude Code 没有返回可解析结果。${stderr ? `stderr: ${stderr.slice(0, 500)}` : ""}`));
+        return;
+      }
+
+      if (typeof result.result === "string" && result.result.startsWith("API Error:")) {
+        reject(new Error(formatClaudeAgentError(result, stderr, code)));
+        return;
+      }
+
+      resolve(String(result.result || result.content || stdout).trim());
+    });
+
+    child.stdin.end();
+  });
+}
+
+function parseClaudeJsonResult(stdout) {
+  try {
+    return JSON.parse(stdout);
+  } catch {
+    const match = stdout.match(/\{[\s\S]*\}/);
+    if (!match) {
+      return null;
+    }
+
+    try {
+      return JSON.parse(match[0]);
+    } catch {
+      return null;
+    }
+  }
+}
+
+function formatClaudeAgentError(result, stderr, code) {
+  const output = typeof result?.result === "string" ? result.result : "";
+
+  if (output.includes("budget_exceeded") || output.includes("Budget has been exceeded")) {
+    return "Kimi Code / Claude Code 预算已超限：Key 已经通过本地 Claude Code 路径认证，但当前账户预算或额度已用尽。";
+  }
+
+  if (output.includes("access_terminated_error")) {
+    return "Kimi Code 拒绝访问：请确认当前调用确实通过受支持的 Coding Agent。";
+  }
+
+  return [
+    `Claude Code 本地 Agent 调用失败，退出码 ${code}。`,
+    output ? `输出：${output.slice(0, 800)}` : "",
+    stderr ? `stderr：${stderr.slice(0, 800)}` : "",
+  ].filter(Boolean).join(" ");
 }
 
 function getProviderPayloadOptions(settings) {
@@ -666,7 +788,9 @@ function getSettingsDiagnostics(settings = {}) {
       : apiKey ? "unknown" : "missing";
 
   return {
-    endpoint: getChatCompletionsEndpoint(baseUrl),
+    endpoint: baseUrl === "local:claude-kimi"
+      ? "local claude CLI -> https://api.kimi.com/coding/"
+      : getChatCompletionsEndpoint(baseUrl),
     model,
     keyPresent: Boolean(apiKey),
     keyPrefix,

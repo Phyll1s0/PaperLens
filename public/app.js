@@ -32,6 +32,11 @@ const PROVIDERS = {
     model: "deepseek-v4-flash",
     hint: "DeepSeek OpenAI-compatible API。可改用 deepseek-v4-pro 获得更强模型。",
   },
+  "claude-kimi-agent": {
+    baseUrl: "local:claude-kimi",
+    model: "kimi-for-coding",
+    hint: "通过本机 Claude Code CLI 调用 Kimi Code Key。需要已安装 claude；后端会禁用 Claude Code 工具，只传文本。",
+  },
   "kimi-code": {
     baseUrl: "https://api.kimi.com/coding/v1",
     model: "kimi-for-coding",
@@ -148,6 +153,10 @@ function updateModelDiagnostics(remoteDiagnostics) {
 }
 
 function getChatEndpoint(baseUrl) {
+  if (baseUrl === "local:claude-kimi") {
+    return "local claude CLI -> https://api.kimi.com/coding/";
+  }
+
   const clean = baseUrl.replace(/\/+$/, "");
   return clean.endsWith("/chat/completions") ? clean : `${clean}/chat/completions`;
 }
