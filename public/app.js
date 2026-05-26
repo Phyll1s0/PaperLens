@@ -605,7 +605,12 @@ function renderPaper() {
   els.paperMeta.textContent = `${paper.pageCount} 页`;
   const readingParagraphs = getReadingParagraphs(paper);
   const analyzedCount = readingParagraphs.filter((paragraph) => !needsAnalysis(paragraph)).length;
-  const segmentLabel = paper.segmentationMode === "ai" ? "AI 分段" : "基础分段";
+  const segmentLabels = {
+    ai: "AI 分段",
+    layout: "版面分段",
+    heuristic: "基础分段",
+  };
+  const segmentLabel = segmentLabels[paper.segmentationMode] || "基础分段";
   els.paperStats.textContent = `${readingParagraphs.length} 个段落 · 已讲解 ${analyzedCount} · ${segmentLabel}`;
   renderOutline(paper);
   renderParagraphs(paper);

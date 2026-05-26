@@ -342,6 +342,7 @@ function buildPaperRecord({ id, filename, pdfPath, extraction }) {
   const extractionPages = extraction.pages.map((page) => ({
     pageNumber: page.pageNumber,
     text: page.text || "",
+    blocks: Array.isArray(page.blocks) ? page.blocks : [],
   }));
 
   return {
@@ -351,7 +352,7 @@ function buildPaperRecord({ id, filename, pdfPath, extraction }) {
     pdfPath,
     pageCount: extraction.pageCount,
     status: "ready",
-    segmentationMode: "heuristic",
+    segmentationMode: extraction.pages.some((page) => Array.isArray(page.blocks) && page.blocks.length) ? "layout" : "heuristic",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     pageImages,
@@ -366,10 +367,10 @@ function splitIntoParagraphs(pages) {
   let order = 0;
 
   for (const page of pages) {
-    const blocks = extractTextBlocks(page.text);
+    const blocks = getReadablePageBlocks(page);
 
     for (const block of blocks) {
-      const clean = normalizeParagraph(block);
+      const clean = normalizeParagraph(typeof block === "string" ? block : block.text);
       if (!clean || (clean.length < 20 && !isLikelyHeading(clean))) {
         continue;
       }
@@ -393,6 +394,50 @@ function splitIntoParagraphs(pages) {
   }
 
   return paragraphs;
+}
+
+function getReadablePageBlocks(page) {
+  if (Array.isArray(page.blocks) && page.blocks.length) {
+    const blocks = page.blocks
+      .filter((block) => block?.text && !isLikelyNonReadingBlock(block))
+      .map((block) => ({
+        ...block,
+        text: normalizeParagraph(block.text),
+      }))
+      .filter((block) => block.text);
+
+    if (blocks.length) {
+      return blocks;
+    }
+  }
+
+  return extractTextBlocks(page.text);
+}
+
+function isLikelyNonReadingBlock(block) {
+  const text = normalizeParagraph(block.text || "");
+  if (!text) {
+    return true;
+  }
+
+  if (/^(figure|fig\.|table)\s+\d+/i.test(text)) {
+    return false;
+  }
+
+  if (/^[∗*†‡]/.test(text)) {
+    return true;
+  }
+
+  if (/^\([a-z]\)/i.test(text) && /\([b-z]\)/i.test(text) && !/[.!?。！？]/.test(text)) {
+    return true;
+  }
+
+  const lineCount = Number(block.lineCount || 1);
+  const averageLineLength = text.length / Math.max(1, lineCount);
+  const sentenceLike = /[.!?。！？][)"'\]]?(\s|$)/.test(text);
+  const manyDiagramTokens = /\b(LLM|Query|Chunk|Task|Final|Summary|Checker|Architect|Engineer|Code)\b/i.test(text);
+
+  return lineCount >= 6 && averageLineLength < 34 && (!sentenceLike || manyDiagramTokens);
 }
 
 function extractTextBlocks(text) {
@@ -534,7 +579,7 @@ function chunkPagesForSegmentation(pages) {
   const maxPages = 3;
 
   for (const page of pages) {
-    const textLength = String(page.text || "").length;
+    const textLength = getSegmentationPageText(page).length;
     if (current.length && (current.length >= maxPages || currentChars + textLength > maxChars)) {
       chunks.push(current);
       current = [];
@@ -556,7 +601,7 @@ async function segmentPageChunkWithAi(paper, pages, settings) {
   const pageText = pages
     .map((page) => [
       `--- Page ${page.pageNumber} ---`,
-      String(page.text || "").slice(0, 12_000),
+      getSegmentationPageText(page).slice(0, 12_000),
     ].join("\n"))
     .join("\n\n");
 
@@ -601,6 +646,20 @@ async function segmentPageChunkWithAi(paper, pages, settings) {
       sourceText: normalizeParagraph(item.sourceText || item.text || ""),
     }))
     .filter((item) => item.sourceText);
+}
+
+function getSegmentationPageText(page) {
+  const blocks = getReadablePageBlocks(page);
+  if (blocks.length) {
+    return blocks
+      .map((block, index) => {
+        const text = typeof block === "string" ? block : block.text;
+        return `[B${index + 1}] ${normalizeParagraph(text)}`;
+      })
+      .join("\n\n");
+  }
+
+  return String(page.text || "");
 }
 
 function buildParagraphsFromSegmentItems(items) {
