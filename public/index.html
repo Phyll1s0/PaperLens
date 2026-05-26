@@ -56,6 +56,14 @@
         <section class="panel">
           <h2>PDF</h2>
           <input id="pdfInput" class="file-input" type="file" accept="application/pdf,.pdf">
+          <label class="check-row">
+            <input id="aiSegmentInput" type="checkbox" checked>
+            AI 分段
+          </label>
+          <label class="check-row">
+            <input id="autoAnalyzeInput" type="checkbox" checked>
+            上传后自动翻译讲解
+          </label>
           <button id="uploadButton" class="primary-button" type="button">上传并解析</button>
           <p id="statusText" class="status-text">等待上传</p>
         </section>
@@ -75,6 +83,10 @@
             <p id="paperStats">段落会显示在这里</p>
           </div>
           <div class="toolbar-actions">
+            <div class="toolbar-buttons">
+              <button id="autoAnalyzeButton" class="secondary-button" type="button">自动翻译讲解</button>
+              <button id="stopAutoButton" class="secondary-button hidden" type="button">停止</button>
+            </div>
             <input id="searchInput" type="search" placeholder="搜索段落">
           </div>
         </div>

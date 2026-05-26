@@ -1,6 +1,7 @@
 node_modules/
 uploads/
 data/
+paper-assets/
 .DS_Store
 *.log
 .cache/

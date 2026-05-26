@@ -2,6 +2,16 @@ const state = {
   paper: null,
   query: "",
   busyParagraphId: null,
+  autoAnalyze: {
+    running: false,
+    stopRequested: false,
+    completed: 0,
+    failed: 0,
+    total: 0,
+    currentId: null,
+    startedAt: 0,
+    timer: null,
+  },
 };
 
 const els = {
@@ -14,6 +24,8 @@ const els = {
   modelDiagnosticsText: document.querySelector("#modelDiagnosticsText"),
   providerHintText: document.querySelector("#providerHintText"),
   pdfInput: document.querySelector("#pdfInput"),
+  aiSegmentInput: document.querySelector("#aiSegmentInput"),
+  autoAnalyzeInput: document.querySelector("#autoAnalyzeInput"),
   uploadButton: document.querySelector("#uploadButton"),
   statusText: document.querySelector("#statusText"),
   paperList: document.querySelector("#paperList"),
@@ -24,6 +36,8 @@ const els = {
   paragraphList: document.querySelector("#paragraphList"),
   outline: document.querySelector("#outline"),
   searchInput: document.querySelector("#searchInput"),
+  autoAnalyzeButton: document.querySelector("#autoAnalyzeButton"),
+  stopAutoButton: document.querySelector("#stopAutoButton"),
   pingButton: document.querySelector("#pingButton"),
 };
 
@@ -64,10 +78,13 @@ loadSettings();
 bindEvents();
 loadRecentPapers();
 updateModelDiagnostics();
+updateAutoButtons();
 
 function bindEvents() {
   els.uploadButton.addEventListener("click", uploadPdf);
   els.pingButton.addEventListener("click", pingModel);
+  els.autoAnalyzeButton.addEventListener("click", () => startAutoAnalyze());
+  els.stopAutoButton.addEventListener("click", stopAutoAnalyze);
   els.providerSelect.addEventListener("change", () => {
     applyProvider(els.providerSelect.value);
     saveSettings();
@@ -83,6 +100,10 @@ function bindEvents() {
       updateModelDiagnostics();
     });
   }
+
+  for (const input of [els.aiSegmentInput, els.autoAnalyzeInput]) {
+    input.addEventListener("change", saveSettings);
+  }
 }
 
 function loadSettings() {
@@ -90,6 +111,8 @@ function loadSettings() {
   els.providerSelect.value = provider;
   els.apiKeyInput.value = sessionStorage.getItem("paper-reader-api-key") || "";
   els.agentBudgetInput.value = sessionStorage.getItem("paper-reader-agent-budget") || "500";
+  els.aiSegmentInput.checked = sessionStorage.getItem("paper-reader-ai-segment") !== "false";
+  els.autoAnalyzeInput.checked = sessionStorage.getItem("paper-reader-auto-analyze") !== "false";
   applyProvider(provider);
 
   if (!PROVIDERS[provider]) {
@@ -104,6 +127,8 @@ function saveSettings() {
   sessionStorage.setItem("paper-reader-model", els.modelInput.value.trim());
   sessionStorage.setItem("paper-reader-api-key", els.apiKeyInput.value.trim());
   sessionStorage.setItem("paper-reader-agent-budget", els.agentBudgetInput.value.trim());
+  sessionStorage.setItem("paper-reader-ai-segment", String(els.aiSegmentInput.checked));
+  sessionStorage.setItem("paper-reader-auto-analyze", String(els.autoAnalyzeInput.checked));
 }
 
 function getSettings() {
@@ -219,10 +244,68 @@ async function uploadPdf() {
     setStatus("解析完成");
     renderPaper();
     loadRecentPapers();
+    setBusy(false);
+    await runPostUploadPipeline();
   } catch (error) {
     setStatus(error.message, true);
   } finally {
     setBusy(false);
+  }
+}
+
+async function runPostUploadPipeline() {
+  if (!state.paper) {
+    return;
+  }
+
+  if (!ensureModelSettings({ quiet: true })) {
+    setStatus("解析完成。输入 API Key 后可以启动自动翻译讲解。");
+    return;
+  }
+
+  if (els.aiSegmentInput.checked) {
+    await segmentPaperWithAi({ continueOnError: true });
+  }
+
+  if (els.autoAnalyzeInput.checked) {
+    await startAutoAnalyze();
+  }
+}
+
+async function segmentPaperWithAi(options = {}) {
+  if (!state.paper) {
+    return false;
+  }
+
+  if (!ensureModelSettings({ quiet: options.continueOnError })) {
+    return false;
+  }
+
+  const startedAt = Date.now();
+  const timer = window.setInterval(() => {
+    const elapsed = Math.round((Date.now() - startedAt) / 1000);
+    setStatus(`AI 正在重新分段 · 已用 ${elapsed}s`);
+  }, 1000);
+  setStatus("AI 正在重新分段 · 已用 0s");
+
+  try {
+    const response = await fetch(`/api/papers/${encodeURIComponent(state.paper.id)}/segment`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ settings: getSettings() }),
+    });
+    const result = await readResponse(response);
+    state.paper = result.paper;
+    renderPaper();
+    loadRecentPapers();
+    setStatus(`AI 分段完成：${getReadingParagraphs(state.paper).length} 个段落`);
+    return true;
+  } catch (error) {
+    const message = `AI 分段失败，继续使用基础分段：${error.message}`;
+    setStatus(message, !options.continueOnError);
+    return false;
+  } finally {
+    window.clearInterval(timer);
   }
 }
 
@@ -311,33 +394,126 @@ async function pingModel() {
   }
 }
 
-async function analyzeParagraph(paragraphId) {
-  if (!ensureModelSettings()) {
+async function analyzeParagraph(paragraphId, options = {}) {
+  if (!ensureModelSettings({ quiet: options.fromAuto })) {
     return;
   }
 
   state.busyParagraphId = paragraphId;
+  markParagraph(paragraphId, { analysisStatus: "running", analysisError: "" });
   renderPaper();
 
   try {
-    const response = await fetch("/api/analyze", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        paperId: state.paper.id,
-        paragraphId,
-        settings: getSettings(),
-      }),
-    });
-    const result = await readResponse(response);
-    replaceParagraph(result.paragraph);
-    setStatus("分析完成");
+    const paragraph = await requestAnalyzeParagraph(paragraphId);
+    replaceParagraph(paragraph);
+    if (!options.fromAuto) {
+      setStatus("分析完成");
+    }
+    return paragraph;
   } catch (error) {
-    setStatus(error.message, true);
+    markParagraph(paragraphId, { analysisStatus: "error", analysisError: error.message });
+    if (!options.fromAuto) {
+      setStatus(error.message, true);
+      return null;
+    }
+    throw error;
   } finally {
     state.busyParagraphId = null;
     renderPaper();
   }
+}
+
+async function requestAnalyzeParagraph(paragraphId) {
+  const response = await fetch("/api/analyze", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      paperId: state.paper.id,
+      paragraphId,
+      settings: getSettings(),
+    }),
+  });
+  const result = await readResponse(response);
+  return result.paragraph;
+}
+
+async function startAutoAnalyze() {
+  if (!state.paper || state.autoAnalyze.running) {
+    return;
+  }
+
+  if (!ensureModelSettings()) {
+    return;
+  }
+
+  const pending = getReadingParagraphs(state.paper).filter(needsAnalysis);
+  if (!pending.length) {
+    setStatus("没有待分析段落");
+    updateAutoButtons();
+    return;
+  }
+
+  state.autoAnalyze = {
+    running: true,
+    stopRequested: false,
+    completed: 0,
+    failed: 0,
+    total: pending.length,
+    currentId: null,
+    startedAt: Date.now(),
+    timer: window.setInterval(updateAutoStatus, 1000),
+  };
+  updateAutoButtons();
+
+  for (const paragraph of pending) {
+    if (state.autoAnalyze.stopRequested) {
+      break;
+    }
+
+    state.autoAnalyze.currentId = paragraph.id;
+    updateAutoStatus();
+
+    try {
+      await analyzeParagraph(paragraph.id, { fromAuto: true });
+      state.autoAnalyze.completed += 1;
+    } catch {
+      state.autoAnalyze.failed += 1;
+    }
+
+    updateAutoStatus();
+  }
+
+  const stopped = state.autoAnalyze.stopRequested;
+  const completed = state.autoAnalyze.completed;
+  const failed = state.autoAnalyze.failed;
+  clearAutoTimer();
+  state.autoAnalyze.running = false;
+  state.autoAnalyze.stopRequested = false;
+  state.autoAnalyze.currentId = null;
+  updateAutoButtons();
+  renderPaper();
+  loadRecentPapers();
+
+  if (stopped) {
+    setStatus(`已停止自动分析：完成 ${completed} 段，失败 ${failed} 段`);
+    return;
+  }
+
+  setStatus(`自动分析完成：完成 ${completed} 段，失败 ${failed} 段`, failed > 0);
+}
+
+function stopAutoAnalyze() {
+  if (!state.autoAnalyze.running) {
+    return;
+  }
+
+  state.autoAnalyze.stopRequested = true;
+  setStatus("正在停止，当前段落完成后会暂停");
+  updateAutoButtons();
+}
+
+function needsAnalysis(paragraph) {
+  return !paragraph.translation && !paragraph.explanation && paragraph.analysisStatus !== "done";
 }
 
 async function askParagraph(paragraphId, input) {
@@ -376,15 +552,19 @@ async function askParagraph(paragraphId, input) {
   }
 }
 
-function ensureModelSettings() {
+function ensureModelSettings(options = {}) {
   const { apiKey, model, baseUrl } = getSettings();
   if (!apiKey && baseUrl !== "local:claude-config") {
-    setStatus("请输入 API Key", true);
+    if (!options.quiet) {
+      setStatus("请输入 API Key", true);
+    }
     return false;
   }
 
   if (!model) {
-    setStatus("请输入模型名称", true);
+    if (!options.quiet) {
+      setStatus("请输入模型名称", true);
+    }
     return false;
   }
 
@@ -398,6 +578,17 @@ function replaceParagraph(nextParagraph) {
   }
 }
 
+function markParagraph(paragraphId, patch) {
+  if (!state.paper) {
+    return;
+  }
+
+  const paragraph = state.paper.paragraphs.find((item) => item.id === paragraphId);
+  if (paragraph) {
+    Object.assign(paragraph, patch);
+  }
+}
+
 function renderPaper() {
   const paper = state.paper;
 
@@ -405,15 +596,20 @@ function renderPaper() {
     els.emptyState.classList.remove("hidden");
     els.paragraphList.innerHTML = "";
     els.outline.innerHTML = "";
+    updateAutoButtons();
     return;
   }
 
   els.emptyState.classList.add("hidden");
   els.paperTitle.textContent = paper.title || paper.filename;
   els.paperMeta.textContent = `${paper.pageCount} 页`;
-  els.paperStats.textContent = `${getReadingParagraphs(paper).length} 个段落`;
+  const readingParagraphs = getReadingParagraphs(paper);
+  const analyzedCount = readingParagraphs.filter((paragraph) => !needsAnalysis(paragraph)).length;
+  const segmentLabel = paper.segmentationMode === "ai" ? "AI 分段" : "基础分段";
+  els.paperStats.textContent = `${readingParagraphs.length} 个段落 · 已讲解 ${analyzedCount} · ${segmentLabel}`;
   renderOutline(paper);
   renderParagraphs(paper);
+  updateAutoButtons();
 }
 
 function renderOutline(paper) {
@@ -455,8 +651,17 @@ function renderParagraphs(paper) {
 
   const fragment = document.createDocumentFragment();
   let lastSectionId = "";
+  let lastPageNumber = 0;
 
   for (const paragraph of paragraphs) {
+    if (paragraph.pageNumber !== lastPageNumber) {
+      const pageImage = getPageImage(paper, paragraph.pageNumber);
+      if (pageImage) {
+        fragment.append(renderPagePreview(pageImage));
+      }
+      lastPageNumber = paragraph.pageNumber;
+    }
+
     if (paragraph.sectionId !== lastSectionId) {
       const section = paper.sections.find((item) => item.id === paragraph.sectionId);
       if (section) {
@@ -469,6 +674,32 @@ function renderParagraphs(paper) {
   }
 
   els.paragraphList.replaceChildren(fragment);
+}
+
+function getPageImage(paper, pageNumber) {
+  return (paper.pageImages || []).find((item) => item.pageNumber === pageNumber);
+}
+
+function renderPagePreview(pageImage) {
+  const wrapper = document.createElement("section");
+  wrapper.className = "page-preview";
+
+  const header = document.createElement("div");
+  header.className = "page-preview-header";
+  header.textContent = `第 ${pageImage.pageNumber} 页`;
+
+  const image = document.createElement("img");
+  image.src = pageImage.imagePath;
+  image.alt = `第 ${pageImage.pageNumber} 页页面快照`;
+  image.loading = "lazy";
+  image.decoding = "async";
+  if (pageImage.imageWidth && pageImage.imageHeight) {
+    image.width = pageImage.imageWidth;
+    image.height = pageImage.imageHeight;
+  }
+
+  wrapper.append(header, image);
+  return wrapper;
 }
 
 function getReadingParagraphs(paper) {
@@ -490,18 +721,26 @@ function renderParagraphCard(paragraph) {
   const header = document.createElement("div");
   header.className = "paragraph-header";
 
+  const meta = document.createElement("div");
+  meta.className = "paragraph-meta";
+
   const kicker = document.createElement("div");
   kicker.className = "paragraph-kicker";
   kicker.textContent = `P${paragraph.order + 1} · 第 ${paragraph.pageNumber} 页`;
 
+  const status = document.createElement("span");
+  status.className = `paragraph-status ${getAnalysisStatus(paragraph)}`;
+  status.textContent = getAnalysisStatusText(paragraph);
+  meta.append(kicker, status);
+
   const analyzeButton = document.createElement("button");
   analyzeButton.className = "secondary-button";
   analyzeButton.type = "button";
-  analyzeButton.textContent = state.busyParagraphId === paragraph.id ? "处理中" : "翻译与讲解";
-  analyzeButton.disabled = Boolean(state.busyParagraphId);
+  analyzeButton.textContent = getAnalyzeButtonText(paragraph);
+  analyzeButton.disabled = Boolean(state.busyParagraphId) || state.autoAnalyze.running;
   analyzeButton.addEventListener("click", () => analyzeParagraph(paragraph.id));
 
-  header.append(kicker, analyzeButton);
+  header.append(meta, analyzeButton);
 
   const content = document.createElement("div");
   content.className = "paragraph-content";
@@ -510,6 +749,14 @@ function renderParagraphCard(paragraph) {
   source.className = "source-text";
   source.textContent = paragraph.sourceText;
   content.append(source);
+
+  if (getAnalysisStatus(paragraph) === "running" && !paragraph.translation && !paragraph.explanation) {
+    content.append(renderAnalysisNotice("正在生成翻译与讲解"));
+  }
+
+  if (paragraph.analysisError) {
+    content.append(renderAnalysisNotice(paragraph.analysisError, true));
+  }
 
   if (paragraph.translation || paragraph.explanation || paragraph.keyTerms?.length) {
     const grid = document.createElement("div");
@@ -536,6 +783,57 @@ function renderParagraphCard(paragraph) {
   content.append(renderChatBox(paragraph));
   card.append(header, content);
   return card;
+}
+
+function getAnalysisStatus(paragraph) {
+  if (state.busyParagraphId === paragraph.id || paragraph.analysisStatus === "running") {
+    return "running";
+  }
+
+  if (paragraph.analysisError || paragraph.analysisStatus === "error") {
+    return "error";
+  }
+
+  if (!needsAnalysis(paragraph)) {
+    return "done";
+  }
+
+  return "pending";
+}
+
+function getAnalysisStatusText(paragraph) {
+  const status = getAnalysisStatus(paragraph);
+  if (status === "running") {
+    return "生成中";
+  }
+  if (status === "done") {
+    return "已生成";
+  }
+  if (status === "error") {
+    return "失败";
+  }
+  return "待生成";
+}
+
+function getAnalyzeButtonText(paragraph) {
+  const status = getAnalysisStatus(paragraph);
+  if (status === "running") {
+    return "处理中";
+  }
+  if (status === "done") {
+    return "重新生成";
+  }
+  if (status === "error") {
+    return "重试";
+  }
+  return "翻译与讲解";
+}
+
+function renderAnalysisNotice(text, isError = false) {
+  const notice = document.createElement("div");
+  notice.className = `analysis-notice${isError ? " error-text" : ""}`;
+  notice.textContent = text;
+  return notice;
 }
 
 function renderAnalysisBox(title, text) {
@@ -608,9 +906,40 @@ function paragraphText(text) {
   return p;
 }
 
+function updateAutoStatus() {
+  if (!state.autoAnalyze.running) {
+    return;
+  }
+
+  const elapsed = Math.max(0, Math.round((Date.now() - state.autoAnalyze.startedAt) / 1000));
+  const current = state.paper?.paragraphs.find((paragraph) => paragraph.id === state.autoAnalyze.currentId);
+  const currentLabel = current ? `，当前 P${current.order + 1}` : "";
+  const stopLabel = state.autoAnalyze.stopRequested ? "，正在停止" : "";
+  setStatus([
+    `自动分析 ${state.autoAnalyze.completed + state.autoAnalyze.failed}/${state.autoAnalyze.total}`,
+    `失败 ${state.autoAnalyze.failed}`,
+    `已用 ${elapsed}s${currentLabel}${stopLabel}`,
+  ].join(" · "), state.autoAnalyze.failed > 0);
+}
+
+function updateAutoButtons() {
+  els.autoAnalyzeButton.disabled = !state.paper || state.autoAnalyze.running;
+  els.stopAutoButton.classList.toggle("hidden", !state.autoAnalyze.running);
+  els.stopAutoButton.disabled = !state.autoAnalyze.running || state.autoAnalyze.stopRequested;
+}
+
+function clearAutoTimer() {
+  if (state.autoAnalyze.timer) {
+    window.clearInterval(state.autoAnalyze.timer);
+    state.autoAnalyze.timer = null;
+  }
+}
+
 function setBusy(isBusy) {
   els.uploadButton.disabled = isBusy;
   els.pdfInput.disabled = isBusy;
+  els.aiSegmentInput.disabled = isBusy;
+  els.autoAnalyzeInput.disabled = isBusy;
 }
 
 function setStatus(text, isError = false) {

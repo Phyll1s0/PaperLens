@@ -13,6 +13,7 @@ const HOST = process.env.HOST || "127.0.0.1";
 const PUBLIC_DIR = path.join(__dirname, "public");
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 const DATA_DIR = path.join(__dirname, "data");
+const ASSET_DIR = path.join(__dirname, "paper-assets");
 const CACHE_DIR = path.join(__dirname, ".cache");
 const WORKSPACE_CACHE_KEY = createHash("sha1").update(__dirname).digest("hex").slice(0, 12);
 const SWIFT_MODULE_CACHE_DIR = path.join(CACHE_DIR, `swift-module-cache-${WORKSPACE_CACHE_KEY}`);
@@ -21,6 +22,7 @@ const MAX_UPLOAD_BYTES = 120 * 1024 * 1024;
 
 await mkdir(UPLOAD_DIR, { recursive: true });
 await mkdir(DATA_DIR, { recursive: true });
+await mkdir(ASSET_DIR, { recursive: true });
 await mkdir(SWIFT_MODULE_CACHE_DIR, { recursive: true });
 await mkdir(TMP_DIR, { recursive: true });
 
@@ -36,12 +38,21 @@ const server = http.createServer(async (req, res) => {
       return serveStatic(res, path.join(__dirname, url.pathname));
     }
 
+    if (req.method === "GET" && url.pathname.startsWith("/assets/")) {
+      return serveAsset(res, url.pathname);
+    }
+
     if (req.method === "POST" && url.pathname === "/api/papers/upload") {
       return await handleUpload(req, res);
     }
 
     if (req.method === "GET" && url.pathname === "/api/papers") {
       return json(res, await listPapers());
+    }
+
+    const segmentMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/segment$/);
+    if (req.method === "POST" && segmentMatch) {
+      return await handleSegmentPaper(req, res, segmentMatch[1]);
     }
 
     const paperMatch = url.pathname.match(/^\/api\/papers\/([^/]+)$/);
@@ -64,7 +75,7 @@ const server = http.createServer(async (req, res) => {
     return json(res, { error: "Not found" }, 404);
   } catch (error) {
     console.error(error);
-    return json(res, { error: error.message || "Internal server error" }, 500);
+    return json(res, { error: error.message || "Internal server error" }, error.statusCode || 500);
   }
 });
 
@@ -96,9 +107,11 @@ async function handleUpload(req, res) {
   const paperId = `paper_${Date.now()}_${randomUUID().slice(0, 8)}`;
   const safeFilename = filePart.filename.replace(/[^\w.-]+/g, "_").slice(0, 120);
   const pdfPath = path.join(UPLOAD_DIR, `${paperId}_${safeFilename}`);
+  const assetDir = path.join(ASSET_DIR, paperId);
+  await mkdir(assetDir, { recursive: true });
   await writeFile(pdfPath, filePart.content);
 
-  const extraction = await extractPdfText(pdfPath);
+  const extraction = await extractPdfText(pdfPath, assetDir, `/assets/${paperId}`);
   const paper = buildPaperRecord({
     id: paperId,
     filename: filePart.filename,
@@ -114,6 +127,20 @@ async function handleUpload(req, res) {
 
   await savePaper(paper);
   return json(res, paper);
+}
+
+async function handleSegmentPaper(req, res, paperId) {
+  const payload = await readJson(req);
+  const paper = await loadPaper(paperId);
+  const pages = Array.isArray(paper.extractionPages) ? paper.extractionPages : [];
+
+  if (!pages.length) {
+    return json(res, { error: "这篇论文缺少原始页面文本，无法重新 AI 分段。请重新上传 PDF。" }, 400);
+  }
+
+  const segmented = await segmentPaperWithAi(paper, payload.settings);
+  await savePaper(segmented);
+  return json(res, { paper: segmented });
 }
 
 async function listPapers() {
@@ -197,6 +224,8 @@ async function handleAnalyze(req, res) {
   paragraph.translation = parsed.translation || "";
   paragraph.explanation = parsed.explanation || content;
   paragraph.keyTerms = Array.isArray(parsed.keyTerms) ? parsed.keyTerms : [];
+  paragraph.analysisStatus = "done";
+  paragraph.analysisError = "";
   paragraph.updatedAt = new Date().toISOString();
 
   await savePaper(paper);
@@ -302,6 +331,18 @@ function buildPaperRecord({ id, filename, pdfPath, extraction }) {
   const paragraphs = splitIntoParagraphs(extraction.pages);
   const sections = inferSections(paragraphs);
   const title = inferTitle(paragraphs, filename);
+  const pageImages = extraction.pages
+    .filter((page) => page.imagePath)
+    .map((page) => ({
+      pageNumber: page.pageNumber,
+      imagePath: page.imagePath,
+      imageWidth: page.imageWidth || null,
+      imageHeight: page.imageHeight || null,
+    }));
+  const extractionPages = extraction.pages.map((page) => ({
+    pageNumber: page.pageNumber,
+    text: page.text || "",
+  }));
 
   return {
     id,
@@ -310,8 +351,11 @@ function buildPaperRecord({ id, filename, pdfPath, extraction }) {
     pdfPath,
     pageCount: extraction.pageCount,
     status: "ready",
+    segmentationMode: "heuristic",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    pageImages,
+    extractionPages,
     sections,
     paragraphs,
   };
@@ -341,6 +385,8 @@ function splitIntoParagraphs(pages) {
         explanation: "",
         keyTerms: [],
         chatMessages: [],
+        analysisStatus: "pending",
+        analysisError: "",
       });
       order += 1;
     }
@@ -452,6 +498,148 @@ function inferTitle(paragraphs, filename) {
   return firstLongText || filename.replace(/\.pdf$/i, "");
 }
 
+async function segmentPaperWithAi(paper, settings) {
+  const chunks = chunkPagesForSegmentation(paper.extractionPages || []);
+  const items = [];
+
+  for (const chunk of chunks) {
+    const chunkItems = await segmentPageChunkWithAi(paper, chunk, settings);
+    items.push(...chunkItems);
+  }
+
+  const paragraphs = buildParagraphsFromSegmentItems(items);
+  const readingCount = paragraphs.filter((paragraph) => paragraph.kind !== "heading").length;
+
+  if (readingCount < 3) {
+    throw new Error("AI 分段结果太少，已保留基础分段。");
+  }
+
+  const sections = inferSections(paragraphs);
+  return {
+    ...paper,
+    title: inferTitle(paragraphs, paper.filename),
+    status: "ready",
+    segmentationMode: "ai",
+    sections,
+    paragraphs,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function chunkPagesForSegmentation(pages) {
+  const chunks = [];
+  let current = [];
+  let currentChars = 0;
+  const maxChars = 8500;
+  const maxPages = 3;
+
+  for (const page of pages) {
+    const textLength = String(page.text || "").length;
+    if (current.length && (current.length >= maxPages || currentChars + textLength > maxChars)) {
+      chunks.push(current);
+      current = [];
+      currentChars = 0;
+    }
+
+    current.push(page);
+    currentChars += textLength;
+  }
+
+  if (current.length) {
+    chunks.push(current);
+  }
+
+  return chunks;
+}
+
+async function segmentPageChunkWithAi(paper, pages, settings) {
+  const pageText = pages
+    .map((page) => [
+      `--- Page ${page.pageNumber} ---`,
+      String(page.text || "").slice(0, 12_000),
+    ].join("\n"))
+    .join("\n\n");
+
+  const messages = [
+    {
+      role: "system",
+      content: [
+        "你是论文 PDF 分段助手。你的任务是把 PDF 抽取出来的页面文本切成适合精读的语义段落。",
+        "必须忠于原文，不翻译，不总结，不新增内容。",
+        "合并同一自然段内的换行和断词，保留标题、编号、公式引用和术语。",
+        "只输出合法 JSON，不要使用 Markdown 代码块。",
+      ].join("\n"),
+    },
+    {
+      role: "user",
+      content: [
+        `论文: ${paper.title || paper.filename}`,
+        "",
+        "请把下面页面文本切分为语义段落。",
+        "输出格式必须是：",
+        "{",
+        '  "items": [',
+        '    { "kind": "heading", "pageNumber": 1, "sourceText": "章节标题" },',
+        '    { "kind": "paragraph", "pageNumber": 1, "sourceText": "自然段原文" }',
+        "  ]",
+        "}",
+        "",
+        "页面文本:",
+        pageText,
+      ].join("\n"),
+    },
+  ];
+
+  const content = await callModel(settings, messages, { maxTokens: 6000 });
+  const parsed = parseModelJson(content);
+  const rawItems = Array.isArray(parsed.items) ? parsed.items : [];
+
+  return rawItems
+    .map((item) => ({
+      kind: String(item.kind || "").toLowerCase() === "heading" ? "heading" : "paragraph",
+      pageNumber: Number(item.pageNumber || pages[0]?.pageNumber || 1),
+      sourceText: normalizeParagraph(item.sourceText || item.text || ""),
+    }))
+    .filter((item) => item.sourceText);
+}
+
+function buildParagraphsFromSegmentItems(items) {
+  const paragraphs = [];
+  const seen = new Set();
+
+  for (const item of items) {
+    const clean = normalizeParagraph(item.sourceText);
+    if (!clean || (clean.length < 20 && item.kind !== "heading" && !isLikelyHeading(clean))) {
+      continue;
+    }
+
+    const dedupeKey = `${item.pageNumber}:${clean.slice(0, 160)}`;
+    if (seen.has(dedupeKey)) {
+      continue;
+    }
+    seen.add(dedupeKey);
+
+    const order = paragraphs.length;
+    const kind = item.kind === "heading" || isLikelyHeading(clean) ? "heading" : "paragraph";
+    paragraphs.push({
+      id: `para_${order}_${randomUUID().slice(0, 8)}`,
+      kind,
+      order,
+      pageNumber: Number.isFinite(item.pageNumber) && item.pageNumber > 0 ? item.pageNumber : 1,
+      sectionId: "section_0",
+      sourceText: clean,
+      translation: "",
+      explanation: "",
+      keyTerms: [],
+      chatMessages: [],
+      analysisStatus: "pending",
+      analysisError: "",
+    });
+  }
+
+  return paragraphs;
+}
+
 function isLikelyHeading(line) {
   const text = String(line || "").trim();
   if (text.length < 3 || text.length > 90) {
@@ -482,11 +670,15 @@ function isLikelyHeading(line) {
   return known.includes(text.toLowerCase());
 }
 
-async function extractPdfText(pdfPath) {
+async function extractPdfText(pdfPath, assetDir, assetPublicBase) {
   const scriptPath = path.join(__dirname, "scripts", "extract_pdf_text.swift");
+  const args = [scriptPath, pdfPath];
+  if (assetDir && assetPublicBase) {
+    args.push(assetDir, assetPublicBase);
+  }
 
   return new Promise((resolve, reject) => {
-    execFile("/usr/bin/swift", [scriptPath, pdfPath], {
+    execFile("/usr/bin/swift", args, {
       cwd: __dirname,
       env: {
         ...process.env,
@@ -766,14 +958,20 @@ function normalizeSettings(settings = {}) {
   const agentBudgetUsd = Number(settings.agentBudgetUsd || 500);
 
   if (!apiKey && baseUrl !== "local:claude-config") {
-    throw new Error("API Key is required.");
+    throw badRequest("API Key is required.");
   }
 
   if (!model) {
-    throw new Error("Model name is required.");
+    throw badRequest("Model name is required.");
   }
 
   return { provider, apiKey: normalizeApiKey(apiKey), model, baseUrl, agentBudgetUsd };
+}
+
+function badRequest(message) {
+  const error = new Error(message);
+  error.statusCode = 400;
+  return error;
 }
 
 function normalizeModelName(model) {
@@ -979,6 +1177,40 @@ async function serveStatic(res, filePath) {
   }
 }
 
+async function serveAsset(res, pathname) {
+  let relativePath = "";
+  try {
+    relativePath = decodeURIComponent(pathname.replace(/^\/assets\/?/, ""));
+  } catch {
+    return json(res, { error: "Invalid asset path." }, 400);
+  }
+
+  if (!relativePath || relativePath.includes("\0")) {
+    return json(res, { error: "Invalid asset path." }, 400);
+  }
+
+  const normalized = path.normalize(path.join(ASSET_DIR, relativePath));
+  if (!normalized.startsWith(`${ASSET_DIR}${path.sep}`)) {
+    return json(res, { error: "Forbidden" }, 403);
+  }
+
+  try {
+    const fileStat = await stat(normalized);
+    if (!fileStat.isFile()) {
+      return json(res, { error: "Not found" }, 404);
+    }
+
+    const data = await readFile(normalized);
+    res.writeHead(200, {
+      "content-type": getContentType(normalized),
+      "cache-control": "public, max-age=604800, immutable",
+    });
+    res.end(data);
+  } catch {
+    return json(res, { error: "Not found" }, 404);
+  }
+}
+
 function getContentType(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   const types = {
@@ -987,6 +1219,10 @@ function getContentType(filePath) {
     ".js": "text/javascript; charset=utf-8",
     ".json": "application/json; charset=utf-8",
     ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
   };
 
   return types[ext] || "application/octet-stream";
