@@ -600,6 +600,8 @@ function callClaudeAgent(settings, messages, options = {}) {
       if (bareIndex !== -1) {
         args.splice(bareIndex, 1);
       }
+    } else {
+      args.push("--setting-sources", "project");
     }
 
     const child = spawn("claude", args, {

@@ -44,9 +44,16 @@ if (!apiKey) {
 
 const attempts = [
   {
-    name: "api_key_kimi_for_coding",
+    name: "api_key_kimi_for_coding_isolated_settings",
     env: { ANTHROPIC_API_KEY: apiKey },
     model: "kimi-for-coding",
+    extraArgs: ["--setting-sources", "project"],
+  },
+  {
+    name: "api_key_kimi_for_coding_user_settings",
+    env: { ANTHROPIC_API_KEY: apiKey },
+    model: "kimi-for-coding",
+    extraArgs: [],
   },
 ];
 
@@ -84,6 +91,7 @@ function runClaudeAttempt(attempt) {
       "json",
       "--max-budget-usd",
       "500",
+      ...(attempt.extraArgs || []),
     ], {
       cwd: process.cwd(),
       timeout: 60_000,

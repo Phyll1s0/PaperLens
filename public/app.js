@@ -36,12 +36,12 @@ const PROVIDERS = {
   "claude-kimi-agent": {
     baseUrl: "local:claude-kimi",
     model: "kimi-for-coding",
-    hint: "通过本机 Claude Code CLI 调用你在页面输入的 Kimi Code Key。后端会禁用 Claude Code 工具，只传文本；预算上限可能仍受 Kimi Code 服务端控制。",
+    hint: "通过本机 Claude Code CLI 调用页面输入的 Kimi Code Key，并隔离 Claude 用户级 settings，避免被本机 OpenSSI 等配置覆盖。",
   },
   "claude-local": {
     baseUrl: "local:claude-config",
     model: "sonnet",
-    hint: "通过本机 Claude Code 已登录/已配置的账号或 key 调用，不使用页面 API Key。",
+    hint: "通过本机 Claude Code 已登录/已配置的账号或 key 调用，不使用页面 API Key，适合使用 OpenSSI 等本机配置。",
   },
   "kimi-code": {
     baseUrl: "https://api.kimi.com/coding/v1",
