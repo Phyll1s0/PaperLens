@@ -4,7 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "health": "node scripts/healthcheck.mjs",
+    "service:start": "sh scripts/paperlens-service.sh start",
+    "service:stop": "sh scripts/paperlens-service.sh stop",
+    "service:status": "sh scripts/paperlens-service.sh status",
+    "launchd:install": "sh scripts/paperlens-launchd.sh install",
+    "launchd:uninstall": "sh scripts/paperlens-launchd.sh uninstall",
+    "launchd:status": "sh scripts/paperlens-launchd.sh status"
   },
   "engines": {
     "node": ">=20"

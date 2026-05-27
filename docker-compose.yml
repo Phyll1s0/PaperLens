@@ -1,0 +1,24 @@
+services:
+  paperlens:
+    build: .
+    image: paperlens:local
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      PAPERLENS_PDF_ENGINE: poppler
+    ports:
+      - "3000:3000"
+    volumes:
+      - paperlens_uploads:/app/uploads
+      - paperlens_data:/app/data
+      - paperlens_assets:/app/paper-assets
+      - paperlens_cache:/app/.cache
+
+volumes:
+  paperlens_uploads:
+  paperlens_data:
+  paperlens_assets:
+  paperlens_cache:

@@ -1,0 +1,11 @@
+.cache/
+.git/
+.DS_Store
+data/
+node_modules/
+paper-assets/
+uploads/
+*.log
+*.pdf
+.env
+.env.*
