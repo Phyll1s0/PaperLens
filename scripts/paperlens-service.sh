@@ -6,6 +6,13 @@ CACHE_DIR="$ROOT_DIR/.cache"
 PID_FILE="$CACHE_DIR/paperlens.pid"
 LOG_FILE="$CACHE_DIR/paperlens.log"
 
+if [ -f "$ROOT_DIR/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$ROOT_DIR/.env"
+  set +a
+fi
+
 is_running() {
   [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
 }

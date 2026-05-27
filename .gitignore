@@ -7,4 +7,5 @@ paper-assets/
 .cache/
 .env
 .env.*
+!.env.example
 *.pdf

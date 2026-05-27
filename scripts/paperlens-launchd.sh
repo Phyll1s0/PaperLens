@@ -4,6 +4,14 @@ set -eu
 LABEL="com.phyll1s0.paperlens"
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+
+if [ -f "$ROOT_DIR/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$ROOT_DIR/.env"
+  set +a
+fi
+
 NODE_BIN=$(command -v node)
 USER_ID=$(id -u)
 SERVICE_PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin"
@@ -34,10 +42,13 @@ add_proxy_env() {
 
 install_service() {
   mkdir -p "$HOME/Library/LaunchAgents" "$ROOT_DIR/.cache"
-  http_proxy_value="${HTTP_PROXY:-${http_proxy:-}}"
-  https_proxy_value="${HTTPS_PROXY:-${https_proxy:-}}"
-  all_proxy_value="${ALL_PROXY:-${all_proxy:-}}"
+  proxy_url_value="${PAPERLENS_PROXY_URL:-}"
+  http_proxy_value="${HTTP_PROXY:-${http_proxy:-$proxy_url_value}}"
+  https_proxy_value="${HTTPS_PROXY:-${https_proxy:-$proxy_url_value}}"
+  all_proxy_value="${ALL_PROXY:-${all_proxy:-$proxy_url_value}}"
   no_proxy_value="${NO_PROXY:-${no_proxy:-}}"
+  add_proxy_env "PAPERLENS_PROXY_URL" "$proxy_url_value"
+  add_proxy_env "PAPERLENS_CLAUDE_CLI" "${PAPERLENS_CLAUDE_CLI:-}"
   add_proxy_env "HTTP_PROXY" "$http_proxy_value"
   add_proxy_env "HTTPS_PROXY" "$https_proxy_value"
   add_proxy_env "ALL_PROXY" "$all_proxy_value"
