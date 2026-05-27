@@ -20,6 +20,7 @@ const els = {
   modelInput: document.querySelector("#modelInput"),
   apiKeyInput: document.querySelector("#apiKeyInput"),
   agentBudgetInput: document.querySelector("#agentBudgetInput"),
+  proxyUrlInput: document.querySelector("#proxyUrlInput"),
   modelStatusText: document.querySelector("#modelStatusText"),
   modelDiagnosticsText: document.querySelector("#modelDiagnosticsText"),
   providerHintText: document.querySelector("#providerHintText"),
@@ -94,7 +95,7 @@ function bindEvents() {
     renderPaper();
   });
 
-  for (const input of [els.baseUrlInput, els.modelInput, els.apiKeyInput, els.agentBudgetInput]) {
+  for (const input of [els.baseUrlInput, els.modelInput, els.apiKeyInput, els.agentBudgetInput, els.proxyUrlInput]) {
     input.addEventListener("input", () => {
       saveSettings();
       updateModelDiagnostics();
@@ -111,6 +112,7 @@ function loadSettings() {
   els.providerSelect.value = provider;
   els.apiKeyInput.value = sessionStorage.getItem("paper-reader-api-key") || "";
   els.agentBudgetInput.value = sessionStorage.getItem("paper-reader-agent-budget") || "500";
+  els.proxyUrlInput.value = sessionStorage.getItem("paper-reader-proxy-url") || "";
   els.aiSegmentInput.checked = sessionStorage.getItem("paper-reader-ai-segment") !== "false";
   els.autoAnalyzeInput.checked = sessionStorage.getItem("paper-reader-auto-analyze") !== "false";
   applyProvider(provider);
@@ -127,6 +129,7 @@ function saveSettings() {
   sessionStorage.setItem("paper-reader-model", els.modelInput.value.trim());
   sessionStorage.setItem("paper-reader-api-key", els.apiKeyInput.value.trim());
   sessionStorage.setItem("paper-reader-agent-budget", els.agentBudgetInput.value.trim());
+  sessionStorage.setItem("paper-reader-proxy-url", els.proxyUrlInput.value.trim());
   sessionStorage.setItem("paper-reader-ai-segment", String(els.aiSegmentInput.checked));
   sessionStorage.setItem("paper-reader-auto-analyze", String(els.autoAnalyzeInput.checked));
 }
@@ -138,6 +141,7 @@ function getSettings() {
     model: normalizeModelNameInput(els.modelInput.value),
     apiKey: normalizeApiKeyInput(els.apiKeyInput.value),
     agentBudgetUsd: Number(els.agentBudgetInput.value || 500),
+    proxyUrl: els.proxyUrlInput.value.trim(),
   };
 }
 
@@ -183,6 +187,8 @@ function updateModelDiagnostics(remoteDiagnostics) {
     keyPrefix,
     keyLength,
     keyFormatOk: settings.provider !== "claude-kimi-agent" || settings.apiKey.startsWith("sk-kimi-"),
+    proxyPresent: Boolean(settings.proxyUrl),
+    proxySource: settings.proxyUrl ? "page" : "none",
   };
 
   const lines = [
@@ -201,7 +207,10 @@ function updateModelDiagnostics(remoteDiagnostics) {
   }
 
   if (settings.provider === "claude-kimi-agent" || settings.provider === "claude-local") {
-    lines.push(`Proxy: ${diagnostics.proxyPresent ? "detected" : "not detected"}`);
+    const proxySource = diagnostics.proxySource && diagnostics.proxySource !== "none"
+      ? ` (${diagnostics.proxySource})`
+      : "";
+    lines.push(`Proxy: ${diagnostics.proxyPresent ? `detected${proxySource}` : "not detected"}`);
   }
 
   els.modelDiagnosticsText.textContent = lines.join(" · ");

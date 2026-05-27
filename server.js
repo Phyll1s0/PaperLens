@@ -1705,7 +1705,7 @@ function resolveClaudeCommand(commandPath) {
 function buildClaudeEnv(settings, options, commandPath) {
   return {
     ...process.env,
-    ...getProxyEnv(),
+    ...getProxyEnv(settings.proxyUrl),
     PATH: commandPath,
     ...(options.usePageKimiKey ? {
       ANTHROPIC_BASE_URL: "https://api.kimi.com/coding/",
@@ -1715,11 +1715,11 @@ function buildClaudeEnv(settings, options, commandPath) {
   };
 }
 
-function getProxyEnv() {
-  const proxyUrl = process.env.PAPERLENS_PROXY_URL || "";
-  const httpProxy = process.env.HTTP_PROXY || process.env.http_proxy || proxyUrl;
-  const httpsProxy = process.env.HTTPS_PROXY || process.env.https_proxy || proxyUrl;
-  const allProxy = process.env.ALL_PROXY || process.env.all_proxy || proxyUrl;
+function getProxyEnv(proxyUrl = "") {
+  const configuredProxyUrl = proxyUrl || process.env.PAPERLENS_PROXY_URL || "";
+  const httpProxy = proxyUrl || process.env.HTTP_PROXY || process.env.http_proxy || configuredProxyUrl;
+  const httpsProxy = proxyUrl || process.env.HTTPS_PROXY || process.env.https_proxy || configuredProxyUrl;
+  const allProxy = proxyUrl || process.env.ALL_PROXY || process.env.all_proxy || configuredProxyUrl;
   const noProxy = process.env.NO_PROXY || process.env.no_proxy || "";
   const env = {};
 
@@ -1741,8 +1741,25 @@ function getProxyEnv() {
   return env;
 }
 
-function hasProxyEnv() {
-  return Object.keys(getProxyEnv()).length > 0;
+function hasProxyEnv(proxyUrl = "") {
+  return Object.keys(getProxyEnv(proxyUrl)).length > 0;
+}
+
+function getProxySource(proxyUrl = "") {
+  if (proxyUrl) {
+    return "page";
+  }
+
+  if (process.env.PAPERLENS_PROXY_URL) {
+    return "env";
+  }
+
+  if (process.env.HTTP_PROXY || process.env.HTTPS_PROXY || process.env.ALL_PROXY ||
+      process.env.http_proxy || process.env.https_proxy || process.env.all_proxy) {
+    return "environment";
+  }
+
+  return "none";
 }
 
 function loadDotEnv(filePath) {
@@ -1871,6 +1888,7 @@ function normalizeSettings(settings = {}) {
   const baseUrl = resolveBaseUrlForProvider(provider, String(settings.baseUrl || "https://api.openai.com/v1").trim());
   const agentBudgetUsd = Number(settings.agentBudgetUsd || 500);
   const normalizedApiKey = normalizeApiKey(apiKey);
+  const proxyUrl = normalizeProxyUrl(String(settings.proxyUrl || ""));
 
   if (!apiKey && baseUrl !== "local:claude-config") {
     throw badRequest("API Key is required.");
@@ -1884,7 +1902,7 @@ function normalizeSettings(settings = {}) {
     throw badRequest("Model name is required.");
   }
 
-  return { provider, apiKey: normalizedApiKey, model, baseUrl, agentBudgetUsd };
+  return { provider, apiKey: normalizedApiKey, model, baseUrl, agentBudgetUsd, proxyUrl };
 }
 
 function badRequest(message) {
@@ -1916,11 +1934,30 @@ function normalizeApiKey(apiKey) {
   return match?.[1] || withoutBearer;
 }
 
+function normalizeProxyUrl(proxyUrl) {
+  const clean = String(proxyUrl || "").trim();
+  if (!clean) {
+    return "";
+  }
+
+  if (!/^(https?|socks5h?|socks):\/\//i.test(clean)) {
+    throw badRequest("Proxy URL 格式不对：请填写 http://、https:// 或 socks5:// 开头的代理地址。");
+  }
+
+  return clean;
+}
+
 function getSettingsDiagnostics(settings = {}) {
   const provider = String(settings.provider || "").trim();
   const baseUrl = resolveBaseUrlForProvider(provider, String(settings.baseUrl || "https://api.openai.com/v1").trim());
   const model = normalizeModelName(String(settings.model || "").trim());
   const apiKey = normalizeApiKey(String(settings.apiKey || ""));
+  let proxyUrl = "";
+  try {
+    proxyUrl = normalizeProxyUrl(String(settings.proxyUrl || ""));
+  } catch {
+    proxyUrl = String(settings.proxyUrl || "").trim();
+  }
   const keyPrefix = apiKey.startsWith("sk-kimi-")
     ? "sk-kimi"
     : apiKey.startsWith("sk-")
@@ -1942,7 +1979,8 @@ function getSettingsDiagnostics(settings = {}) {
     keyLength: apiKey.length,
     keyFormatOk: baseUrl !== "local:claude-kimi" || apiKey.startsWith("sk-kimi-"),
     claudeCommand: isClaudeProvider ? resolveClaudeCommand(commandPath) : "",
-    proxyPresent: isClaudeProvider ? hasProxyEnv() : false,
+    proxyPresent: isClaudeProvider ? hasProxyEnv(proxyUrl) : false,
+    proxySource: isClaudeProvider ? getProxySource(proxyUrl) : "none",
   };
 }
 
