@@ -219,7 +219,7 @@ async function handleAnalyze(req, res) {
     {
       role: "system",
       content:
-        "你是一个严谨的论文精读助手。必须忠于论文原文，不编造。请只输出合法 JSON，不要使用 Markdown 代码块。",
+        "你是一个严谨的论文精读助手。必须忠于论文原文，不编造。请只输出合法 JSON，不要使用 Markdown 代码块。涉及公式时请保留 LaTeX，并用 $...$ 或 $$...$$ 包裹。",
     },
     {
       role: "user",
@@ -312,7 +312,7 @@ async function handleChat(req, res) {
     {
       role: "system",
       content:
-        "你是论文阅读问答助手。回答要基于给定论文上下文；如果上下文没有答案，要明确说论文中没有直接说明。使用中文回答。",
+        "你是论文阅读问答助手。回答要基于给定论文上下文；如果上下文没有答案，要明确说论文中没有直接说明。使用中文回答。涉及公式时请保留 LaTeX，并用 $...$ 或 $$...$$ 包裹。",
     },
     {
       role: "user",
@@ -1564,7 +1564,7 @@ async function callModel(settings, messages, options = {}) {
         throw new Error("模型请求超时，请稍后重试。");
       }
 
-      throw new Error(`模型请求失败：${error.message}`);
+      throw new Error(formatModelNetworkError(error, cleanSettings));
     }
 
     const text = await response.text();
@@ -1583,6 +1583,14 @@ async function callModel(settings, messages, options = {}) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function formatModelNetworkError(error, settings) {
+  const proxyHint = settings.proxyUrl || process.env.PAPERLENS_PROXY_URL
+    ? "已检测到代理配置，但当前普通 OpenAI-compatible 请求可能仍受 Node.js fetch 代理支持限制影响；Claude Code Provider 会优先使用代理环境。"
+    : "如果你的网络需要代理，请在网页 Proxy URL 或 .env 的 PAPERLENS_PROXY_URL 中填写代理地址。";
+
+  return `模型网络请求失败：${error.message || "fetch failed"}。${proxyHint}`;
 }
 
 function callClaudeAgent(settings, messages, options = {}) {

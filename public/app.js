@@ -75,6 +75,8 @@ const PROVIDERS = {
   },
 };
 
+const API_TIMEOUT_MS = 240_000;
+
 loadSettings();
 bindEvents();
 loadRecentPapers();
@@ -257,10 +259,10 @@ async function uploadPdf() {
   setStatus("正在上传并解析");
 
   try {
-    const response = await fetch("/api/papers/upload", {
+    const response = await apiFetch("/api/papers/upload", {
       method: "POST",
       body: formData,
-    });
+    }, "上传 PDF");
     const paper = await readResponse(response);
     state.paper = paper;
     state.query = "";
@@ -313,11 +315,11 @@ async function segmentPaperWithAi(options = {}) {
   setStatus("AI 正在重新分段 · 已用 0s");
 
   try {
-    const response = await fetch(`/api/papers/${encodeURIComponent(state.paper.id)}/segment`, {
+    const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}/segment`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ settings: getSettings() }),
-    });
+    }, "AI 分段");
     const result = await readResponse(response);
     state.paper = result.paper;
     renderPaper();
@@ -335,7 +337,7 @@ async function segmentPaperWithAi(options = {}) {
 
 async function loadRecentPapers() {
   try {
-    const response = await fetch("/api/papers");
+    const response = await apiFetch("/api/papers", {}, "载入最近论文");
     const data = await readResponse(response);
     renderRecentPapers(data.papers || []);
   } catch (error) {
@@ -347,7 +349,7 @@ async function openPaper(paperId) {
   setStatus("正在载入论文");
 
   try {
-    const response = await fetch(`/api/papers/${encodeURIComponent(paperId)}`);
+    const response = await apiFetch(`/api/papers/${encodeURIComponent(paperId)}`, {}, "载入论文");
     state.paper = await readResponse(response);
     state.query = "";
     els.searchInput.value = "";
@@ -394,11 +396,11 @@ async function pingModel() {
   setModelStatus("正在测试连接");
 
   try {
-    const response = await fetch("/api/model/ping", {
+    const response = await apiFetch("/api/model/ping", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ settings: getSettings() }),
-    });
+    }, "测试模型连接");
     const result = await response.json().catch(() => ({}));
     if (result.diagnostics) {
       updateModelDiagnostics(result.diagnostics);
@@ -448,7 +450,7 @@ async function analyzeParagraph(paragraphId, options = {}) {
 }
 
 async function requestAnalyzeParagraph(paragraphId) {
-  const response = await fetch("/api/analyze", {
+  const response = await apiFetch("/api/analyze", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -456,7 +458,7 @@ async function requestAnalyzeParagraph(paragraphId) {
       paragraphId,
       settings: getSettings(),
     }),
-  });
+  }, "分析段落");
   const result = await readResponse(response);
   return result.paragraph;
 }
@@ -500,8 +502,13 @@ async function startAutoAnalyze() {
     try {
       await analyzeParagraph(paragraph.id, { fromAuto: true });
       state.autoAnalyze.completed += 1;
-    } catch {
+    } catch (error) {
       state.autoAnalyze.failed += 1;
+      if (error.isNetworkError) {
+        state.autoAnalyze.stopRequested = true;
+        setStatus(error.message, true);
+        break;
+      }
     }
 
     updateAutoStatus();
@@ -555,7 +562,7 @@ async function askParagraph(paragraphId, input) {
   renderPaper();
 
   try {
-    const response = await fetch("/api/chat", {
+    const response = await apiFetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -564,7 +571,7 @@ async function askParagraph(paragraphId, input) {
         message,
         settings: getSettings(),
       }),
-    });
+    }, "段落追问");
     const result = await readResponse(response);
     replaceParagraph(result.paragraph);
     setStatus("回答完成");
@@ -759,10 +766,17 @@ function renderPageArtifact(artifact) {
     ? `${artifact.label} · ${getArtifactLabel(artifact.type, artifact.visualType)}`
     : getArtifactLabel(artifact.type, artifact.visualType);
 
-  const body = artifact.type === "code" || artifact.type === "formula"
+  const body = artifact.type === "code"
     ? document.createElement("pre")
     : document.createElement("p");
-  body.textContent = artifact.text;
+  if (artifact.type === "code") {
+    body.textContent = artifact.text;
+  } else {
+    const text = artifact.type === "formula" && !hasMathDelimiters(artifact.text)
+      ? `\\[${artifact.text}\\]`
+      : artifact.text;
+    renderRichText(body, text);
+  }
 
   const crop = renderArtifactCrop(artifact);
   if (crop) {
@@ -867,7 +881,7 @@ function renderParagraphCard(paragraph) {
 
   const source = document.createElement("p");
   source.className = "source-text";
-  source.textContent = paragraph.sourceText;
+  renderRichText(source, paragraph.sourceText);
   content.append(source);
 
   const relatedArtifacts = getRelatedArtifactsForParagraph(state.paper, paragraph);
@@ -1031,9 +1045,359 @@ function getAnalyzeButtonText(paragraph) {
 function renderAnalysisNotice(text, isError = false) {
   const notice = document.createElement("div");
   notice.className = `analysis-notice${isError ? " error-text" : ""}`;
-  notice.textContent = text;
+  notice.textContent = isError ? normalizeDisplayError(text) : text;
   return notice;
 }
+
+function normalizeDisplayError(text) {
+  const message = String(text || "");
+  if (/failed to fetch|fetch failed/i.test(message)) {
+    return "网络请求失败：无法连接本机服务或模型服务。请确认 PaperLens 仍在运行，并检查模型代理/API 配置后重试。";
+  }
+
+  return message;
+}
+
+function renderRichText(element, text) {
+  element.replaceChildren(createRichTextFragment(String(text || "")));
+}
+
+function createRichTextFragment(text) {
+  const fragment = document.createDocumentFragment();
+  const segments = splitMathSegments(text);
+
+  for (const segment of segments) {
+    if (!segment.math) {
+      fragment.append(document.createTextNode(segment.text));
+      continue;
+    }
+
+    fragment.append(renderMathSegment(segment.text, segment.display));
+  }
+
+  return fragment;
+}
+
+function splitMathSegments(text) {
+  const segments = [];
+  let index = 0;
+
+  while (index < text.length) {
+    const next = findNextMathDelimiter(text, index);
+    if (!next) {
+      segments.push({ math: false, text: text.slice(index) });
+      break;
+    }
+
+    if (next.start > index) {
+      segments.push({ math: false, text: text.slice(index, next.start) });
+    }
+
+    const contentStart = next.start + next.open.length;
+    const close = text.indexOf(next.close, contentStart);
+    if (close === -1) {
+      segments.push({ math: false, text: text.slice(next.start) });
+      break;
+    }
+
+    segments.push({
+      math: true,
+      display: next.display,
+      text: text.slice(contentStart, close).trim(),
+    });
+    index = close + next.close.length;
+  }
+
+  return segments;
+}
+
+function hasMathDelimiters(text) {
+  return /\$\$|\$[^$\s]|\\\(|\\\[/.test(String(text || ""));
+}
+
+function findNextMathDelimiter(text, fromIndex) {
+  const delimiters = [
+    { open: "$$", close: "$$", display: true },
+    { open: "\\[", close: "\\]", display: true },
+    { open: "\\(", close: "\\)", display: false },
+    { open: "$", close: "$", display: false },
+  ];
+  let best = null;
+
+  for (const delimiter of delimiters) {
+    const start = text.indexOf(delimiter.open, fromIndex);
+    if (start === -1) {
+      continue;
+    }
+
+    if (delimiter.open === "$" && !isLikelyInlineDollar(text, start)) {
+      continue;
+    }
+
+    if (!best || start < best.start || (start === best.start && delimiter.open.length > best.open.length)) {
+      best = { ...delimiter, start };
+    }
+  }
+
+  return best;
+}
+
+function isLikelyInlineDollar(text, index) {
+  if (text[index + 1] === "$") {
+    return false;
+  }
+
+  const previous = text[index - 1] || "";
+  const next = text[index + 1] || "";
+  if (!next || /\s/.test(next) || /\d/.test(next)) {
+    return false;
+  }
+
+  return !previous || !/[A-Za-z0-9]/.test(previous);
+}
+
+function renderMathSegment(source, display = false) {
+  const wrapper = document.createElement("span");
+  wrapper.className = display ? "math-block" : "math-inline";
+  wrapper.title = source;
+  renderLatexInto(wrapper, source);
+  return wrapper;
+}
+
+function renderLatexInto(container, source) {
+  const stream = { source: normalizeLatexSource(source), index: 0 };
+  renderLatexStream(stream, container, "");
+}
+
+function normalizeLatexSource(source) {
+  return String(source || "")
+    .replace(/\\left/g, "")
+    .replace(/\\right/g, "")
+    .replace(/\\,/g, " ")
+    .replace(/\\;/g, " ")
+    .replace(/\\!/g, "");
+}
+
+function renderLatexStream(stream, container, stopChar) {
+  let lastToken = null;
+
+  while (stream.index < stream.source.length) {
+    const char = stream.source[stream.index];
+    if (stopChar && char === stopChar) {
+      stream.index += 1;
+      break;
+    }
+
+    if (/\s/.test(char)) {
+      container.append(document.createTextNode(" "));
+      stream.index += 1;
+      continue;
+    }
+
+    if ((char === "^" || char === "_") && lastToken) {
+      stream.index += 1;
+      const script = document.createElement(char === "^" ? "sup" : "sub");
+      renderLatexInto(script, readLatexArgument(stream));
+      lastToken.append(script);
+      continue;
+    }
+
+    const token = readLatexToken(stream);
+    if (token) {
+      container.append(token);
+      lastToken = token.classList?.contains("math-token") || token.classList?.contains("math-frac") ||
+        token.classList?.contains("math-root")
+        ? token
+        : lastToken;
+    }
+  }
+}
+
+function readLatexToken(stream) {
+  const char = stream.source[stream.index];
+
+  if (char === "\\") {
+    stream.index += 1;
+    const command = readLatexCommand(stream);
+    return renderLatexCommand(command, stream);
+  }
+
+  if (char === "{") {
+    stream.index += 1;
+    const group = document.createElement("span");
+    group.className = "math-token";
+    renderLatexStream(stream, group, "}");
+    return group;
+  }
+
+  stream.index += 1;
+  return mathToken(mapLatexSymbol(char) || char);
+}
+
+function readLatexCommand(stream) {
+  const start = stream.index;
+  while (stream.index < stream.source.length && /[A-Za-z]/.test(stream.source[stream.index])) {
+    stream.index += 1;
+  }
+
+  if (stream.index === start && stream.index < stream.source.length) {
+    stream.index += 1;
+  }
+
+  return stream.source.slice(start, stream.index);
+}
+
+function renderLatexCommand(command, stream) {
+  if (command === "frac") {
+    const numerator = readLatexArgument(stream);
+    const denominator = readLatexArgument(stream);
+    const fraction = document.createElement("span");
+    fraction.className = "math-frac";
+    const top = document.createElement("span");
+    const bottom = document.createElement("span");
+    renderLatexInto(top, numerator);
+    renderLatexInto(bottom, denominator);
+    fraction.append(top, bottom);
+    return fraction;
+  }
+
+  if (command === "sqrt") {
+    const root = document.createElement("span");
+    root.className = "math-root";
+    const body = document.createElement("span");
+    renderLatexInto(body, readLatexArgument(stream));
+    root.append(mathToken("√"), body);
+    return root;
+  }
+
+  if (["text", "mathrm", "operatorname", "mathbf", "mathit"].includes(command)) {
+    const token = document.createElement("span");
+    token.className = "math-token";
+    renderLatexInto(token, readLatexArgument(stream));
+    return token;
+  }
+
+  return mathToken(LATEX_COMMANDS[command] || `\\${command}`);
+}
+
+function readLatexArgument(stream) {
+  while (stream.index < stream.source.length && /\s/.test(stream.source[stream.index])) {
+    stream.index += 1;
+  }
+
+  if (stream.source[stream.index] === "{") {
+    stream.index += 1;
+    let depth = 1;
+    const start = stream.index;
+    while (stream.index < stream.source.length && depth > 0) {
+      const char = stream.source[stream.index];
+      if (char === "{") {
+        depth += 1;
+      } else if (char === "}") {
+        depth -= 1;
+      }
+      stream.index += 1;
+    }
+    return stream.source.slice(start, stream.index - 1);
+  }
+
+  if (stream.source[stream.index] === "\\") {
+    stream.index += 1;
+    return `\\${readLatexCommand(stream)}`;
+  }
+
+  const value = stream.source[stream.index] || "";
+  stream.index += 1;
+  return value;
+}
+
+function mathToken(text) {
+  const span = document.createElement("span");
+  span.className = "math-token";
+  span.textContent = text;
+  return span;
+}
+
+function mapLatexSymbol(char) {
+  const symbols = {
+    "*": "·",
+    "-": "−",
+  };
+  return symbols[char] || "";
+}
+
+const LATEX_COMMANDS = {
+  alpha: "α",
+  beta: "β",
+  gamma: "γ",
+  delta: "δ",
+  epsilon: "ϵ",
+  varepsilon: "ε",
+  zeta: "ζ",
+  eta: "η",
+  theta: "θ",
+  vartheta: "ϑ",
+  iota: "ι",
+  kappa: "κ",
+  lambda: "λ",
+  mu: "μ",
+  nu: "ν",
+  xi: "ξ",
+  pi: "π",
+  rho: "ρ",
+  sigma: "σ",
+  tau: "τ",
+  upsilon: "υ",
+  phi: "φ",
+  varphi: "ϕ",
+  chi: "χ",
+  psi: "ψ",
+  omega: "ω",
+  Gamma: "Γ",
+  Delta: "Δ",
+  Theta: "Θ",
+  Lambda: "Λ",
+  Xi: "Ξ",
+  Pi: "Π",
+  Sigma: "Σ",
+  Phi: "Φ",
+  Psi: "Ψ",
+  Omega: "Ω",
+  le: "≤",
+  leq: "≤",
+  ge: "≥",
+  geq: "≥",
+  neq: "≠",
+  approx: "≈",
+  sim: "∼",
+  times: "×",
+  cdot: "·",
+  pm: "±",
+  to: "→",
+  rightarrow: "→",
+  leftarrow: "←",
+  infty: "∞",
+  sum: "∑",
+  prod: "∏",
+  int: "∫",
+  partial: "∂",
+  nabla: "∇",
+  forall: "∀",
+  exists: "∃",
+  in: "∈",
+  notin: "∉",
+  subset: "⊂",
+  subseteq: "⊆",
+  cup: "∪",
+  cap: "∩",
+  log: "log",
+  exp: "exp",
+  min: "min",
+  max: "max",
+  argmin: "argmin",
+  argmax: "argmax",
+  softmax: "softmax",
+};
 
 function renderAnalysisBox(title, text) {
   const box = document.createElement("section");
@@ -1043,7 +1407,7 @@ function renderAnalysisBox(title, text) {
   heading.textContent = title;
 
   const body = document.createElement("p");
-  body.textContent = text;
+  renderRichText(body, text);
 
   box.append(heading, body);
   return box;
@@ -1101,7 +1465,7 @@ function label(text) {
 
 function paragraphText(text) {
   const p = document.createElement("p");
-  p.textContent = text;
+  renderRichText(p, text);
   return p;
 }
 
@@ -1142,13 +1506,36 @@ function setBusy(isBusy) {
 }
 
 function setStatus(text, isError = false) {
-  els.statusText.textContent = text;
+  els.statusText.textContent = isError ? normalizeDisplayError(text) : text;
   els.statusText.classList.toggle("error-text", isError);
 }
 
 function setModelStatus(text, isError = false) {
-  els.modelStatusText.textContent = text;
+  els.modelStatusText.textContent = isError ? normalizeDisplayError(text) : text;
   els.modelStatusText.classList.toggle("error-text", isError);
+}
+
+async function apiFetch(url, options = {}, label = "请求") {
+  const controller = new AbortController();
+  const { timeoutMs, ...fetchOptions } = options;
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs || API_TIMEOUT_MS);
+
+  try {
+    return await fetch(url, {
+      ...fetchOptions,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    const message = error.name === "AbortError"
+      ? `${label}超时。模型可能仍在处理，或本机服务暂时无响应。`
+      : `${label}失败：无法连接 PaperLens 本机服务。请确认服务仍在运行，或刷新页面后重试。`;
+    const wrapped = new Error(message);
+    wrapped.cause = error;
+    wrapped.isNetworkError = true;
+    throw wrapped;
+  } finally {
+    window.clearTimeout(timeout);
+  }
 }
 
 async function readResponse(response) {

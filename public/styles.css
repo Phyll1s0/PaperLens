@@ -562,6 +562,87 @@ select:focus {
   white-space: pre-wrap;
 }
 
+.math-inline,
+.math-block {
+  font-family: "Times New Roman", Times, ui-serif, Georgia, serif;
+  color: #1e2d2a;
+}
+
+.math-inline {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 1px;
+  max-width: 100%;
+  padding: 0 2px;
+  border-radius: 4px;
+  background: rgba(15, 118, 110, 0.06);
+  vertical-align: baseline;
+  white-space: nowrap;
+}
+
+.math-block {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  margin: 8px 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  border: 1px solid #dfe8e3;
+  border-radius: 8px;
+  background: #ffffff;
+  white-space: nowrap;
+}
+
+.math-token {
+  display: inline-flex;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.math-token sub,
+.math-token sup,
+.math-frac sub,
+.math-frac sup,
+.math-root sub,
+.math-root sup {
+  margin-left: 1px;
+  font-size: 0.72em;
+  line-height: 1;
+}
+
+.math-frac {
+  display: inline-grid;
+  grid-template-rows: auto auto;
+  align-items: center;
+  justify-items: center;
+  margin: 0 3px;
+  vertical-align: middle;
+}
+
+.math-frac > span:first-child {
+  min-width: 100%;
+  padding: 0 3px 1px;
+  border-bottom: 1px solid currentColor;
+  text-align: center;
+}
+
+.math-frac > span:last-child {
+  padding: 1px 3px 0;
+  text-align: center;
+}
+
+.math-root {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 2px;
+}
+
+.math-root > span:last-child {
+  padding: 0 2px;
+  border-top: 1px solid currentColor;
+}
+
 .analysis-notice {
   padding: 10px 12px;
   border-radius: 8px;
