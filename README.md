@@ -98,6 +98,8 @@ Docker 镜像会安装 Claude Code CLI，因此 `Claude Code + Kimi Code Key` Pr
 
 如果要在 PaperLens 中使用 Kimi Code Key，可以选择 `Claude Code + Kimi Code Key` Provider。它不会直接从网页伪装调用 Kimi Code API，而是让后端调用本机已安装的 Claude Code CLI，并通过 Anthropic-compatible endpoint `https://api.kimi.com/coding/` 访问 Kimi Code。为降低风险，PaperLens 调用时会使用 `--bare`、`--setting-sources project`、`--no-session-persistence`、`--tools ""`，只传入文本任务，并避免本机用户级 Claude settings 覆盖页面输入的 key。
 
+如果网页提示找不到 `claude` CLI，请确认本机能运行 `claude --version`。macOS launchd 服务会把 `/opt/homebrew/bin`、`/usr/local/bin`、`~/.local/bin` 加入 PATH；如果你的 Claude Code 安装在其他位置，可以设置 `PAPERLENS_CLAUDE_CLI=/path/to/claude`。
+
 ## 项目结构
 
 ```text

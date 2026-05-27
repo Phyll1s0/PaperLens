@@ -1,6 +1,7 @@
 import http from "node:http";
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, writeFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +21,17 @@ const WORKSPACE_CACHE_KEY = createHash("sha1").update(__dirname).digest("hex").s
 const SWIFT_MODULE_CACHE_DIR = path.join(CACHE_DIR, `swift-module-cache-${WORKSPACE_CACHE_KEY}`);
 const TMP_DIR = path.join(CACHE_DIR, "tmp");
 const MAX_UPLOAD_BYTES = 120 * 1024 * 1024;
+const EXTRA_BIN_DIRS = [
+  path.dirname(process.execPath),
+  "/opt/homebrew/bin",
+  "/usr/local/bin",
+  "/usr/bin",
+  "/bin",
+  "/usr/sbin",
+  "/sbin",
+  process.env.HOME ? path.join(process.env.HOME, ".local", "bin") : "",
+  process.env.HOME ? path.join(process.env.HOME, ".npm-global", "bin") : "",
+].filter(Boolean);
 
 await mkdir(UPLOAD_DIR, { recursive: true });
 await mkdir(DATA_DIR, { recursive: true });
@@ -1608,10 +1620,13 @@ function callClaudeAgent(settings, messages, options = {}) {
       args.push("--setting-sources", "project");
     }
 
-    const child = spawn("claude", args, {
+    const commandPath = buildCommandPath();
+    const claudeCommand = resolveClaudeCommand(commandPath);
+    const child = spawn(claudeCommand, args, {
       cwd: __dirname,
       env: {
         ...process.env,
+        PATH: commandPath,
         ...(options.usePageKimiKey ? {
           ANTHROPIC_BASE_URL: "https://api.kimi.com/coding/",
           ANTHROPIC_API_KEY: settings.apiKey,
@@ -1637,7 +1652,7 @@ function callClaudeAgent(settings, messages, options = {}) {
     child.on("error", (error) => {
       clearTimeout(timeout);
       if (error.code === "ENOENT") {
-        reject(new Error("未找到 claude CLI。请先安装并配置 Claude Code。"));
+        reject(new Error("未找到 claude CLI。请先安装 Claude Code，或设置 PAPERLENS_CLAUDE_CLI 指向 claude 可执行文件。"));
         return;
       }
 
@@ -1667,6 +1682,30 @@ function callClaudeAgent(settings, messages, options = {}) {
 
     child.stdin.end();
   });
+}
+
+function buildCommandPath() {
+  const parts = [
+    ...(process.env.PATH || "").split(path.delimiter),
+    ...EXTRA_BIN_DIRS,
+  ].filter(Boolean);
+
+  return [...new Set(parts)].join(path.delimiter);
+}
+
+function resolveClaudeCommand(commandPath) {
+  if (process.env.PAPERLENS_CLAUDE_CLI) {
+    return process.env.PAPERLENS_CLAUDE_CLI;
+  }
+
+  for (const directory of commandPath.split(path.delimiter)) {
+    const candidate = path.join(directory, "claude");
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return "claude";
 }
 
 function parseClaudeJsonResult(stdout) {

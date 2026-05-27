@@ -6,6 +6,7 @@ ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 NODE_BIN=$(command -v node)
 USER_ID=$(id -u)
+SERVICE_PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin"
 
 install_service() {
   mkdir -p "$HOME/Library/LaunchAgents" "$ROOT_DIR/.cache"
@@ -31,6 +32,8 @@ install_service() {
     <string>3000</string>
     <key>PAPERLENS_PDF_ENGINE</key>
     <string>auto</string>
+    <key>PATH</key>
+    <string>$SERVICE_PATH</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
