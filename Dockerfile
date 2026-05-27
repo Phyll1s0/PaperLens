@@ -11,6 +11,8 @@ WORKDIR /app
 
 COPY package.json ./
 RUN npm install --omit=dev --package-lock=false
+RUN npm config set os linux \
+  && npm install -g @anthropic-ai/claude-code --force
 
 COPY . .
 

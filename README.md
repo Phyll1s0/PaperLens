@@ -65,6 +65,8 @@ docker compose down
 
 Docker 会用 named volumes 持久化 `uploads/`、`data/`、`paper-assets/` 和 `.cache/`。
 
+Docker 镜像会安装 Claude Code CLI，因此 `Claude Code + Kimi Code Key` Provider 在容器里也能用页面输入的 Kimi Code Key 调用。`Claude Code 本机配置` Provider 仍然依赖容器内自己的环境变量或配置，不会自动读取宿主机的 `~/.claude`。
+
 ## 当前能力
 
 - 上传 PDF。
@@ -130,6 +132,13 @@ Docker 会用 named volumes 持久化 `uploads/`、`data/`、`paper-assets/` 和
 HOST=0.0.0.0
 PORT=3000
 PAPERLENS_PDF_ENGINE=poppler
+```
+
+镜像内包含：
+
+```text
+poppler-utils
+@anthropic-ai/claude-code
 ```
 
 健康检查：
