@@ -182,14 +182,29 @@ function updateModelDiagnostics(remoteDiagnostics) {
     keyPresent: Boolean(settings.apiKey),
     keyPrefix,
     keyLength,
+    keyFormatOk: settings.provider !== "claude-kimi-agent" || settings.apiKey.startsWith("sk-kimi-"),
   };
 
-  els.modelDiagnosticsText.textContent = [
+  const lines = [
     `Provider: ${diagnostics.provider || settings.provider}`,
     `Endpoint: ${diagnostics.endpoint}`,
     `Model: ${diagnostics.model}`,
     `Key: ${diagnostics.keyPresent ? `${diagnostics.keyPrefix}, ${diagnostics.keyLength} chars` : "missing"}`,
-  ].join(" · ");
+  ];
+
+  if (settings.provider === "claude-kimi-agent") {
+    lines.push(`Kimi Code Key: ${diagnostics.keyFormatOk ? "格式正常" : "格式异常，应以 sk-kimi- 开头"}`);
+  }
+
+  if (diagnostics.claudeCommand) {
+    lines.push(`Claude CLI: ${diagnostics.claudeCommand}`);
+  }
+
+  if (settings.provider === "claude-kimi-agent" || settings.provider === "claude-local") {
+    lines.push(`Proxy: ${diagnostics.proxyPresent ? "detected" : "not detected"}`);
+  }
+
+  els.modelDiagnosticsText.textContent = lines.join(" · ");
 }
 
 function getChatEndpoint(baseUrl) {

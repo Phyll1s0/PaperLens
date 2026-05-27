@@ -100,6 +100,8 @@ Docker 镜像会安装 Claude Code CLI，因此 `Claude Code + Kimi Code Key` Pr
 
 如果网页提示找不到 `claude` CLI，请确认本机能运行 `claude --version`。macOS launchd 服务会把 `/opt/homebrew/bin`、`/usr/local/bin`、`~/.local/bin` 加入 PATH；如果你的 Claude Code 安装在其他位置，可以设置 `PAPERLENS_CLAUDE_CLI=/path/to/claude`。
 
+如果你的网络必须通过代理访问模型服务，请在执行 `npm run launchd:install` 的终端里先设置 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`。安装脚本会把这些代理变量写入 launchd 服务环境；网页模型诊断里也会显示 `Proxy: detected`。
+
 ## 项目结构
 
 ```text

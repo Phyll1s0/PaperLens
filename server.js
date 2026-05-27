@@ -275,7 +275,7 @@ async function handleModelPing(req, res) {
     return json(res, {
       error: error.message || "模型连接测试失败。",
       diagnostics,
-    }, 500);
+    }, error.statusCode || 500);
   }
 }
 
@@ -1624,15 +1624,7 @@ function callClaudeAgent(settings, messages, options = {}) {
     const claudeCommand = resolveClaudeCommand(commandPath);
     const child = spawn(claudeCommand, args, {
       cwd: __dirname,
-      env: {
-        ...process.env,
-        PATH: commandPath,
-        ...(options.usePageKimiKey ? {
-          ANTHROPIC_BASE_URL: "https://api.kimi.com/coding/",
-          ANTHROPIC_API_KEY: settings.apiKey,
-        } : {}),
-        ENABLE_TOOL_SEARCH: "false",
-      },
+      env: buildClaudeEnv(settings, options, commandPath),
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -1706,6 +1698,49 @@ function resolveClaudeCommand(commandPath) {
   }
 
   return "claude";
+}
+
+function buildClaudeEnv(settings, options, commandPath) {
+  return {
+    ...process.env,
+    ...getProxyEnv(),
+    PATH: commandPath,
+    ...(options.usePageKimiKey ? {
+      ANTHROPIC_BASE_URL: "https://api.kimi.com/coding/",
+      ANTHROPIC_API_KEY: settings.apiKey,
+    } : {}),
+    ENABLE_TOOL_SEARCH: "false",
+  };
+}
+
+function getProxyEnv() {
+  const proxyUrl = process.env.PAPERLENS_PROXY_URL || "";
+  const httpProxy = process.env.HTTP_PROXY || process.env.http_proxy || proxyUrl;
+  const httpsProxy = process.env.HTTPS_PROXY || process.env.https_proxy || proxyUrl;
+  const allProxy = process.env.ALL_PROXY || process.env.all_proxy || proxyUrl;
+  const noProxy = process.env.NO_PROXY || process.env.no_proxy || "";
+  const env = {};
+
+  for (const [key, value] of [
+    ["HTTP_PROXY", httpProxy],
+    ["HTTPS_PROXY", httpsProxy],
+    ["ALL_PROXY", allProxy],
+    ["NO_PROXY", noProxy],
+    ["http_proxy", httpProxy],
+    ["https_proxy", httpsProxy],
+    ["all_proxy", allProxy],
+    ["no_proxy", noProxy],
+  ]) {
+    if (value) {
+      env[key] = value;
+    }
+  }
+
+  return env;
+}
+
+function hasProxyEnv() {
+  return Object.keys(getProxyEnv()).length > 0;
 }
 
 function parseClaudeJsonResult(stdout) {
@@ -1806,16 +1841,21 @@ function normalizeSettings(settings = {}) {
   const model = normalizeModelName(String(settings.model || "").trim());
   const baseUrl = resolveBaseUrlForProvider(provider, String(settings.baseUrl || "https://api.openai.com/v1").trim());
   const agentBudgetUsd = Number(settings.agentBudgetUsd || 500);
+  const normalizedApiKey = normalizeApiKey(apiKey);
 
   if (!apiKey && baseUrl !== "local:claude-config") {
     throw badRequest("API Key is required.");
+  }
+
+  if (baseUrl === "local:claude-kimi" && !normalizedApiKey.startsWith("sk-kimi-")) {
+    throw badRequest("Kimi Code Key 格式不对：Claude Code + Kimi Code Key 需要输入以 sk-kimi- 开头的完整 Key。请不要复制控制台列表里的脱敏显示值。");
   }
 
   if (!model) {
     throw badRequest("Model name is required.");
   }
 
-  return { provider, apiKey: normalizeApiKey(apiKey), model, baseUrl, agentBudgetUsd };
+  return { provider, apiKey: normalizedApiKey, model, baseUrl, agentBudgetUsd };
 }
 
 function badRequest(message) {
@@ -1857,6 +1897,8 @@ function getSettingsDiagnostics(settings = {}) {
     : apiKey.startsWith("sk-")
       ? "sk"
       : apiKey ? "unknown" : "missing";
+  const isClaudeProvider = baseUrl === "local:claude-kimi" || baseUrl === "local:claude-config";
+  const commandPath = isClaudeProvider ? buildCommandPath() : "";
 
   return {
     provider,
@@ -1869,6 +1911,9 @@ function getSettingsDiagnostics(settings = {}) {
     keyPresent: Boolean(apiKey),
     keyPrefix,
     keyLength: apiKey.length,
+    keyFormatOk: baseUrl !== "local:claude-kimi" || apiKey.startsWith("sk-kimi-"),
+    claudeCommand: isClaudeProvider ? resolveClaudeCommand(commandPath) : "",
+    proxyPresent: isClaudeProvider ? hasProxyEnv() : false,
   };
 }
 

@@ -7,9 +7,45 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 NODE_BIN=$(command -v node)
 USER_ID=$(id -u)
 SERVICE_PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin"
+PROXY_ENV_XML=""
+
+xml_escape() {
+  printf '%s' "$1" |
+    sed \
+      -e 's/&/\&amp;/g' \
+      -e 's/</\&lt;/g' \
+      -e 's/>/\&gt;/g' \
+      -e 's/"/\&quot;/g' \
+      -e "s/'/\&apos;/g"
+}
+
+add_proxy_env() {
+  key="$1"
+  value="$2"
+  if [ -z "$value" ]; then
+    return
+  fi
+
+  escaped_value=$(xml_escape "$value")
+  PROXY_ENV_XML="$PROXY_ENV_XML
+    <key>$key</key>
+    <string>$escaped_value</string>"
+}
 
 install_service() {
   mkdir -p "$HOME/Library/LaunchAgents" "$ROOT_DIR/.cache"
+  http_proxy_value="${HTTP_PROXY:-${http_proxy:-}}"
+  https_proxy_value="${HTTPS_PROXY:-${https_proxy:-}}"
+  all_proxy_value="${ALL_PROXY:-${all_proxy:-}}"
+  no_proxy_value="${NO_PROXY:-${no_proxy:-}}"
+  add_proxy_env "HTTP_PROXY" "$http_proxy_value"
+  add_proxy_env "HTTPS_PROXY" "$https_proxy_value"
+  add_proxy_env "ALL_PROXY" "$all_proxy_value"
+  add_proxy_env "NO_PROXY" "$no_proxy_value"
+  add_proxy_env "http_proxy" "$http_proxy_value"
+  add_proxy_env "https_proxy" "$https_proxy_value"
+  add_proxy_env "all_proxy" "$all_proxy_value"
+  add_proxy_env "no_proxy" "$no_proxy_value"
   cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -34,6 +70,7 @@ install_service() {
     <string>auto</string>
     <key>PATH</key>
     <string>$SERVICE_PATH</string>
+$PROXY_ENV_XML
   </dict>
   <key>RunAtLoad</key>
   <true/>
