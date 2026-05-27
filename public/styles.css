@@ -387,6 +387,15 @@ select:focus {
   border: 1px solid #e0e6e1;
   border-radius: 8px;
   background: #f8faf7;
+  scroll-margin-top: 96px;
+  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.page-artifact:target,
+.page-artifact.is-highlighted {
+  border-color: rgba(15, 118, 110, 0.55);
+  background: #ffffff;
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
 }
 
 .page-artifact-meta {
@@ -410,6 +419,25 @@ select:focus {
   border-radius: 6px;
   background: #ffffff;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.artifact-crop {
+  position: relative;
+  display: block;
+  width: min(100%, 560px);
+  overflow: hidden;
+  border: 1px solid #d8e0dc;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.artifact-crop img {
+  position: absolute;
+  display: block;
+  max-width: none;
+  border: 0;
+  border-radius: 0;
+  object-fit: fill;
 }
 
 .paragraph-card {
@@ -477,6 +505,34 @@ select:focus {
   color: #24312e;
   line-height: 1.72;
   white-space: pre-wrap;
+}
+
+.related-artifacts {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #e3e9e4;
+  border-radius: 8px;
+  background: #f8faf7;
+}
+
+.related-artifacts-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 780;
+}
+
+.artifact-link {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 780;
+  text-decoration: none;
+}
+
+.artifact-link:hover {
+  text-decoration: underline;
 }
 
 .analysis-grid {

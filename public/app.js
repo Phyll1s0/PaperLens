@@ -688,6 +688,7 @@ function getPageImage(paper, pageNumber) {
 function getPageArtifacts(paper, pageNumber) {
   return (paper.pageArtifacts || [])
     .filter((item) => item.pageNumber === pageNumber && item.type !== "figure-text")
+    .sort((a, b) => Number(a.y || 0) - Number(b.y || 0))
     .slice(0, 8);
 }
 
@@ -726,26 +727,70 @@ function renderPagePreview(pageImage, artifacts = []) {
 function renderPageArtifact(artifact) {
   const card = document.createElement("div");
   card.className = `page-artifact ${artifact.type}`;
+  card.id = artifact.id;
 
   const meta = document.createElement("div");
   meta.className = "page-artifact-meta";
-  meta.textContent = getArtifactLabel(artifact.type);
+  meta.textContent = artifact.label
+    ? `${artifact.label} · ${getArtifactLabel(artifact.type, artifact.visualType)}`
+    : getArtifactLabel(artifact.type, artifact.visualType);
 
   const body = artifact.type === "code" || artifact.type === "formula"
     ? document.createElement("pre")
     : document.createElement("p");
   body.textContent = artifact.text;
 
-  card.append(meta, body);
+  const crop = renderArtifactCrop(artifact);
+  if (crop) {
+    card.append(meta, crop, body);
+  } else {
+    card.append(meta, body);
+  }
+
   return card;
 }
 
-function getArtifactLabel(type) {
+function renderArtifactCrop(artifact) {
+  const crop = artifact.crop;
+  if (!artifact.imagePath || !crop || !crop.width || !crop.height || !crop.pageWidth || !crop.pageHeight) {
+    return null;
+  }
+
+  const frame = document.createElement("a");
+  frame.className = "artifact-crop";
+  frame.href = artifact.imagePath;
+  frame.target = "_blank";
+  frame.rel = "noreferrer";
+  frame.title = "打开整页页面快照";
+  frame.style.aspectRatio = `${crop.width} / ${crop.height}`;
+
+  const image = document.createElement("img");
+  image.src = artifact.imagePath;
+  image.alt = artifact.label ? `${artifact.label} 裁剪预览` : "图表裁剪预览";
+  image.loading = "lazy";
+  image.decoding = "async";
+  image.style.width = `${(crop.pageWidth / crop.width) * 100}%`;
+  image.style.height = `${(crop.pageHeight / crop.height) * 100}%`;
+  image.style.left = `${-(crop.x / crop.width) * 100}%`;
+  image.style.top = `${-(crop.y / crop.height) * 100}%`;
+
+  frame.append(image);
+  return frame;
+}
+
+function getArtifactLabel(type, visualType = "") {
   const labels = {
     caption: "图表说明",
     code: "代码块",
     formula: "公式",
   };
+
+  if (type === "caption" && visualType === "table") {
+    return "表格";
+  }
+  if (type === "caption" && visualType === "figure") {
+    return "图片";
+  }
 
   return labels[type] || "页面材料";
 }
@@ -801,6 +846,11 @@ function renderParagraphCard(paragraph) {
   source.textContent = paragraph.sourceText;
   content.append(source);
 
+  const relatedArtifacts = getRelatedArtifactsForParagraph(state.paper, paragraph);
+  if (relatedArtifacts.length) {
+    content.append(renderRelatedArtifacts(relatedArtifacts));
+  }
+
   if (getAnalysisStatus(paragraph) === "running" && !paragraph.translation && !paragraph.explanation) {
     content.append(renderAnalysisNotice("正在生成翻译与讲解"));
   }
@@ -834,6 +884,80 @@ function renderParagraphCard(paragraph) {
   content.append(renderChatBox(paragraph));
   card.append(header, content);
   return card;
+}
+
+function getRelatedArtifactsForParagraph(paper, paragraph) {
+  const artifacts = paper?.pageArtifacts || [];
+  const ids = new Set(paragraph.relatedArtifactIds || []);
+
+  for (const artifact of artifacts) {
+    if (artifact.type === "caption" && paragraphMentionsArtifact(paragraph.sourceText, artifact)) {
+      ids.add(artifact.id);
+    }
+  }
+
+  return artifacts.filter((artifact) => ids.has(artifact.id));
+}
+
+function paragraphMentionsArtifact(text, artifact) {
+  const parsed = parseArtifactLabel(artifact.label);
+  if (!parsed) {
+    return false;
+  }
+
+  const number = escapeRegExp(parsed.number);
+  const pattern = parsed.kind === "table"
+    ? `\\b(?:table|tab\\.?)\\s*${number}(?:\\s*\\([a-z]\\))?\\b`
+    : `\\b(?:figure|fig\\.?)\\s*${number}(?:\\s*\\([a-z]\\))?\\b`;
+
+  return new RegExp(pattern, "i").test(String(text || ""));
+}
+
+function parseArtifactLabel(label) {
+  const match = String(label || "").match(/^(figure|table)\s+(\d+[a-z]?)/i);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    kind: match[1].toLowerCase() === "table" ? "table" : "figure",
+    number: match[2],
+  };
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function renderRelatedArtifacts(artifacts) {
+  const row = document.createElement("div");
+  row.className = "related-artifacts";
+
+  const label = document.createElement("span");
+  label.className = "related-artifacts-label";
+  label.textContent = "相关图表";
+  row.append(label);
+
+  for (const artifact of artifacts) {
+    const link = document.createElement("a");
+    link.className = "artifact-link";
+    link.href = `#${artifact.id}`;
+    link.textContent = artifact.label || getArtifactLabel(artifact.type, artifact.visualType);
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      const target = document.getElementById(artifact.id);
+      if (!target) {
+        return;
+      }
+
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      target.classList.add("is-highlighted");
+      window.setTimeout(() => target.classList.remove("is-highlighted"), 1600);
+    });
+    row.append(link);
+  }
+
+  return row;
 }
 
 function getAnalysisStatus(paragraph) {

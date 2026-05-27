@@ -356,7 +356,7 @@ function buildPaperRecord({ id, filename, pdfPath, extraction }) {
   }));
   const pageArtifacts = extractPageArtifacts(extraction.pages);
 
-  return {
+  const paper = {
     id,
     filename,
     title,
@@ -372,6 +372,9 @@ function buildPaperRecord({ id, filename, pdfPath, extraction }) {
     sections,
     paragraphs,
   };
+
+  attachParagraphArtifactLinks(paper);
+  return paper;
 }
 
 function splitIntoParagraphs(pages) {
@@ -386,17 +389,20 @@ function splitIntoParagraphs(pages) {
         continue;
       }
 
+      const sourceBox = typeof block === "string" ? null : pickBlockBox(block);
       appendParagraph(paragraphs, {
         id: `para_${paragraphs.length}_${randomUUID().slice(0, 8)}`,
         kind: isLikelyHeading(clean) ? "heading" : "paragraph",
         order: paragraphs.length,
         pageNumber: page.pageNumber,
         pageEndNumber: page.pageNumber,
+        sourceBox,
         sectionId: "section_0",
         sourceText: clean,
         translation: "",
         explanation: "",
         keyTerms: [],
+        relatedArtifactIds: [],
         chatMessages: [],
         analysisStatus: "pending",
         analysisError: "",
@@ -526,6 +532,10 @@ function extractPageArtifacts(pages) {
         return;
       }
 
+      const captionFields = type === "caption"
+        ? buildCaptionArtifactFields(page, block)
+        : {};
+
       artifacts.push({
         id: `artifact_${page.pageNumber}_${index}`,
         type,
@@ -536,11 +546,223 @@ function extractPageArtifacts(pages) {
         width: block.width ?? null,
         height: block.height ?? null,
         lineCount: block.lineCount || 1,
+        ...captionFields,
       });
     });
   }
 
   return artifacts;
+}
+
+function buildCaptionArtifactFields(page, captionBlock) {
+  const text = normalizeArtifactText(captionBlock?.text || "");
+  const label = extractArtifactLabel(text);
+  const crop = inferCaptionCrop(page, captionBlock, label);
+
+  return {
+    label,
+    visualType: /^table\b/i.test(text) ? "table" : "figure",
+    imagePath: page.imagePath || null,
+    imageWidth: page.imageWidth || null,
+    imageHeight: page.imageHeight || null,
+    pageWidth: page.width || null,
+    pageHeight: page.height || null,
+    crop,
+  };
+}
+
+function extractArtifactLabel(text) {
+  const match = String(text || "").match(/^(figure|fig\.|table)\s+(\d+[a-z]?)/i);
+  if (!match) {
+    return "";
+  }
+
+  const kind = /^table$/i.test(match[1]) ? "Table" : "Figure";
+  return `${kind} ${match[2]}`;
+}
+
+function inferCaptionCrop(page, captionBlock, label) {
+  const pageWidth = Number(page.width || 0);
+  const pageHeight = Number(page.height || 0);
+  if (!pageWidth || !pageHeight || !captionBlock) {
+    return null;
+  }
+
+  const horizontal = inferVisualHorizontalBounds(page, captionBlock, pageWidth);
+  const captionY = clampNumber(Number(captionBlock.y || 0), 0, pageHeight);
+  const captionHeight = Math.max(1, Number(captionBlock.height || 0));
+  const captionBottom = clampNumber(captionY + captionHeight, 0, pageHeight);
+  const minHeight = Math.max(56, pageHeight * 0.08);
+  const isTable = /^table\b/i.test(label) || /^table\b/i.test(captionBlock.text || "");
+  let y;
+  let bottom;
+
+  if (isTable) {
+    y = Math.max(0, captionY - pageHeight * 0.012);
+    bottom = findNextTextBoundary(page, captionBlock, horizontal, pageHeight) ||
+      Math.min(pageHeight, captionBottom + pageHeight * 0.32);
+    if (bottom - y < minHeight) {
+      bottom = Math.min(pageHeight, captionBottom + pageHeight * 0.28);
+    }
+  } else {
+    bottom = Math.min(pageHeight, captionBottom + pageHeight * 0.01);
+    y = findPreviousTextBoundary(page, captionBlock, horizontal) ||
+      Math.max(0, captionY - pageHeight * 0.32);
+    if (captionY - y < minHeight) {
+      y = Math.max(0, captionY - pageHeight * 0.28);
+    }
+  }
+
+  return normalizeCrop({
+    x: horizontal.x,
+    y,
+    width: horizontal.width,
+    height: bottom - y,
+    pageWidth,
+    pageHeight,
+  });
+}
+
+function inferVisualHorizontalBounds(page, captionBlock, pageWidth) {
+  const blocks = Array.isArray(page.blocks) ? page.blocks : [];
+  const content = getContentBounds(blocks, pageWidth);
+  const captionColumn = Number(captionBlock.column || 0);
+
+  if (captionColumn === 1 || captionColumn === 2) {
+    const columnBlocks = blocks.filter((block) => Number(block.column || 0) === captionColumn);
+    const columnBounds = getContentBounds(columnBlocks, pageWidth);
+    return expandHorizontalBounds(columnBounds, pageWidth, pageWidth * 0.015);
+  }
+
+  return expandHorizontalBounds(content, pageWidth, pageWidth * 0.02);
+}
+
+function getContentBounds(blocks, pageWidth) {
+  const valid = blocks
+    .map(pickBlockBox)
+    .filter((box) => box && box.width > 0);
+
+  if (!valid.length) {
+    return {
+      x: pageWidth * 0.06,
+      width: pageWidth * 0.88,
+    };
+  }
+
+  const minX = Math.min(...valid.map((box) => box.x));
+  const maxX = Math.max(...valid.map((box) => box.x + box.width));
+  return {
+    x: clampNumber(minX, 0, pageWidth),
+    width: clampNumber(maxX - minX, pageWidth * 0.18, pageWidth),
+  };
+}
+
+function expandHorizontalBounds(bounds, pageWidth, padding) {
+  const x = clampNumber(bounds.x - padding, 0, pageWidth);
+  const right = clampNumber(bounds.x + bounds.width + padding, 0, pageWidth);
+  return {
+    x,
+    width: Math.max(1, right - x),
+  };
+}
+
+function findPreviousTextBoundary(page, captionBlock, horizontal) {
+  const captionY = Number(captionBlock.y || 0);
+  const regularAbove = getRegularBoundaryBlocks(page, captionBlock, horizontal)
+    .filter((block) => Number(block.y || 0) + Number(block.height || 0) <= captionY)
+    .sort((a, b) => (Number(b.y || 0) + Number(b.height || 0)) - (Number(a.y || 0) + Number(a.height || 0)));
+
+  const boundary = regularAbove[0];
+  if (!boundary) {
+    return null;
+  }
+
+  return Number(boundary.y || 0) + Number(boundary.height || 0) + 4;
+}
+
+function findNextTextBoundary(page, captionBlock, horizontal, pageHeight) {
+  const captionBottom = Number(captionBlock.y || 0) + Number(captionBlock.height || 0);
+  const regularBelow = getRegularBoundaryBlocks(page, captionBlock, horizontal)
+    .filter((block) => Number(block.y || 0) >= captionBottom)
+    .sort((a, b) => Number(a.y || 0) - Number(b.y || 0));
+
+  const boundary = regularBelow[0];
+  if (!boundary) {
+    return null;
+  }
+
+  return clampNumber(Number(boundary.y || 0) - 4, captionBottom, pageHeight);
+}
+
+function getRegularBoundaryBlocks(page, captionBlock, horizontal) {
+  const blocks = Array.isArray(page.blocks) ? page.blocks : [];
+  return blocks.filter((block) => {
+    if (block === captionBlock) {
+      return false;
+    }
+
+    if (!overlapsHorizontal(block, horizontal)) {
+      return false;
+    }
+
+    if (classifyPageArtifact(block)) {
+      return false;
+    }
+
+    const text = normalizeParagraph(block.text || "");
+    return text.length >= 45 && /[.!?。！？]/.test(text);
+  });
+}
+
+function overlapsHorizontal(block, horizontal) {
+  const box = pickBlockBox(block);
+  if (!box) {
+    return false;
+  }
+
+  const left = Math.max(box.x, horizontal.x);
+  const right = Math.min(box.x + box.width, horizontal.x + horizontal.width);
+  return right - left > Math.min(box.width, horizontal.width) * 0.18;
+}
+
+function normalizeCrop(crop) {
+  const x = clampNumber(crop.x, 0, crop.pageWidth);
+  const y = clampNumber(crop.y, 0, crop.pageHeight);
+  const right = clampNumber(crop.x + crop.width, x + 1, crop.pageWidth);
+  const bottom = clampNumber(crop.y + crop.height, y + 1, crop.pageHeight);
+
+  return {
+    x,
+    y,
+    width: right - x,
+    height: bottom - y,
+    pageWidth: crop.pageWidth,
+    pageHeight: crop.pageHeight,
+  };
+}
+
+function pickBlockBox(block) {
+  if (!block) {
+    return null;
+  }
+
+  const x = Number(block.x);
+  const y = Number(block.y);
+  const width = Number(block.width);
+  const height = Number(block.height);
+  if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+    return null;
+  }
+
+  return { x, y, width, height };
+}
+
+function clampNumber(value, min, max) {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+
+  return Math.min(max, Math.max(min, value));
 }
 
 function classifyPageArtifact(block) {
@@ -724,7 +946,7 @@ async function segmentPaperWithAi(paper, settings) {
   }
 
   const sections = inferSections(paragraphs);
-  return {
+  const segmented = {
     ...paper,
     title: inferTitle(paragraphs, paper.filename),
     status: "ready",
@@ -733,6 +955,9 @@ async function segmentPaperWithAi(paper, settings) {
     paragraphs,
     updatedAt: new Date().toISOString(),
   };
+
+  attachParagraphArtifactLinks(segmented);
+  return segmented;
 }
 
 function chunkPagesForSegmentation(pages) {
@@ -849,11 +1074,13 @@ function buildParagraphsFromSegmentItems(items) {
       kind,
       order,
       pageNumber: Number.isFinite(item.pageNumber) && item.pageNumber > 0 ? item.pageNumber : 1,
+      pageEndNumber: Number.isFinite(item.pageNumber) && item.pageNumber > 0 ? item.pageNumber : 1,
       sectionId: "section_0",
       sourceText: clean,
       translation: "",
       explanation: "",
       keyTerms: [],
+      relatedArtifactIds: [],
       chatMessages: [],
       analysisStatus: "pending",
       analysisError: "",
@@ -861,6 +1088,73 @@ function buildParagraphsFromSegmentItems(items) {
   }
 
   return paragraphs;
+}
+
+function attachParagraphArtifactLinks(paper) {
+  const artifacts = Array.isArray(paper.pageArtifacts)
+    ? paper.pageArtifacts.filter((artifact) => artifact.type === "caption" && artifact.label)
+    : [];
+
+  if (!artifacts.length || !Array.isArray(paper.paragraphs)) {
+    return paper;
+  }
+
+  for (const paragraph of paper.paragraphs) {
+    if (paragraph.kind === "heading") {
+      paragraph.relatedArtifactIds = [];
+      continue;
+    }
+
+    const matched = artifacts
+      .filter((artifact) => paragraphCanReferenceArtifact(paragraph, artifact))
+      .map((artifact) => artifact.id);
+
+    paragraph.relatedArtifactIds = [...new Set(matched)];
+  }
+
+  return paper;
+}
+
+function paragraphCanReferenceArtifact(paragraph, artifact) {
+  const text = String(paragraph.sourceText || "");
+  if (!text) {
+    return false;
+  }
+
+  const pageStart = Number(paragraph.pageNumber || 0);
+  const pageEnd = Number(paragraph.pageEndNumber || pageStart);
+  const artifactPage = Number(artifact.pageNumber || 0);
+  if (artifactPage && (artifactPage < pageStart - 1 || artifactPage > pageEnd + 1)) {
+    return false;
+  }
+
+  const label = parseArtifactLabel(artifact.label);
+  if (!label) {
+    return false;
+  }
+
+  const number = escapeRegExp(label.number);
+  const pattern = label.kind === "table"
+    ? `\\b(?:table|tab\\.?)\\s*${number}(?:\\s*\\([a-z]\\))?\\b`
+    : `\\b(?:figure|fig\\.?)\\s*${number}(?:\\s*\\([a-z]\\))?\\b`;
+
+  return new RegExp(pattern, "i").test(text);
+}
+
+function parseArtifactLabel(label) {
+  const match = String(label || "").match(/^(figure|table)\s+(\d+[a-z]?)/i);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    kind: match[1].toLowerCase() === "table" ? "table" : "figure",
+    number: match[2],
+  };
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function isLikelyHeading(line) {

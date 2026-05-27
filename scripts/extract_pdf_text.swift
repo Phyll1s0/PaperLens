@@ -16,6 +16,8 @@ struct PageText: Codable {
     let pageNumber: Int
     let text: String
     let blocks: [TextBlock]
+    let width: Double?
+    let height: Double?
     let imagePath: String?
     let imageWidth: Int?
     let imageHeight: Int?
@@ -121,7 +123,11 @@ for index in 0..<document.pageCount {
     }
 
     let pageNumber = index + 1
-    let blocks = extractLayoutBlocks(from: page)
+    let pageBounds = page.bounds(for: .mediaBox)
+    let blocks = convertBlocksToTopLeftCoordinates(
+        extractLayoutBlocks(from: page),
+        pageHeight: pageBounds.height
+    )
     let layoutText = blocks.map(\.text).joined(separator: "\n\n")
     let fallbackText = page.string ?? ""
     let text = layoutText.isEmpty ? fallbackText : layoutText
@@ -136,6 +142,8 @@ for index in 0..<document.pageCount {
         pageNumber: pageNumber,
         text: text,
         blocks: blocks,
+        width: Double(pageBounds.width),
+        height: Double(pageBounds.height),
         imagePath: pageImage?.path,
         imageWidth: pageImage?.width,
         imageHeight: pageImage?.height
@@ -316,6 +324,20 @@ func groupLinesIntoBlocks(_ lines: [LayoutLine]) -> [TextBlock] {
 
     flushCurrent()
     return blocks
+}
+
+func convertBlocksToTopLeftCoordinates(_ blocks: [TextBlock], pageHeight: CGFloat) -> [TextBlock] {
+    blocks.map { block in
+        TextBlock(
+            text: block.text,
+            x: block.x,
+            y: Double(max(CGFloat(0), pageHeight - CGFloat(block.y) - CGFloat(block.height))),
+            width: block.width,
+            height: block.height,
+            column: block.column,
+            lineCount: block.lineCount
+        )
+    }
 }
 
 func shouldContinueAcrossColumn(_ current: String, next: String) -> Bool {
