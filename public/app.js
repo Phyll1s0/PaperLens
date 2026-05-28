@@ -11,6 +11,7 @@ const state = {
     failed: 0,
     total: 0,
     currentId: null,
+    currentBatchSize: 0,
     startedAt: 0,
     timer: null,
     pollInFlight: false,
@@ -614,6 +615,7 @@ function applyAnalysisJob(job) {
   state.autoAnalyze.failed = Number(job.failed || 0);
   state.autoAnalyze.total = Number(job.total || 0);
   state.autoAnalyze.currentId = job.currentParagraphId || "";
+  state.autoAnalyze.currentBatchSize = Number(job.currentBatchSize || 0);
   state.autoAnalyze.startedAt = Date.parse(job.startedAt || job.createdAt) || Date.now();
   state.autoAnalyze.lastProgressKey = getJobProgressKey(job);
 
@@ -632,6 +634,7 @@ function getJobProgressKey(job) {
     job.completed,
     job.failed,
     job.currentParagraphId || "",
+    job.currentBatchSize || 0,
     job.updatedAt || "",
   ].join(":");
 }
@@ -1841,11 +1844,12 @@ function updateAutoStatus() {
   const elapsed = Math.max(0, Math.round((Date.now() - state.autoAnalyze.startedAt) / 1000));
   const current = state.paper?.paragraphs.find((paragraph) => paragraph.id === state.autoAnalyze.currentId);
   const currentLabel = current ? `，当前 P${current.order + 1}` : "";
+  const batchLabel = state.autoAnalyze.currentBatchSize > 1 ? `，运行中 ${state.autoAnalyze.currentBatchSize} 段` : "";
   const stopLabel = state.autoAnalyze.stopRequested ? "，正在停止" : "";
   setStatus([
     `后端分析 ${state.autoAnalyze.completed + state.autoAnalyze.failed}/${state.autoAnalyze.total}`,
     `失败 ${state.autoAnalyze.failed}`,
-    `已用 ${elapsed}s${currentLabel}${stopLabel}`,
+    `已用 ${elapsed}s${currentLabel}${batchLabel}${stopLabel}`,
   ].join(" · "), state.autoAnalyze.failed > 0);
 }
 

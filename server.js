@@ -28,11 +28,16 @@ const MAX_UPLOAD_BYTES = 120 * 1024 * 1024;
 const ARTIFACT_CROP_VERSION = 6;
 const JOB_ITEM_MAX_ATTEMPTS = 2;
 const JOB_POLL_LIMIT = 20;
-const ANALYSIS_BATCH_SIZE = readIntegerEnv("PAPERLENS_ANALYSIS_BATCH_SIZE", 4, 1, 8);
-const CLAUDE_AGENT_ANALYSIS_BATCH_SIZE = readIntegerEnv("PAPERLENS_AGENT_ANALYSIS_BATCH_SIZE", 6, 1, 10);
+const ANALYSIS_BATCH_SIZE = readIntegerEnv("PAPERLENS_ANALYSIS_BATCH_SIZE", 18, 1, 24);
+const CLAUDE_AGENT_ANALYSIS_BATCH_SIZE = readIntegerEnv("PAPERLENS_AGENT_ANALYSIS_BATCH_SIZE", 14, 1, 20);
+const ANALYSIS_CONCURRENCY = readIntegerEnv("PAPERLENS_ANALYSIS_CONCURRENCY", 3, 1, 6);
+const CLAUDE_AGENT_ANALYSIS_CONCURRENCY = readIntegerEnv("PAPERLENS_AGENT_ANALYSIS_CONCURRENCY", 2, 1, 3);
+const ANALYSIS_TARGET_MINUTES = readIntegerEnv("PAPERLENS_ANALYSIS_TARGET_MINUTES", 20, 5, 240);
 const ANALYSIS_CONTEXT_TEXT_LIMIT = 900;
 const ANALYSIS_CONTEXT_TOTAL_LIMIT = 5200;
-const BATCH_ANALYSIS_CONTEXT_TOTAL_LIMIT = 2400;
+const FAST_BATCH_ANALYSIS_CONTEXT_LIMIT = 560;
+const FAST_BATCH_GLOBAL_CONTEXT_LIMIT = 420;
+const MAX_BATCH_SPLIT_DEPTH = 4;
 const SEGMENTATION_CONTEXT_TEXT_LIMIT = 1600;
 const SEGMENTATION_ITEM_TEXT_LIMIT = 900;
 const SECTION_CONTEXT_TEXT_LIMIT = 900;
@@ -65,6 +70,7 @@ const secretStore = {
   keys: new Map(),
   savePromise: Promise.resolve(),
 };
+const paperWriteLocks = new Map();
 
 await loadSecrets();
 await loadJobs();
@@ -627,6 +633,7 @@ function normalizeLoadedJob(job) {
     completed,
     failed,
     currentParagraphId: "",
+    currentBatchSize: 0,
     error: String(job.error || ""),
     createdAt: job.createdAt || new Date().toISOString(),
     startedAt: job.startedAt || "",
@@ -663,6 +670,7 @@ function recoverInterruptedJobs() {
 
     job.status = "queued";
     job.currentParagraphId = "";
+    job.currentBatchSize = 0;
     job.updatedAt = new Date().toISOString();
     for (const item of job.items) {
       if (item.status === "running") {
@@ -696,6 +704,7 @@ function createAnalysisJob({ paper, paragraphIds, settings, rerunAll }) {
     completed: 0,
     failed: 0,
     currentParagraphId: "",
+    currentBatchSize: 0,
     error: "",
     createdAt: now,
     startedAt: "",
@@ -729,6 +738,7 @@ function serializeJob(job) {
     completed: job.completed,
     failed: job.failed,
     currentParagraphId: job.currentParagraphId || "",
+    currentBatchSize: getRunningJobItemCount(job),
     error: job.error || "",
     createdAt: job.createdAt,
     startedAt: job.startedAt || "",
@@ -756,11 +766,16 @@ function serializeJobSummary(job) {
     completed: job.completed,
     failed: job.failed,
     currentParagraphId: job.currentParagraphId || "",
+    currentBatchSize: getRunningJobItemCount(job),
     createdAt: job.createdAt,
     startedAt: job.startedAt || "",
     completedAt: job.completedAt || "",
     updatedAt: job.updatedAt,
   };
+}
+
+function getRunningJobItemCount(job) {
+  return (job.items || []).filter((item) => item.status === "running").length || Number(job.currentBatchSize || 0);
 }
 
 function recalculateJobProgress(job) {
@@ -858,26 +873,29 @@ async function runAnalysisJob(job, signal) {
   job.updatedAt = now;
   await persistJobs();
 
-  for (const item of job.items) {
+  while (true) {
     if (job.cancelRequested || signal.aborted) {
       await markRemainingJobItemsCanceled(job);
       break;
     }
 
-    if (item.status === "done" || item.status === "error" || item.status === "canceled") {
-      continue;
+    const batches = getNextAnalysisBatchGroup(job);
+    if (!batches.length) {
+      break;
     }
 
-    const batchItems = getNextAnalysisBatchItems(job, item);
-    if (batchItems.length > 1) {
-      await runAnalysisJobBatch(job, batchItems, signal);
-    } else {
-      await runAnalysisJobItem(job, item, signal);
-    }
+    await Promise.all(batches.map((batchItems) => {
+      if (getAnalysisBatchSize(job.settings, job) > 1) {
+        return runAnalysisJobBatch(job, batchItems, signal);
+      }
+
+      return runAnalysisJobItem(job, batchItems[0], signal);
+    }));
   }
 
   const finishedAt = new Date().toISOString();
   job.currentParagraphId = "";
+  job.currentBatchSize = 0;
   job.updatedAt = finishedAt;
   if (job.cancelRequested || signal.aborted) {
     job.status = "canceled";
@@ -909,7 +927,9 @@ async function runAnalysisJobItem(job, item, signal) {
     }
 
     await analyzeParagraphInPaper(paper, paragraph, resolveJobSettings(job.settings), { signal });
-    await savePaper(paper);
+    await updatePaperParagraph(job.paperId, item.paragraphId, (target) => {
+      copyParagraphAnalysisFields(target, paragraph);
+    });
     item.status = "done";
     item.completedAt = new Date().toISOString();
     item.error = "";
@@ -952,8 +972,35 @@ async function runAnalysisJobItem(job, item, signal) {
   }
 }
 
-function getNextAnalysisBatchItems(job, startItem) {
-  const batchSize = getAnalysisBatchSize(job.settings);
+function getNextAnalysisBatchGroup(job) {
+  const concurrency = getAnalysisConcurrency(job.settings);
+  const reserved = new Set();
+  const batches = [];
+  for (const item of job.items) {
+    if (batches.length >= concurrency) {
+      break;
+    }
+
+    if (reserved.has(item) || item.status !== "queued") {
+      continue;
+    }
+
+    const batchItems = getNextAnalysisBatchItems(job, item, reserved);
+    if (!batchItems.length) {
+      continue;
+    }
+
+    for (const batchItem of batchItems) {
+      reserved.add(batchItem);
+    }
+    batches.push(batchItems);
+  }
+
+  return batches;
+}
+
+function getNextAnalysisBatchItems(job, startItem, reserved = new Set()) {
+  const batchSize = getAnalysisBatchSize(job.settings, job);
   if (batchSize <= 1) {
     return [startItem];
   }
@@ -965,6 +1012,10 @@ function getNextAnalysisBatchItems(job, startItem) {
 
   const items = [];
   for (const item of job.items.slice(startIndex)) {
+    if (reserved.has(item)) {
+      continue;
+    }
+
     if (item.status === "done" || item.status === "error" || item.status === "canceled") {
       continue;
     }
@@ -982,17 +1033,38 @@ function getNextAnalysisBatchItems(job, startItem) {
   return items;
 }
 
-function getAnalysisBatchSize(settings = {}) {
+function getAnalysisConcurrency(settings = {}) {
   const provider = String(settings.provider || "");
   const baseUrl = String(settings.baseUrl || "");
   if (provider.startsWith("claude") || baseUrl.startsWith("local:claude")) {
-    return CLAUDE_AGENT_ANALYSIS_BATCH_SIZE;
+    return CLAUDE_AGENT_ANALYSIS_CONCURRENCY;
   }
 
-  return ANALYSIS_BATCH_SIZE;
+  return ANALYSIS_CONCURRENCY;
 }
 
-async function runAnalysisJobBatch(job, items, signal) {
+function getAnalysisBatchSize(settings = {}, job = null) {
+  const provider = String(settings.provider || "");
+  const baseUrl = String(settings.baseUrl || "");
+  const agentLike = provider.startsWith("claude") || baseUrl.startsWith("local:claude");
+  const configured = agentLike ? CLAUDE_AGENT_ANALYSIS_BATCH_SIZE : ANALYSIS_BATCH_SIZE;
+  const maxBatchSize = agentLike ? 20 : 24;
+  if (!job || !Array.isArray(job.items)) {
+    return configured;
+  }
+
+  const remaining = job.items.filter((item) => item.status === "queued" || item.status === "running").length;
+  if (remaining <= configured) {
+    return configured;
+  }
+
+  const expectedBatchSeconds = agentLike ? 75 : 45;
+  const targetBatchCount = Math.max(1, Math.floor((ANALYSIS_TARGET_MINUTES * 60) / expectedBatchSeconds));
+  const neededForTarget = Math.ceil(remaining / targetBatchCount);
+  return Math.trunc(clampNumber(Math.max(configured, neededForTarget), 1, maxBatchSize));
+}
+
+async function runAnalysisJobBatch(job, items, signal, options = {}) {
   const now = new Date().toISOString();
   for (const item of items) {
     item.status = "running";
@@ -1001,6 +1073,7 @@ async function runAnalysisJobBatch(job, items, signal) {
     item.attempts += 1;
   }
   job.currentParagraphId = items[0]?.paragraphId || "";
+  job.currentBatchSize = items.length;
   job.updatedAt = now;
   await updatePaperParagraphs(job.paperId, items.map((item) => item.paragraphId), (paragraph) => {
     paragraph.analysisStatus = "running";
@@ -1019,8 +1092,14 @@ async function runAnalysisJobBatch(job, items, signal) {
       return paragraph;
     });
 
-    await analyzeParagraphBatchInPaper(paper, paragraphs, resolveJobSettings(job.settings), { signal });
-    await savePaper(paper);
+    const analyzedParagraphs = await analyzeParagraphBatchInPaper(paper, paragraphs, resolveJobSettings(job.settings), { signal });
+    const analyzedById = new Map(analyzedParagraphs.map((paragraph) => [paragraph.id, paragraph]));
+    await updatePaperParagraphs(job.paperId, items.map((item) => item.paragraphId), (paragraph) => {
+      const analyzed = analyzedById.get(paragraph.id);
+      if (analyzed) {
+        copyParagraphAnalysisFields(paragraph, analyzed);
+      }
+    });
     const completedAt = new Date().toISOString();
     for (const item of items) {
       item.status = "done";
@@ -1043,19 +1122,32 @@ async function runAnalysisJobBatch(job, items, signal) {
       return;
     }
 
+    if (items.length > 1 && isFatalModelConfigurationError(error)) {
+      await markJobBatchItemsError(job, items, error);
+      return;
+    }
+
     if (items.length > 1) {
+      const chunks = splitJobItemsForBatchRetry(items, options.splitDepth || 0);
       for (const item of items) {
         item.status = "queued";
-        item.error = `批量分析失败，已回退单段：${error.message || "模型请求失败。"}`;
+        item.error = `批量分析失败，已拆分小批量重试：${error.message || "模型请求失败。"}`;
       }
       job.currentParagraphId = "";
+      job.currentBatchSize = 0;
       job.updatedAt = new Date().toISOString();
+      await updatePaperParagraphs(job.paperId, items.map((item) => item.paragraphId), (paragraph) => {
+        paragraph.analysisStatus = "queued";
+        paragraph.analysisError = "";
+      });
       await persistJobs();
-      for (const item of items) {
+      for (const chunk of chunks) {
         if (job.cancelRequested || signal.aborted) {
           break;
         }
-        await runAnalysisJobItem(job, item, signal);
+        await runAnalysisJobBatch(job, chunk, signal, {
+          splitDepth: (options.splitDepth || 0) + 1,
+        });
       }
       return;
     }
@@ -1082,14 +1174,49 @@ async function runAnalysisJobBatch(job, items, signal) {
     if (items.some((item) => item.paragraphId === job.currentParagraphId)) {
       job.currentParagraphId = "";
     }
+    if (job.currentBatchSize === items.length) {
+      job.currentBatchSize = 0;
+    }
     job.updatedAt = new Date().toISOString();
     await persistJobs();
   }
 }
 
+async function markJobBatchItemsError(job, items, error) {
+  const completedAt = new Date().toISOString();
+  const message = error.message || "模型请求失败。";
+  for (const item of items) {
+    item.status = "error";
+    item.error = message;
+    item.completedAt = completedAt;
+  }
+  job.failed += items.length;
+  await updatePaperParagraphs(job.paperId, items.map((item) => item.paragraphId), (paragraph) => {
+    paragraph.analysisStatus = "error";
+    paragraph.analysisError = message;
+  });
+}
+
+function splitJobItemsForBatchRetry(items, splitDepth) {
+  const targetSize = splitDepth >= MAX_BATCH_SPLIT_DEPTH
+    ? 1
+    : Math.max(1, Math.ceil(items.length / 2));
+  const chunks = [];
+  for (let index = 0; index < items.length; index += targetSize) {
+    chunks.push(items.slice(index, index + targetSize));
+  }
+
+  return chunks;
+}
+
 function isRetryableJobError(error) {
   const message = String(error?.message || "");
   return /网络请求失败|fetch failed|超时|temporarily|timeout|ECONN|ENOTFOUND|ETIMEDOUT/i.test(message);
+}
+
+function isFatalModelConfigurationError(error) {
+  const message = String(error?.message || "");
+  return /budget has been exceeded|max budget|insufficient_quota|quota exceeded|invalid api key|unauthorized|forbidden|401|403|余额不足|预算|密钥无效/i.test(message);
 }
 
 async function markRemainingJobItemsCanceled(job) {
@@ -1127,16 +1254,18 @@ async function cancelJob(jobId) {
 }
 
 async function updatePaperParagraph(paperId, paragraphId, update) {
-  const paper = await loadPaper(paperId);
-  const paragraph = (paper.paragraphs || []).find((entry) => entry.id === paragraphId);
-  if (!paragraph) {
-    return null;
-  }
+  return withPaperWriteLock(paperId, async () => {
+    const paper = await loadPaper(paperId);
+    const paragraph = (paper.paragraphs || []).find((entry) => entry.id === paragraphId);
+    if (!paragraph) {
+      return null;
+    }
 
-  update(paragraph, paper);
-  paragraph.updatedAt = new Date().toISOString();
-  await savePaper(paper);
-  return paragraph;
+    update(paragraph, paper);
+    paragraph.updatedAt = new Date().toISOString();
+    await savePaper(paper);
+    return paragraph;
+  });
 }
 
 async function updatePaperParagraphs(paperId, paragraphIds, update) {
@@ -1145,23 +1274,39 @@ async function updatePaperParagraphs(paperId, paragraphIds, update) {
     return [];
   }
 
-  const paper = await loadPaper(paperId);
-  const updated = [];
-  for (const paragraph of paper.paragraphs || []) {
-    if (!wanted.has(paragraph.id)) {
-      continue;
+  return withPaperWriteLock(paperId, async () => {
+    const paper = await loadPaper(paperId);
+    const updated = [];
+    for (const paragraph of paper.paragraphs || []) {
+      if (!wanted.has(paragraph.id)) {
+        continue;
+      }
+
+      update(paragraph, paper);
+      paragraph.updatedAt = new Date().toISOString();
+      updated.push(paragraph);
     }
 
-    update(paragraph, paper);
-    paragraph.updatedAt = new Date().toISOString();
-    updated.push(paragraph);
-  }
+    if (updated.length) {
+      await savePaper(paper);
+    }
 
-  if (updated.length) {
-    await savePaper(paper);
-  }
+    return updated;
+  });
+}
 
-  return updated;
+async function withPaperWriteLock(paperId, operation) {
+  const key = String(paperId);
+  const previous = paperWriteLocks.get(key) || Promise.resolve();
+  const next = previous.catch(() => {}).then(operation);
+  paperWriteLocks.set(key, next);
+  try {
+    return await next;
+  } finally {
+    if (paperWriteLocks.get(key) === next) {
+      paperWriteLocks.delete(key);
+    }
+  }
 }
 
 function getReadingParagraphs(paper) {
@@ -1178,6 +1323,14 @@ function resetParagraphAnalysis(paragraph) {
   paragraph.keyTerms = [];
   paragraph.analysisStatus = "pending";
   paragraph.analysisError = "";
+}
+
+function copyParagraphAnalysisFields(target, source) {
+  target.translation = source.translation || "";
+  target.explanation = source.explanation || "";
+  target.keyTerms = Array.isArray(source.keyTerms) ? source.keyTerms : [];
+  target.analysisStatus = source.analysisStatus || "done";
+  target.analysisError = source.analysisError || "";
 }
 
 function sleep(ms) {
@@ -1226,14 +1379,9 @@ async function analyzeParagraphInPaper(paper, paragraph, settings, options = {})
 }
 
 async function analyzeParagraphBatchInPaper(paper, paragraphs, settings, options = {}) {
-  if (paragraphs.length === 1) {
-    await analyzeParagraphInPaper(paper, paragraphs[0], settings, options);
-    return paragraphs;
-  }
-
   const content = await callModel(settings, buildParagraphBatchAnalysisMessages(paper, paragraphs), {
     signal: options.signal,
-    maxTokens: Math.min(12000, Math.max(2400, paragraphs.length * 1600)),
+    maxTokens: Math.min(10000, Math.max(2200, 1200 + paragraphs.length * 900)),
     timeoutMs: getBatchAnalysisTimeoutMs(paragraphs.length, settings),
   });
   const parsed = parseBatchAnalysisResult(content);
@@ -1265,9 +1413,9 @@ function getBatchAnalysisTimeoutMs(batchLength, settings = {}) {
   const provider = String(settings.provider || "");
   const baseUrl = String(settings.baseUrl || "");
   const agentLike = provider.startsWith("claude") || baseUrl.startsWith("local:claude");
-  const baseMs = agentLike ? 180_000 : 90_000;
-  const perParagraphMs = agentLike ? 45_000 : 18_000;
-  return Math.min(agentLike ? 480_000 : 180_000, baseMs + Math.max(0, batchLength - 1) * perParagraphMs);
+  const baseMs = agentLike ? 85_000 : 45_000;
+  const perParagraphMs = agentLike ? 7_000 : 4_000;
+  return Math.min(agentLike ? 190_000 : 120_000, baseMs + Math.max(0, batchLength - 1) * perParagraphMs);
 }
 
 function parseBatchAnalysisResult(content) {
@@ -1333,15 +1481,18 @@ function buildParagraphBatchAnalysisMessages(paper, paragraphs) {
     {
       role: "system",
       content:
-        "你是一个严谨的论文精读助手。必须忠于论文原文，不编造。请分别分析批次中的每个 paragraphId；上下文只用于理解术语、承接关系和图表引用，不要把上下文内容误当作当前段落翻译。请只输出合法 JSON，不要使用 Markdown 代码块。涉及公式时请保留 LaTeX，并用 $...$ 或 $$...$$ 包裹。",
+        "你是一个严谨但高效的论文精读助手。当前任务是整篇快速处理，必须忠于论文原文，不编造。请分别分析批次中的每个 paragraphId；上下文只用于理解术语、承接关系和图表引用，不要把上下文内容误当作当前段落翻译。请只输出合法、紧凑 JSON，不要使用 Markdown 代码块。涉及公式时保留 LaTeX，并用 $...$ 或 $$...$$ 包裹。",
     },
     {
       role: "user",
       content: [
-        "请批量分析下面这些论文段落。",
+        "请批量快速分析下面这些论文段落。",
+        "速度优先：translation 只翻译当前原文，忠实完整但不要额外发挥；explanation 用 1 句中文，不超过 90 个汉字；keyTerms 最多 4 个。",
+        "输出尽量紧凑，不要在字段值里加入无关换行，不要把上下文翻译进结果。",
+        "每个输入 paragraph 必须返回一个同名 paragraphId，不要漏项，不要增加不存在的段落。",
         "",
         "全局上下文:",
-        truncateText(globalContext, 900),
+        truncateText(globalContext, FAST_BATCH_GLOBAL_CONTEXT_LIMIT),
         "",
         "段落列表:",
         ...paragraphs.map((paragraph) => formatBatchAnalysisParagraph(paper, paragraph)),
@@ -1349,7 +1500,7 @@ function buildParagraphBatchAnalysisMessages(paper, paragraphs) {
         "输出 JSON 格式:",
         "{",
         '  "items": [',
-        '    { "paragraphId": "para_xxx", "translation": "忠实中文翻译，保留必要英文术语", "explanation": "中文讲解，说明这段在论文中的作用、关键概念和阅读难点", "keyTerms": ["术语1", "术语2"] }',
+        '    { "paragraphId": "para_xxx", "translation": "忠实中文翻译，保留必要英文术语", "explanation": "一句话讲清作用或难点", "keyTerms": ["术语1", "术语2"] }',
         "  ]",
         "}",
       ].join("\n"),
@@ -1363,8 +1514,8 @@ function formatBatchAnalysisParagraph(paper, paragraph) {
     ? `${paragraph.pageNumber}-${paragraph.pageEndNumber}`
     : `${paragraph.pageNumber}`;
   const context = truncateText(
-    buildParagraphAnalysisContext(paper, paragraph),
-    BATCH_ANALYSIS_CONTEXT_TOTAL_LIMIT,
+    buildFastBatchAnalysisContext(paper, paragraph),
+    FAST_BATCH_ANALYSIS_CONTEXT_LIMIT,
   );
 
   return [
@@ -1377,6 +1528,90 @@ function formatBatchAnalysisParagraph(paper, paragraph) {
     paragraph.sourceText,
     "</paragraph>",
   ].join("\n");
+}
+
+function buildFastBatchAnalysisContext(paper, paragraph) {
+  const section = (paper.sections || []).find((item) => item.id === paragraph.sectionId);
+  const blocks = [];
+  if (section) {
+    blocks.push([
+      `章节: ${section.title || "正文"}`,
+      section.summary ? `摘要: ${truncateText(section.summary, 180)}` : "",
+      normalizeKeywordList(section.keywords).length
+        ? `关键词: ${normalizeKeywordList(section.keywords).slice(0, 6).join("、")}`
+        : "",
+    ].filter(Boolean).join(" "));
+  }
+
+  const nearby = buildFastNearbyContext(paper, paragraph);
+  if (nearby) {
+    blocks.push(nearby);
+  }
+
+  const references = buildFastReferenceContext(paper, paragraph);
+  if (references) {
+    blocks.push(references);
+  }
+
+  const terms = [
+    ...normalizeKeywordList(paper.contextProfile?.keywords).slice(0, 4),
+    ...normalizeKeywordList(paragraph.contextKeywords).slice(0, 4),
+    ...normalizeKeywordList(paragraph.keyTerms).slice(0, 4),
+  ];
+  const uniqueTerms = [];
+  for (const term of terms) {
+    pushUnique(uniqueTerms, term);
+  }
+  if (uniqueTerms.length) {
+    blocks.push(`术语: ${uniqueTerms.slice(0, 8).join("、")}`);
+  }
+
+  return blocks.join("\n");
+}
+
+function buildFastNearbyContext(paper, paragraph) {
+  const paragraphs = Array.isArray(paper.paragraphs) ? paper.paragraphs : [];
+  const index = paragraphs.findIndex((item) => item.id === paragraph.id);
+  if (index === -1) {
+    return "";
+  }
+
+  const previous = findReadableNeighbor(paragraphs, index, -1);
+  const next = findReadableNeighbor(paragraphs, index, 1);
+  const lines = [];
+  if (previous) {
+    lines.push(`前段: ${truncateText(previous.sourceText, 180)}`);
+  }
+  if (next) {
+    lines.push(`后段: ${truncateText(next.sourceText, 140)}`);
+  }
+
+  return lines.join("\n");
+}
+
+function buildFastReferenceContext(paper, paragraph) {
+  const relatedIds = new Set(Array.isArray(paragraph.relatedArtifactIds) ? paragraph.relatedArtifactIds : []);
+  const artifacts = Array.isArray(paper.pageArtifacts) ? paper.pageArtifacts : [];
+  const related = artifacts
+    .filter((artifact) => relatedIds.has(artifact.id) || (artifact.label && paragraphCanReferenceArtifact(paragraph, artifact)))
+    .slice(0, 2);
+  if (!related.length) {
+    return "";
+  }
+
+  return `相关图表: ${related.map((artifact) =>
+    `${artifact.label || getArtifactContextLabel(artifact)} ${truncateText(artifact.text || "", 160)}`)
+    .join(" / ")}`;
+}
+
+function getArtifactContextLabel(artifact) {
+  if (artifact.type === "formula") {
+    return artifact.label || "公式";
+  }
+  if (artifact.type === "code") {
+    return "代码";
+  }
+  return "图表";
 }
 
 function buildParagraphAnalysisContext(paper, paragraph) {
