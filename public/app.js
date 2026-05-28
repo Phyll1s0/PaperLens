@@ -5,13 +5,15 @@ const state = {
   autoAnalyze: {
     running: false,
     stopRequested: false,
+    jobId: null,
     completed: 0,
     failed: 0,
     total: 0,
     currentId: null,
-    abortController: null,
     startedAt: 0,
     timer: null,
+    pollInFlight: false,
+    lastProgressKey: "",
   },
 };
 
@@ -358,6 +360,7 @@ async function openPaper(paperId) {
     els.searchInput.value = "";
     setStatus("论文已载入");
     renderPaper();
+    await syncActiveAnalysisJob();
   } catch (error) {
     setStatus(error.message, true);
   }
@@ -424,50 +427,15 @@ async function pingModel() {
 }
 
 async function analyzeParagraph(paragraphId, options = {}) {
-  if (!ensureModelSettings({ quiet: options.fromAuto })) {
+  if (!state.paper) {
     return;
   }
 
-  state.busyParagraphId = paragraphId;
-  markParagraph(paragraphId, { analysisStatus: "running", analysisError: "" });
-  renderPaper();
-
-  try {
-    const paragraph = await requestAnalyzeParagraph(paragraphId, { signal: options.signal });
-    replaceParagraph(paragraph);
-    if (!options.fromAuto) {
-      setStatus("分析完成");
-    }
-    return paragraph;
-  } catch (error) {
-    const patch = error.isAbort
-      ? { analysisStatus: "pending", analysisError: "" }
-      : { analysisStatus: "error", analysisError: error.message };
-    markParagraph(paragraphId, patch);
-    if (!options.fromAuto) {
-      setStatus(error.message, true);
-      return null;
-    }
-    throw error;
-  } finally {
-    state.busyParagraphId = null;
-    renderPaper();
-  }
-}
-
-async function requestAnalyzeParagraph(paragraphId, options = {}) {
-  const response = await apiFetch("/api/analyze", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    signal: options.signal,
-    body: JSON.stringify({
-      paperId: state.paper.id,
-      paragraphId,
-      settings: getSettings(),
-    }),
-  }, "分析段落");
-  const result = await readResponse(response);
-  return result.paragraph;
+  await createAnalysisJob({
+    paragraphIds: [paragraphId],
+    force: true,
+    statusLabel: "已加入后端分析队列",
+  });
 }
 
 async function startAutoAnalyze(options = {}) {
@@ -479,96 +447,186 @@ async function startAutoAnalyze(options = {}) {
     return;
   }
 
-  if (options.rerunAll) {
-    resetParagraphAnalyses(getReadingParagraphs(state.paper));
-    renderPaper();
-  }
-
-  const pending = options.rerunAll
-    ? getReadingParagraphs(state.paper)
-    : getReadingParagraphs(state.paper).filter(needsAnalysis);
-  if (!pending.length) {
-    setStatus("没有待分析段落");
-    updateAutoButtons();
-    return;
-  }
-
-  state.autoAnalyze = {
-    running: true,
-    stopRequested: false,
-    completed: 0,
-    failed: 0,
-    total: pending.length,
-    currentId: null,
-    abortController: null,
-    startedAt: Date.now(),
-    timer: window.setInterval(updateAutoStatus, 1000),
-  };
-  updateAutoButtons();
-
-  for (const paragraph of pending) {
-    if (state.autoAnalyze.stopRequested) {
-      break;
-    }
-
-    state.autoAnalyze.currentId = paragraph.id;
-    state.autoAnalyze.abortController = new AbortController();
-    updateAutoStatus();
-
-    try {
-      await analyzeParagraph(paragraph.id, {
-        fromAuto: true,
-        signal: state.autoAnalyze.abortController.signal,
-      });
-      state.autoAnalyze.completed += 1;
-    } catch (error) {
-      if (error.isAbort && state.autoAnalyze.stopRequested) {
-        markParagraph(paragraph.id, { analysisStatus: "pending", analysisError: "" });
-        break;
-      }
-
-      state.autoAnalyze.failed += 1;
-      if (error.isNetworkError) {
-        state.autoAnalyze.stopRequested = true;
-        setStatus(error.message, true);
-        break;
-      }
-    } finally {
-      state.autoAnalyze.abortController = null;
-    }
-
-    updateAutoStatus();
-  }
-
-  const stopped = state.autoAnalyze.stopRequested;
-  const completed = state.autoAnalyze.completed;
-  const failed = state.autoAnalyze.failed;
-  clearAutoTimer();
-  state.autoAnalyze.running = false;
-  state.autoAnalyze.stopRequested = false;
-  state.autoAnalyze.currentId = null;
-  state.autoAnalyze.abortController = null;
-  updateAutoButtons();
-  renderPaper();
-  loadRecentPapers();
-
-  if (stopped) {
-    setStatus(`已停止自动分析：完成 ${completed} 段，失败 ${failed} 段`);
-    return;
-  }
-
-  setStatus(`自动分析完成：完成 ${completed} 段，失败 ${failed} 段`, failed > 0);
+  await createAnalysisJob({
+    rerunAll: Boolean(options.rerunAll),
+    statusLabel: options.rerunAll ? "已重新加入后端分析队列" : "已启动后端自动分析队列",
+  });
 }
 
-function stopAutoAnalyze() {
-  if (!state.autoAnalyze.running) {
+async function createAnalysisJob(payload = {}) {
+  if (!state.paper) {
+    return;
+  }
+
+  if (!ensureModelSettings()) {
+    return;
+  }
+
+  setStatus("正在创建后端分析任务");
+  updateAutoButtons();
+
+  try {
+    const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}/analysis-jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        settings: getSettings(),
+        paragraphIds: payload.paragraphIds || [],
+        rerunAll: Boolean(payload.rerunAll),
+        force: Boolean(payload.force),
+      }),
+    }, "创建分析任务");
+    const result = await readResponse(response);
+    if (result.paper) {
+      state.paper = result.paper;
+    }
+
+    if (!result.job) {
+      renderPaper();
+      setStatus(result.message || "没有待分析段落");
+      updateAutoButtons();
+      return;
+    }
+
+    beginAnalysisJob(result.job);
+    renderPaper();
+    setStatus(payload.statusLabel || "已加入后端分析队列");
+  } catch (error) {
+    setStatus(error.message, true);
+    updateAutoButtons();
+  }
+}
+
+async function stopAutoAnalyze() {
+  if (!state.autoAnalyze.running || !state.autoAnalyze.jobId) {
     return;
   }
 
   state.autoAnalyze.stopRequested = true;
-  state.autoAnalyze.abortController?.abort();
-  setStatus("正在停止，已取消当前请求");
+  setStatus("正在通知后端停止任务");
   updateAutoButtons();
+
+  try {
+    const response = await apiFetch(`/api/jobs/${encodeURIComponent(state.autoAnalyze.jobId)}/cancel`, {
+      method: "POST",
+    }, "停止分析任务");
+    const result = await readResponse(response);
+    if (result.job) {
+      applyAnalysisJob(result.job);
+    }
+    await pollAnalysisJob({ forceRefresh: true });
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
+function beginAnalysisJob(job) {
+  applyAnalysisJob(job);
+  clearAutoTimer();
+  if (state.autoAnalyze.running) {
+    state.autoAnalyze.timer = window.setInterval(() => {
+      pollAnalysisJob().catch((error) => setStatus(error.message, true));
+    }, 1800);
+  }
+  updateAutoStatus();
+  updateAutoButtons();
+}
+
+function applyAnalysisJob(job) {
+  const running = isActiveAnalysisJob(job);
+  state.autoAnalyze.running = running;
+  state.autoAnalyze.stopRequested = Boolean(job.cancelRequested || job.status === "canceling");
+  state.autoAnalyze.jobId = job.id;
+  state.autoAnalyze.completed = Number(job.completed || 0);
+  state.autoAnalyze.failed = Number(job.failed || 0);
+  state.autoAnalyze.total = Number(job.total || 0);
+  state.autoAnalyze.currentId = job.currentParagraphId || "";
+  state.autoAnalyze.startedAt = Date.parse(job.startedAt || job.createdAt) || Date.now();
+  state.autoAnalyze.lastProgressKey = getJobProgressKey(job);
+
+  if (!running) {
+    clearAutoTimer();
+  }
+}
+
+function isActiveAnalysisJob(job) {
+  return job && (job.status === "queued" || job.status === "running" || job.status === "canceling");
+}
+
+function getJobProgressKey(job) {
+  return [
+    job.status,
+    job.completed,
+    job.failed,
+    job.currentParagraphId || "",
+    job.updatedAt || "",
+  ].join(":");
+}
+
+async function pollAnalysisJob(options = {}) {
+  if (!state.autoAnalyze.jobId || state.autoAnalyze.pollInFlight) {
+    return;
+  }
+
+  state.autoAnalyze.pollInFlight = true;
+  try {
+    const response = await apiFetch(`/api/jobs/${encodeURIComponent(state.autoAnalyze.jobId)}`, {}, "查询分析任务");
+    const result = await readResponse(response);
+    const job = result.job;
+    const previousKey = state.autoAnalyze.lastProgressKey;
+    applyAnalysisJob(job);
+    const progressChanged = previousKey !== state.autoAnalyze.lastProgressKey;
+    if (options.forceRefresh || progressChanged || !state.autoAnalyze.running) {
+      await refreshCurrentPaper();
+    }
+
+    updateAutoStatus();
+    updateAutoButtons();
+
+    if (!state.autoAnalyze.running) {
+      loadRecentPapers();
+      if (job.status === "canceled") {
+        setStatus(`已停止自动分析：完成 ${job.completed} 段，失败 ${job.failed} 段`);
+      } else {
+        setStatus(`自动分析完成：完成 ${job.completed} 段，失败 ${job.failed} 段`, job.failed > 0);
+      }
+    }
+  } finally {
+    state.autoAnalyze.pollInFlight = false;
+  }
+}
+
+async function syncActiveAnalysisJob() {
+  if (!state.paper) {
+    return;
+  }
+
+  try {
+    const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}/analysis-jobs/active`, {}, "同步分析任务");
+    const result = await readResponse(response);
+    if (result.job) {
+      beginAnalysisJob(result.job);
+      await pollAnalysisJob({ forceRefresh: true });
+    } else if (state.autoAnalyze.running) {
+      clearAutoTimer();
+      state.autoAnalyze.running = false;
+      state.autoAnalyze.stopRequested = false;
+      state.autoAnalyze.jobId = null;
+      updateAutoButtons();
+    }
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
+async function refreshCurrentPaper() {
+  if (!state.paper) {
+    return;
+  }
+
+  const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}`, {}, "刷新论文状态");
+  state.paper = await readResponse(response);
+  renderPaper();
 }
 
 function needsAnalysis(paragraph) {
@@ -1007,6 +1065,10 @@ function renderParagraphCard(paragraph) {
     content.append(renderRelatedArtifacts(relatedArtifacts));
   }
 
+  if (getAnalysisStatus(paragraph) === "queued" && !paragraph.translation && !paragraph.explanation) {
+    content.append(renderAnalysisNotice("已加入后端队列，等待生成翻译与讲解"));
+  }
+
   if (getAnalysisStatus(paragraph) === "running" && !paragraph.translation && !paragraph.explanation) {
     content.append(renderAnalysisNotice("正在生成翻译与讲解"));
   }
@@ -1117,6 +1179,10 @@ function renderRelatedArtifacts(artifacts) {
 }
 
 function getAnalysisStatus(paragraph) {
+  if (paragraph.analysisStatus === "queued") {
+    return "queued";
+  }
+
   if (state.busyParagraphId === paragraph.id || paragraph.analysisStatus === "running") {
     return "running";
   }
@@ -1134,6 +1200,9 @@ function getAnalysisStatus(paragraph) {
 
 function getAnalysisStatusText(paragraph) {
   const status = getAnalysisStatus(paragraph);
+  if (status === "queued") {
+    return "队列中";
+  }
   if (status === "running") {
     return "生成中";
   }
@@ -1148,6 +1217,9 @@ function getAnalysisStatusText(paragraph) {
 
 function getAnalyzeButtonText(paragraph) {
   const status = getAnalysisStatus(paragraph);
+  if (status === "queued") {
+    return "队列中";
+  }
   if (status === "running") {
     return "处理中";
   }
@@ -1597,7 +1669,7 @@ function updateAutoStatus() {
   const currentLabel = current ? `，当前 P${current.order + 1}` : "";
   const stopLabel = state.autoAnalyze.stopRequested ? "，正在停止" : "";
   setStatus([
-    `自动分析 ${state.autoAnalyze.completed + state.autoAnalyze.failed}/${state.autoAnalyze.total}`,
+    `后端分析 ${state.autoAnalyze.completed + state.autoAnalyze.failed}/${state.autoAnalyze.total}`,
     `失败 ${state.autoAnalyze.failed}`,
     `已用 ${elapsed}s${currentLabel}${stopLabel}`,
   ].join(" · "), state.autoAnalyze.failed > 0);

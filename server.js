@@ -19,11 +19,14 @@ const UPLOAD_DIR = path.join(__dirname, "uploads");
 const DATA_DIR = path.join(__dirname, "data");
 const ASSET_DIR = path.join(__dirname, "paper-assets");
 const CACHE_DIR = path.join(__dirname, ".cache");
+const JOBS_PATH = path.join(DATA_DIR, "jobs.json");
 const WORKSPACE_CACHE_KEY = createHash("sha1").update(__dirname).digest("hex").slice(0, 12);
 const SWIFT_MODULE_CACHE_DIR = path.join(CACHE_DIR, `swift-module-cache-${WORKSPACE_CACHE_KEY}`);
 const TMP_DIR = path.join(CACHE_DIR, "tmp");
 const MAX_UPLOAD_BYTES = 120 * 1024 * 1024;
 const ARTIFACT_CROP_VERSION = 5;
+const JOB_ITEM_MAX_ATTEMPTS = 2;
+const JOB_POLL_LIMIT = 20;
 const EXTRA_BIN_DIRS = [
   path.dirname(process.execPath),
   "/opt/homebrew/bin",
@@ -41,6 +44,18 @@ await mkdir(DATA_DIR, { recursive: true });
 await mkdir(ASSET_DIR, { recursive: true });
 await mkdir(SWIFT_MODULE_CACHE_DIR, { recursive: true });
 await mkdir(TMP_DIR, { recursive: true });
+
+const jobStore = {
+  jobs: new Map(),
+  activeJobId: null,
+  controllers: new Map(),
+  workerScheduled: false,
+  savePromise: Promise.resolve(),
+};
+
+await loadJobs();
+recoverInterruptedJobs();
+scheduleJobWorker();
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -80,9 +95,29 @@ const server = http.createServer(async (req, res) => {
       return await handleSegmentPaper(req, res, segmentMatch[1]);
     }
 
+    const analysisJobsMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/analysis-jobs$/);
+    if (req.method === "POST" && analysisJobsMatch) {
+      return await handleCreateAnalysisJob(req, res, analysisJobsMatch[1]);
+    }
+
+    const activeAnalysisJobMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/analysis-jobs\/active$/);
+    if (req.method === "GET" && activeAnalysisJobMatch) {
+      return await handleGetActiveAnalysisJob(res, activeAnalysisJobMatch[1]);
+    }
+
     const paperMatch = url.pathname.match(/^\/api\/papers\/([^/]+)$/);
     if (req.method === "GET" && paperMatch) {
       return json(res, await loadPaper(paperMatch[1]));
+    }
+
+    const jobCancelMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/cancel$/);
+    if (req.method === "POST" && jobCancelMatch) {
+      return await handleCancelJob(res, jobCancelMatch[1]);
+    }
+
+    const jobMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)$/);
+    if (req.method === "GET" && jobMatch) {
+      return await handleGetJob(res, jobMatch[1]);
     }
 
     if (req.method === "POST" && url.pathname === "/api/analyze") {
@@ -172,17 +207,109 @@ async function handleSegmentPaper(req, res, paperId) {
   return json(res, { paper: segmented });
 }
 
+async function handleCreateAnalysisJob(req, res, paperId) {
+  const payload = await readJson(req);
+  const paper = await loadPaper(paperId);
+  const settings = normalizeSettings(payload.settings || {});
+  const requestedIds = Array.isArray(payload.paragraphIds)
+    ? payload.paragraphIds.map(String).filter(Boolean)
+    : payload.paragraphId
+      ? [String(payload.paragraphId)]
+      : [];
+  const rerunAll = Boolean(payload.rerunAll);
+  const forceSelected = Boolean(payload.force);
+  const existing = findActiveAnalysisJobForPaper(paperId);
+
+  if (existing && !rerunAll && !forceSelected) {
+    return json(res, { job: serializeJob(existing), paper });
+  }
+
+  if (existing && (rerunAll || forceSelected)) {
+    await cancelJob(existing.id);
+  }
+
+  const readingParagraphs = getReadingParagraphs(paper);
+  const requestedSet = requestedIds.length ? new Set(requestedIds) : null;
+  const targets = readingParagraphs.filter((paragraph) => {
+    if (requestedSet && !requestedSet.has(paragraph.id)) {
+      return false;
+    }
+
+    return rerunAll || forceSelected || needsParagraphAnalysis(paragraph);
+  });
+
+  if (!targets.length) {
+    return json(res, {
+      job: null,
+      paper,
+      message: "没有待分析段落。",
+    });
+  }
+
+  for (const paragraph of targets) {
+    if (rerunAll || forceSelected) {
+      resetParagraphAnalysis(paragraph);
+    }
+    paragraph.analysisStatus = "queued";
+    paragraph.analysisError = "";
+  }
+  await savePaper(paper);
+
+  const job = createAnalysisJob({
+    paper,
+    paragraphIds: targets.map((paragraph) => paragraph.id),
+    settings,
+    rerunAll,
+  });
+  jobStore.jobs.set(job.id, job);
+  await persistJobs();
+  scheduleJobWorker();
+
+  return json(res, {
+    job: serializeJob(job),
+    paper,
+  });
+}
+
+async function handleGetActiveAnalysisJob(res, paperId) {
+  const job = findActiveAnalysisJobForPaper(paperId);
+  return json(res, { job: job ? serializeJob(job) : null });
+}
+
+async function handleGetJob(res, jobId) {
+  const job = jobStore.jobs.get(jobId);
+  if (!job) {
+    return json(res, { error: "Job not found." }, 404);
+  }
+
+  return json(res, { job: serializeJob(job) });
+}
+
+async function handleCancelJob(res, jobId) {
+  const job = jobStore.jobs.get(jobId);
+  if (!job) {
+    return json(res, { error: "Job not found." }, 404);
+  }
+
+  await cancelJob(jobId);
+  return json(res, { job: serializeJob(job) });
+}
+
 async function listPapers() {
   const files = await readdir(DATA_DIR).catch(() => []);
   const papers = [];
 
   for (const file of files) {
-    if (!file.endsWith(".json")) {
+    if (!file.endsWith(".json") || file === "jobs.json") {
       continue;
     }
 
     try {
       const paper = JSON.parse(await readFile(path.join(DATA_DIR, file), "utf8"));
+      if (!paper.id || !Array.isArray(paper.paragraphs)) {
+        continue;
+      }
+
       papers.push({
         id: paper.id,
         title: paper.title,
@@ -210,6 +337,408 @@ function getResponseAbortSignal(res) {
   return controller.signal;
 }
 
+async function loadJobs() {
+  let payload = null;
+  try {
+    payload = JSON.parse(await readFile(JOBS_PATH, "utf8"));
+  } catch {
+    payload = null;
+  }
+
+  const jobs = Array.isArray(payload?.jobs) ? payload.jobs : [];
+  for (const job of jobs) {
+    if (!job?.id || job.type !== "analysis") {
+      continue;
+    }
+
+    jobStore.jobs.set(job.id, normalizeLoadedJob(job));
+  }
+}
+
+function normalizeLoadedJob(job) {
+  const items = Array.isArray(job.items) ? job.items : [];
+  const normalizedItems = items
+    .filter((item) => item?.paragraphId)
+    .map((item) => ({
+      paragraphId: String(item.paragraphId),
+      status: normalizeLoadedJobItemStatus(item.status),
+      attempts: Number.isFinite(Number(item.attempts)) ? Number(item.attempts) : 0,
+      error: String(item.error || ""),
+      startedAt: item.startedAt || "",
+      completedAt: item.completedAt || "",
+    }));
+
+  const completed = normalizedItems.filter((item) => item.status === "done").length;
+  const failed = normalizedItems.filter((item) => item.status === "error").length;
+  return {
+    id: String(job.id),
+    type: "analysis",
+    paperId: String(job.paperId || ""),
+    paperTitle: String(job.paperTitle || ""),
+    status: normalizeLoadedJobStatus(job.status),
+    cancelRequested: false,
+    rerunAll: Boolean(job.rerunAll),
+    settings: job.settings || {},
+    items: normalizedItems,
+    total: normalizedItems.length,
+    completed,
+    failed,
+    currentParagraphId: "",
+    error: String(job.error || ""),
+    createdAt: job.createdAt || new Date().toISOString(),
+    startedAt: job.startedAt || "",
+    completedAt: job.completedAt || "",
+    updatedAt: job.updatedAt || new Date().toISOString(),
+  };
+}
+
+function normalizeLoadedJobStatus(status) {
+  if (status === "done" || status === "error" || status === "canceled") {
+    return status;
+  }
+
+  if (status === "canceling") {
+    return "canceled";
+  }
+
+  return "queued";
+}
+
+function normalizeLoadedJobItemStatus(status) {
+  if (status === "done" || status === "error" || status === "canceled") {
+    return status;
+  }
+
+  return "queued";
+}
+
+function recoverInterruptedJobs() {
+  for (const job of jobStore.jobs.values()) {
+    if (!isActiveJobStatus(job.status)) {
+      continue;
+    }
+
+    job.status = "queued";
+    job.currentParagraphId = "";
+    job.updatedAt = new Date().toISOString();
+    for (const item of job.items) {
+      if (item.status === "running") {
+        item.status = "queued";
+        item.error = "";
+      }
+    }
+  }
+}
+
+function createAnalysisJob({ paper, paragraphIds, settings, rerunAll }) {
+  const now = new Date().toISOString();
+  return {
+    id: `job_${Date.now()}_${randomUUID().slice(0, 8)}`,
+    type: "analysis",
+    paperId: paper.id,
+    paperTitle: paper.title || paper.filename || "",
+    status: "queued",
+    cancelRequested: false,
+    rerunAll: Boolean(rerunAll),
+    settings,
+    items: paragraphIds.map((paragraphId) => ({
+      paragraphId,
+      status: "queued",
+      attempts: 0,
+      error: "",
+      startedAt: "",
+      completedAt: "",
+    })),
+    total: paragraphIds.length,
+    completed: 0,
+    failed: 0,
+    currentParagraphId: "",
+    error: "",
+    createdAt: now,
+    startedAt: "",
+    completedAt: "",
+    updatedAt: now,
+  };
+}
+
+function findActiveAnalysisJobForPaper(paperId) {
+  const jobs = [...jobStore.jobs.values()]
+    .filter((job) => job.type === "analysis" && job.paperId === paperId && isActiveJobStatus(job.status))
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+
+  return jobs[0] || null;
+}
+
+function isActiveJobStatus(status) {
+  return status === "queued" || status === "running" || status === "canceling";
+}
+
+function serializeJob(job) {
+  return {
+    id: job.id,
+    type: job.type,
+    paperId: job.paperId,
+    paperTitle: job.paperTitle,
+    status: job.status,
+    cancelRequested: Boolean(job.cancelRequested),
+    rerunAll: Boolean(job.rerunAll),
+    total: job.total,
+    completed: job.completed,
+    failed: job.failed,
+    currentParagraphId: job.currentParagraphId || "",
+    error: job.error || "",
+    createdAt: job.createdAt,
+    startedAt: job.startedAt || "",
+    completedAt: job.completedAt || "",
+    updatedAt: job.updatedAt,
+    items: job.items.map((item) => ({
+      paragraphId: item.paragraphId,
+      status: item.status,
+      attempts: item.attempts,
+      error: item.error || "",
+      startedAt: item.startedAt || "",
+      completedAt: item.completedAt || "",
+    })),
+  };
+}
+
+async function persistJobs() {
+  const jobs = [...jobStore.jobs.values()]
+    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
+    .slice(-JOB_POLL_LIMIT);
+  const payload = {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    jobs: jobs.map((job) => ({
+      ...job,
+      settings: job.settings || {},
+      cancelRequested: Boolean(job.cancelRequested),
+    })),
+  };
+  const tmpPath = `${JOBS_PATH}.tmp`;
+  jobStore.savePromise = jobStore.savePromise
+    .catch(() => {})
+    .then(async () => {
+      await writeFile(tmpPath, JSON.stringify(payload, null, 2));
+      await rename(tmpPath, JOBS_PATH);
+    });
+  await jobStore.savePromise;
+}
+
+function scheduleJobWorker() {
+  if (jobStore.workerScheduled || jobStore.activeJobId) {
+    return;
+  }
+
+  jobStore.workerScheduled = true;
+  setTimeout(() => {
+    jobStore.workerScheduled = false;
+    runJobWorker().catch((error) => {
+      console.error("Job worker failed:", error);
+    });
+  }, 0);
+}
+
+async function runJobWorker() {
+  if (jobStore.activeJobId) {
+    return;
+  }
+
+  const job = getNextQueuedJob();
+  if (!job) {
+    return;
+  }
+
+  jobStore.activeJobId = job.id;
+  const controller = new AbortController();
+  jobStore.controllers.set(job.id, controller);
+
+  try {
+    await runAnalysisJob(job, controller.signal);
+  } finally {
+    jobStore.controllers.delete(job.id);
+    jobStore.activeJobId = null;
+    await persistJobs();
+    if (getNextQueuedJob()) {
+      scheduleJobWorker();
+    }
+  }
+}
+
+function getNextQueuedJob() {
+  return [...jobStore.jobs.values()]
+    .filter((job) => isActiveJobStatus(job.status))
+    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))[0] || null;
+}
+
+async function runAnalysisJob(job, signal) {
+  const now = new Date().toISOString();
+  job.status = "running";
+  job.startedAt ||= now;
+  job.updatedAt = now;
+  await persistJobs();
+
+  for (const item of job.items) {
+    if (job.cancelRequested || signal.aborted) {
+      await markRemainingJobItemsCanceled(job);
+      break;
+    }
+
+    if (item.status === "done" || item.status === "error" || item.status === "canceled") {
+      continue;
+    }
+
+    await runAnalysisJobItem(job, item, signal);
+  }
+
+  const finishedAt = new Date().toISOString();
+  job.currentParagraphId = "";
+  job.updatedAt = finishedAt;
+  if (job.cancelRequested || signal.aborted) {
+    job.status = "canceled";
+    job.completedAt = finishedAt;
+  } else {
+    job.status = "done";
+    job.completedAt = finishedAt;
+  }
+}
+
+async function runAnalysisJobItem(job, item, signal) {
+  item.status = "running";
+  item.startedAt = new Date().toISOString();
+  item.error = "";
+  item.attempts += 1;
+  job.currentParagraphId = item.paragraphId;
+  job.updatedAt = item.startedAt;
+  await updatePaperParagraph(job.paperId, item.paragraphId, (paragraph) => {
+    paragraph.analysisStatus = "running";
+    paragraph.analysisError = "";
+  });
+  await persistJobs();
+
+  try {
+    const paper = await loadPaper(job.paperId);
+    const paragraph = (paper.paragraphs || []).find((entry) => entry.id === item.paragraphId);
+    if (!paragraph || paragraph.kind === "heading") {
+      throw new Error("Paragraph not found.");
+    }
+
+    await analyzeParagraphInPaper(paper, paragraph, job.settings, { signal });
+    await savePaper(paper);
+    item.status = "done";
+    item.completedAt = new Date().toISOString();
+    item.error = "";
+    job.completed += 1;
+  } catch (error) {
+    if (job.cancelRequested || signal.aborted || error.statusCode === 499) {
+      item.status = "canceled";
+      item.error = "";
+      item.completedAt = new Date().toISOString();
+      await updatePaperParagraph(job.paperId, item.paragraphId, (paragraph) => {
+        paragraph.analysisStatus = "pending";
+        paragraph.analysisError = "";
+      });
+      return;
+    }
+
+    if (item.attempts < JOB_ITEM_MAX_ATTEMPTS && isRetryableJobError(error)) {
+      item.status = "queued";
+      item.error = error.message || "模型请求失败。";
+      job.updatedAt = new Date().toISOString();
+      await persistJobs();
+      await sleep(1500);
+      return await runAnalysisJobItem(job, item, signal);
+    }
+
+    item.status = "error";
+    item.error = error.message || "模型请求失败。";
+    item.completedAt = new Date().toISOString();
+    job.failed += 1;
+    await updatePaperParagraph(job.paperId, item.paragraphId, (paragraph) => {
+      paragraph.analysisStatus = "error";
+      paragraph.analysisError = item.error;
+    });
+  } finally {
+    if (job.currentParagraphId === item.paragraphId) {
+      job.currentParagraphId = "";
+    }
+    job.updatedAt = new Date().toISOString();
+    await persistJobs();
+  }
+}
+
+function isRetryableJobError(error) {
+  const message = String(error?.message || "");
+  return /网络请求失败|fetch failed|超时|temporarily|timeout|ECONN|ENOTFOUND|ETIMEDOUT/i.test(message);
+}
+
+async function markRemainingJobItemsCanceled(job) {
+  for (const item of job.items) {
+    if (item.status === "queued" || item.status === "running") {
+      item.status = "canceled";
+      item.completedAt = new Date().toISOString();
+      await updatePaperParagraph(job.paperId, item.paragraphId, (paragraph) => {
+        paragraph.analysisStatus = "pending";
+        paragraph.analysisError = "";
+      });
+    }
+  }
+}
+
+async function cancelJob(jobId) {
+  const job = jobStore.jobs.get(jobId);
+  if (!job || !isActiveJobStatus(job.status)) {
+    return job;
+  }
+
+  job.cancelRequested = true;
+  job.status = job.status === "queued" ? "canceled" : "canceling";
+  job.updatedAt = new Date().toISOString();
+  const controller = jobStore.controllers.get(jobId);
+  if (controller) {
+    controller.abort();
+  } else {
+    await markRemainingJobItemsCanceled(job);
+    job.completedAt = job.updatedAt;
+  }
+  await persistJobs();
+  scheduleJobWorker();
+  return job;
+}
+
+async function updatePaperParagraph(paperId, paragraphId, update) {
+  const paper = await loadPaper(paperId);
+  const paragraph = (paper.paragraphs || []).find((entry) => entry.id === paragraphId);
+  if (!paragraph) {
+    return null;
+  }
+
+  update(paragraph, paper);
+  paragraph.updatedAt = new Date().toISOString();
+  await savePaper(paper);
+  return paragraph;
+}
+
+function getReadingParagraphs(paper) {
+  return (paper.paragraphs || []).filter((paragraph) => paragraph.kind !== "heading");
+}
+
+function needsParagraphAnalysis(paragraph) {
+  return !paragraph.translation && !paragraph.explanation && paragraph.analysisStatus !== "done";
+}
+
+function resetParagraphAnalysis(paragraph) {
+  paragraph.translation = "";
+  paragraph.explanation = "";
+  paragraph.keyTerms = [];
+  paragraph.analysisStatus = "pending";
+  paragraph.analysisError = "";
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function handleAnalyze(req, res) {
   const payload = await readJson(req);
   const { paperId, paragraphId, settings } = payload;
@@ -230,8 +759,29 @@ async function handleAnalyze(req, res) {
     return json(res, { error: "Section headings do not need paragraph analysis." }, 400);
   }
 
-  const section = paper.sections.find((item) => item.id === paragraph.sectionId);
-  const messages = [
+  await analyzeParagraphInPaper(paper, paragraph, settings, { signal });
+  await savePaper(paper);
+  return json(res, { paragraph });
+}
+
+async function analyzeParagraphInPaper(paper, paragraph, settings, options = {}) {
+  const content = await callModel(settings, buildParagraphAnalysisMessages(paper, paragraph), {
+    signal: options.signal,
+  });
+  const parsed = parseModelJson(content);
+
+  paragraph.translation = parsed.translation || "";
+  paragraph.explanation = parsed.explanation || content;
+  paragraph.keyTerms = Array.isArray(parsed.keyTerms) ? parsed.keyTerms : [];
+  paragraph.analysisStatus = "done";
+  paragraph.analysisError = "";
+  paragraph.updatedAt = new Date().toISOString();
+  return paragraph;
+}
+
+function buildParagraphAnalysisMessages(paper, paragraph) {
+  const section = (paper.sections || []).find((item) => item.id === paragraph.sectionId);
+  return [
     {
       role: "system",
       content:
@@ -257,19 +807,6 @@ async function handleAnalyze(req, res) {
       ].join("\n"),
     },
   ];
-
-  const content = await callModel(settings, messages, { signal });
-  const parsed = parseModelJson(content);
-
-  paragraph.translation = parsed.translation || "";
-  paragraph.explanation = parsed.explanation || content;
-  paragraph.keyTerms = Array.isArray(parsed.keyTerms) ? parsed.keyTerms : [];
-  paragraph.analysisStatus = "done";
-  paragraph.analysisError = "";
-  paragraph.updatedAt = new Date().toISOString();
-
-  await savePaper(paper);
-  return json(res, { paragraph });
 }
 
 async function handleModelPing(req, res) {
