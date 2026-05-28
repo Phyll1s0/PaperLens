@@ -44,6 +44,7 @@ const els = {
   outline: document.querySelector("#outline"),
   searchInput: document.querySelector("#searchInput"),
   autoAnalyzeButton: document.querySelector("#autoAnalyzeButton"),
+  resumeAnalyzeButton: document.querySelector("#resumeAnalyzeButton"),
   rerunAnalyzeButton: document.querySelector("#rerunAnalyzeButton"),
   stopAutoButton: document.querySelector("#stopAutoButton"),
   jobHistory: document.querySelector("#jobHistory"),
@@ -98,6 +99,7 @@ function bindEvents() {
   els.uploadButton.addEventListener("click", uploadPdf);
   els.pingButton.addEventListener("click", pingModel);
   els.autoAnalyzeButton.addEventListener("click", () => startAutoAnalyze());
+  els.resumeAnalyzeButton.addEventListener("click", resumeMissingAnalysis);
   els.rerunAnalyzeButton.addEventListener("click", rerunFullPipeline);
   els.stopAutoButton.addEventListener("click", stopAutoAnalyze);
   els.providerSelect.addEventListener("change", () => {
@@ -531,6 +533,22 @@ async function startAutoAnalyze(options = {}) {
   });
 }
 
+async function resumeMissingAnalysis() {
+  if (!state.paper || state.autoAnalyze.running || state.pipelineBusy) {
+    return;
+  }
+
+  const missingCount = getMissingAnalysisCount(state.paper);
+  if (!missingCount) {
+    setStatus("没有失败或未完成段落需要补跑。");
+    return;
+  }
+
+  await createAnalysisJob({
+    statusLabel: `已补跑失败/未完成段落：${missingCount} 段`,
+  });
+}
+
 async function rerunFullPipeline() {
   if (!state.paper || state.autoAnalyze.running || state.pipelineBusy) {
     return;
@@ -839,9 +857,20 @@ function needsAnalysis(paragraph) {
   return paragraph.kind === "paragraph" &&
     paragraph.analysisEligible !== false &&
     !isLikelyNonReadingText(paragraph.sourceText || "", paragraph.sectionTitleHint || "") &&
-    !paragraph.translation &&
-    !paragraph.explanation &&
-    paragraph.analysisStatus !== "done";
+    (
+      paragraph.analysisStatus === "error" ||
+      Boolean(paragraph.analysisError) ||
+      !hasCompleteAnalysis(paragraph)
+    );
+}
+
+function hasCompleteAnalysis(paragraph) {
+  return Boolean(String(paragraph.translation || "").trim()) &&
+    Boolean(String(paragraph.explanation || "").trim());
+}
+
+function getMissingAnalysisCount(paper) {
+  return getReadingParagraphs(paper).filter((paragraph) => needsAnalysis(paragraph)).length;
 }
 
 function resetParagraphAnalyses(paragraphs) {
@@ -1944,7 +1973,12 @@ function updateAutoStatus() {
 
 function updateAutoButtons() {
   const busy = state.autoAnalyze.running || state.pipelineBusy;
+  const missingCount = state.paper ? getMissingAnalysisCount(state.paper) : 0;
   els.autoAnalyzeButton.disabled = !state.paper || busy;
+  els.resumeAnalyzeButton.disabled = !state.paper || busy || missingCount === 0;
+  els.resumeAnalyzeButton.textContent = missingCount
+    ? `补跑失败/未完成 ${missingCount}`
+    : "补跑失败/未完成";
   els.rerunAnalyzeButton.disabled = !state.paper || busy;
   els.stopAutoButton.classList.toggle("hidden", !state.autoAnalyze.running);
   els.stopAutoButton.disabled = !state.autoAnalyze.running || state.autoAnalyze.stopRequested;

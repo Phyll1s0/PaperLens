@@ -1363,9 +1363,16 @@ function getReadingParagraphs(paper) {
 
 function needsParagraphAnalysis(paragraph) {
   return isReadingParagraph(paragraph) &&
-    !paragraph.translation &&
-    !paragraph.explanation &&
-    paragraph.analysisStatus !== "done";
+    (
+      paragraph.analysisStatus === "error" ||
+      Boolean(paragraph.analysisError) ||
+      !hasCompleteParagraphAnalysis(paragraph)
+    );
+}
+
+function hasCompleteParagraphAnalysis(paragraph) {
+  return Boolean(String(paragraph.translation || "").trim()) &&
+    Boolean(String(paragraph.explanation || "").trim());
 }
 
 function isReadingParagraphForPaper(paper, paragraph) {
