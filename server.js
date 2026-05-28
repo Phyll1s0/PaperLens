@@ -28,15 +28,15 @@ const MAX_UPLOAD_BYTES = 120 * 1024 * 1024;
 const ARTIFACT_CROP_VERSION = 6;
 const JOB_ITEM_MAX_ATTEMPTS = 2;
 const JOB_POLL_LIMIT = 20;
-const ANALYSIS_BATCH_SIZE = readIntegerEnv("PAPERLENS_ANALYSIS_BATCH_SIZE", 18, 1, 24);
-const CLAUDE_AGENT_ANALYSIS_BATCH_SIZE = readIntegerEnv("PAPERLENS_AGENT_ANALYSIS_BATCH_SIZE", 14, 1, 20);
+const ANALYSIS_BATCH_SIZE = readIntegerEnv("PAPERLENS_ANALYSIS_BATCH_SIZE", 12, 1, 24);
+const CLAUDE_AGENT_ANALYSIS_BATCH_SIZE = readIntegerEnv("PAPERLENS_AGENT_ANALYSIS_BATCH_SIZE", 8, 1, 20);
 const ANALYSIS_CONCURRENCY = readIntegerEnv("PAPERLENS_ANALYSIS_CONCURRENCY", 3, 1, 6);
 const CLAUDE_AGENT_ANALYSIS_CONCURRENCY = readIntegerEnv("PAPERLENS_AGENT_ANALYSIS_CONCURRENCY", 2, 1, 3);
 const ANALYSIS_TARGET_MINUTES = readIntegerEnv("PAPERLENS_ANALYSIS_TARGET_MINUTES", 20, 5, 240);
 const ANALYSIS_CONTEXT_TEXT_LIMIT = 900;
 const ANALYSIS_CONTEXT_TOTAL_LIMIT = 5200;
-const FAST_BATCH_ANALYSIS_CONTEXT_LIMIT = 560;
-const FAST_BATCH_GLOBAL_CONTEXT_LIMIT = 420;
+const BATCH_ANALYSIS_CONTEXT_LIMIT = 1100;
+const BATCH_GLOBAL_CONTEXT_LIMIT = 900;
 const MAX_BATCH_SPLIT_DEPTH = 4;
 const SEGMENTATION_CONTEXT_TEXT_LIMIT = 1600;
 const SEGMENTATION_ITEM_TEXT_LIMIT = 900;
@@ -1443,7 +1443,7 @@ async function analyzeParagraphInPaper(paper, paragraph, settings, options = {})
 async function analyzeParagraphBatchInPaper(paper, paragraphs, settings, options = {}) {
   const content = await callModel(settings, buildParagraphBatchAnalysisMessages(paper, paragraphs), {
     signal: options.signal,
-    maxTokens: Math.min(10000, Math.max(2200, 1200 + paragraphs.length * 900)),
+    maxTokens: Math.min(18000, Math.max(3600, 1800 + paragraphs.length * 1600)),
     timeoutMs: getBatchAnalysisTimeoutMs(paragraphs.length, settings),
   });
   const parsed = parseBatchAnalysisResult(content);
@@ -1475,9 +1475,9 @@ function getBatchAnalysisTimeoutMs(batchLength, settings = {}) {
   const provider = String(settings.provider || "");
   const baseUrl = String(settings.baseUrl || "");
   const agentLike = provider.startsWith("claude") || baseUrl.startsWith("local:claude");
-  const baseMs = agentLike ? 85_000 : 45_000;
-  const perParagraphMs = agentLike ? 7_000 : 4_000;
-  return Math.min(agentLike ? 190_000 : 120_000, baseMs + Math.max(0, batchLength - 1) * perParagraphMs);
+  const baseMs = agentLike ? 140_000 : 70_000;
+  const perParagraphMs = agentLike ? 18_000 : 8_000;
+  return Math.min(agentLike ? 360_000 : 210_000, baseMs + Math.max(0, batchLength - 1) * perParagraphMs);
 }
 
 function parseBatchAnalysisResult(content) {
@@ -1543,18 +1543,19 @@ function buildParagraphBatchAnalysisMessages(paper, paragraphs) {
     {
       role: "system",
       content:
-        "你是一个严谨但高效的论文精读助手。当前任务是整篇快速处理，必须忠于论文原文，不编造。请分别分析批次中的每个 paragraphId；上下文只用于理解术语、承接关系和图表引用，不要把上下文内容误当作当前段落翻译。请只输出合法、紧凑 JSON，不要使用 Markdown 代码块。涉及公式时保留 LaTeX，并用 $...$ 或 $$...$$ 包裹。",
+        "你是一个严谨的论文精读助手。当前任务是整篇批量精读，不是速读摘要。必须忠于论文原文，不编造。请分别分析批次中的每个 paragraphId；上下文只用于理解术语、承接关系和图表引用，不要把上下文内容误当作当前段落翻译。请只输出合法 JSON，不要使用 Markdown 代码块。涉及公式时保留 LaTeX，并用 $...$ 或 $$...$$ 包裹。",
     },
     {
       role: "user",
       content: [
-        "请批量快速分析下面这些论文段落。",
-        "速度优先：translation 只翻译当前原文，忠实完整但不要额外发挥；explanation 用 1 句中文，不超过 90 个汉字；keyTerms 最多 4 个。",
-        "输出尽量紧凑，不要在字段值里加入无关换行，不要把上下文翻译进结果。",
+        "请批量精读下面这些论文段落。",
+        "质量优先：translation 忠实完整翻译当前原文，保留必要英文术语和 LaTeX；explanation 需要 3-5 句中文，约 180-360 个汉字。",
+        "explanation 至少覆盖：这段在说什么、它在论文论证中的作用、关键概念/假设/公式/图表关系、读者容易误解或需要注意的点。简单过渡段可以略短，但不能只写一句泛泛总结。",
+        "不要把上下文翻译进结果；上下文只用于消解术语、承接关系和引用。",
         "每个输入 paragraph 必须返回一个同名 paragraphId，不要漏项，不要增加不存在的段落。",
         "",
         "全局上下文:",
-        truncateText(globalContext, FAST_BATCH_GLOBAL_CONTEXT_LIMIT),
+        truncateText(globalContext, BATCH_GLOBAL_CONTEXT_LIMIT),
         "",
         "段落列表:",
         ...paragraphs.map((paragraph) => formatBatchAnalysisParagraph(paper, paragraph)),
@@ -1562,7 +1563,7 @@ function buildParagraphBatchAnalysisMessages(paper, paragraphs) {
         "输出 JSON 格式:",
         "{",
         '  "items": [',
-        '    { "paragraphId": "para_xxx", "translation": "忠实中文翻译，保留必要英文术语", "explanation": "一句话讲清作用或难点", "keyTerms": ["术语1", "术语2"] }',
+        '    { "paragraphId": "para_xxx", "translation": "忠实中文翻译，保留必要英文术语和 LaTeX", "explanation": "3-5 句中文精读讲解，说明含义、作用、关键难点和上下文关系", "keyTerms": ["术语1", "术语2"] }',
         "  ]",
         "}",
       ].join("\n"),
@@ -1577,7 +1578,7 @@ function formatBatchAnalysisParagraph(paper, paragraph) {
     : `${paragraph.pageNumber}`;
   const context = truncateText(
     buildFastBatchAnalysisContext(paper, paragraph),
-    FAST_BATCH_ANALYSIS_CONTEXT_LIMIT,
+    BATCH_ANALYSIS_CONTEXT_LIMIT,
   );
 
   return [
