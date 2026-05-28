@@ -28,6 +28,8 @@ const MAX_UPLOAD_BYTES = 120 * 1024 * 1024;
 const ARTIFACT_CROP_VERSION = 5;
 const JOB_ITEM_MAX_ATTEMPTS = 2;
 const JOB_POLL_LIMIT = 20;
+const ANALYSIS_CONTEXT_TEXT_LIMIT = 900;
+const ANALYSIS_CONTEXT_TOTAL_LIMIT = 5200;
 const EXTRA_BIN_DIRS = [
   path.dirname(process.execPath),
   "/opt/homebrew/bin",
@@ -977,11 +979,12 @@ async function analyzeParagraphInPaper(paper, paragraph, settings, options = {})
 
 function buildParagraphAnalysisMessages(paper, paragraph) {
   const section = (paper.sections || []).find((item) => item.id === paragraph.sectionId);
+  const analysisContext = buildParagraphAnalysisContext(paper, paragraph);
   return [
     {
       role: "system",
       content:
-        "你是一个严谨的论文精读助手。必须忠于论文原文，不编造。请只输出合法 JSON，不要使用 Markdown 代码块。涉及公式时请保留 LaTeX，并用 $...$ 或 $$...$$ 包裹。",
+        "你是一个严谨的论文精读助手。必须忠于论文原文，不编造。优先分析当前段落；上下文只用于理解术语、承接关系和图表引用，不要把上下文内容误当作当前段落翻译。请只输出合法 JSON，不要使用 Markdown 代码块。涉及公式时请保留 LaTeX，并用 $...$ 或 $$...$$ 包裹。",
     },
     {
       role: "user",
@@ -990,6 +993,9 @@ function buildParagraphAnalysisMessages(paper, paragraph) {
         "",
         `章节: ${section?.title || "未知章节"}`,
         `页码: ${paragraph.pageNumber}`,
+        "",
+        "阅读上下文:",
+        analysisContext || "无额外上下文。",
         "",
         "原文:",
         paragraph.sourceText,
@@ -1003,6 +1009,138 @@ function buildParagraphAnalysisMessages(paper, paragraph) {
       ].join("\n"),
     },
   ];
+}
+
+function buildParagraphAnalysisContext(paper, paragraph) {
+  const blocks = [
+    buildNearbyParagraphContext(paper, paragraph),
+    buildRelatedArtifactContext(paper, paragraph),
+    buildPriorTermsContext(paper, paragraph),
+  ].filter(Boolean);
+
+  return truncateText(blocks.join("\n\n"), ANALYSIS_CONTEXT_TOTAL_LIMIT);
+}
+
+function buildNearbyParagraphContext(paper, paragraph) {
+  const paragraphs = Array.isArray(paper.paragraphs) ? paper.paragraphs : [];
+  const index = paragraphs.findIndex((item) => item.id === paragraph.id);
+  if (index === -1) {
+    return "";
+  }
+
+  const contextItems = [];
+  for (let offset = 3; offset >= 1; offset -= 1) {
+    const item = findReadableNeighbor(paragraphs, index, -offset);
+    if (item) {
+      contextItems.push(formatContextParagraph(item, `前文 P${item.order + 1}`));
+    }
+  }
+
+  const next = findReadableNeighbor(paragraphs, index, 1);
+  if (next) {
+    contextItems.push(formatContextParagraph(next, `后文 P${next.order + 1}`));
+  }
+
+  if (!contextItems.length) {
+    return "";
+  }
+
+  return ["邻近段落:", ...contextItems].join("\n");
+}
+
+function findReadableNeighbor(paragraphs, index, offset) {
+  const direction = offset < 0 ? -1 : 1;
+  let remaining = Math.abs(offset);
+  for (let cursor = index + direction; cursor >= 0 && cursor < paragraphs.length; cursor += direction) {
+    const paragraph = paragraphs[cursor];
+    if (paragraph.kind === "heading") {
+      continue;
+    }
+
+    remaining -= 1;
+    if (remaining === 0) {
+      return paragraph;
+    }
+  }
+
+  return null;
+}
+
+function formatContextParagraph(paragraph, label) {
+  const pageLabel = paragraph.pageEndNumber && paragraph.pageEndNumber !== paragraph.pageNumber
+    ? `p.${paragraph.pageNumber}-${paragraph.pageEndNumber}`
+    : `p.${paragraph.pageNumber}`;
+  return `${label} (${pageLabel}): ${truncateText(normalizeParagraph(paragraph.sourceText || ""), ANALYSIS_CONTEXT_TEXT_LIMIT)}`;
+}
+
+function buildRelatedArtifactContext(paper, paragraph) {
+  const relatedIds = new Set(Array.isArray(paragraph.relatedArtifactIds) ? paragraph.relatedArtifactIds : []);
+  const artifacts = Array.isArray(paper.pageArtifacts) ? paper.pageArtifacts : [];
+  const directMatches = artifacts.filter((artifact) => relatedIds.has(artifact.id));
+  const inferredMatches = artifacts.filter((artifact) => {
+    if (!artifact.label || relatedIds.has(artifact.id)) {
+      return false;
+    }
+
+    return paragraphCanReferenceArtifact(paragraph, artifact);
+  });
+  const selected = [...directMatches, ...inferredMatches]
+    .filter((artifact, index, all) => all.findIndex((item) => item.id === artifact.id) === index)
+    .slice(0, 4);
+
+  if (!selected.length) {
+    return "";
+  }
+
+  return [
+    "相关图表:",
+    ...selected.map((artifact) => {
+      const pageLabel = artifact.pageNumber ? `p.${artifact.pageNumber}` : "未知页";
+      return `${artifact.label || "图表"} (${pageLabel}): ${truncateText(normalizeArtifactText(artifact.text || ""), 700)}`;
+    }),
+  ].join("\n");
+}
+
+function buildPriorTermsContext(paper, paragraph) {
+  const paragraphs = Array.isArray(paper.paragraphs) ? paper.paragraphs : [];
+  const terms = [];
+  for (const item of paragraphs) {
+    if (item.id === paragraph.id) {
+      break;
+    }
+
+    if (!Array.isArray(item.keyTerms)) {
+      continue;
+    }
+
+    for (const term of item.keyTerms) {
+      const clean = String(term || "").trim();
+      if (clean && !terms.includes(clean)) {
+        terms.push(clean);
+      }
+      if (terms.length >= 12) {
+        break;
+      }
+    }
+
+    if (terms.length >= 12) {
+      break;
+    }
+  }
+
+  return terms.length ? `前文已出现术语: ${terms.join("、")}` : "";
+}
+
+function truncateText(text, limit) {
+  const clean = String(text || "")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (clean.length <= limit) {
+    return clean;
+  }
+
+  return `${clean.slice(0, Math.max(0, limit - 1)).trim()}...`;
 }
 
 async function handleModelPing(req, res) {
