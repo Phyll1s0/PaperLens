@@ -39,6 +39,8 @@ const BATCH_ANALYSIS_CONTEXT_LIMIT = 1100;
 const BATCH_GLOBAL_CONTEXT_LIMIT = 900;
 const MAX_BATCH_SPLIT_DEPTH = 4;
 const SEGMENTATION_CONTEXT_TEXT_LIMIT = 1600;
+const SEGMENTATION_STRUCTURE_INPUT_LIMIT = 28_000;
+const SEGMENTATION_STRUCTURE_PAGE_LIMIT = 1800;
 const SEGMENTATION_ITEM_TEXT_LIMIT = 900;
 const SECTION_CONTEXT_TEXT_LIMIT = 900;
 const EXTRA_BIN_DIRS = [
@@ -1692,7 +1694,16 @@ function buildParagraphAnalysisContext(paper, paragraph) {
 
 function buildPaperProfileContext(paper) {
   const profile = paper.contextProfile || {};
+  const structure = paper.structureMap || {};
   const lines = [];
+  if (structure.summary) {
+    lines.push(`全文结构: ${truncateText(structure.summary, 420)}`);
+  }
+
+  if (Array.isArray(structure.sections) && structure.sections.length) {
+    lines.push(`章节地图: ${formatStructureSectionsForContext(structure.sections)}`);
+  }
+
   if (profile.summary) {
     lines.push(`全文线索: ${truncateText(profile.summary, 520)}`);
   }
@@ -1703,6 +1714,18 @@ function buildPaperProfileContext(paper) {
   }
 
   return lines.length ? lines.join("\n") : "";
+}
+
+function formatStructureSectionsForContext(sections) {
+  return sections
+    .slice(0, 12)
+    .map((section) => {
+      const page = section.endPage && section.endPage !== section.startPage
+        ? `p.${section.startPage}-${section.endPage}`
+        : `p.${section.startPage || "?"}`;
+      return `${section.title || "未命名章节"} ${page}`;
+    })
+    .join("；");
 }
 
 function buildSectionWindowContext(paper, paragraph) {
@@ -3285,7 +3308,7 @@ function buildHeuristicSectionSummary(paragraphs) {
   return `开头内容: ${truncateText(first.sourceText, 420)}`;
 }
 
-function buildPaperContextProfile(paragraphs, sections, chunkSummaries = []) {
+function buildPaperContextProfile(paragraphs, sections, chunkSummaries = [], structureMap = null) {
   const sectionById = new Map((sections || []).map((section) => [section.id, section]));
   const readingParagraphs = paragraphs.filter((paragraph) =>
     isReadingParagraph(paragraph, sectionById.get(paragraph.sectionId)));
@@ -3302,8 +3325,10 @@ function buildPaperContextProfile(paragraphs, sections, chunkSummaries = []) {
     }
   }
 
-  const summaryText = chunkSummaries
-    .map((summary) => summary.summary)
+  const summaryText = [
+    structureMap?.summary || "",
+    ...chunkSummaries.map((summary) => summary.summary),
+  ]
     .filter(Boolean)
     .slice(0, 6)
     .join(" ");
@@ -3312,6 +3337,7 @@ function buildPaperContextProfile(paragraphs, sections, chunkSummaries = []) {
     version: 1,
     summary: truncateText(summaryText || buildHeuristicSectionSummary(readingParagraphs), 900),
     keywords: keywords.slice(0, 24),
+    structureVersion: structureMap?.version || null,
     updatedAt: new Date().toISOString(),
   };
 }
@@ -3326,8 +3352,266 @@ function inferTitle(paragraphs, filename) {
   return firstLongText || filename.replace(/\.pdf$/i, "");
 }
 
+async function buildPaperStructureMapWithAi(paper, pages, settings, options = {}) {
+  const pageOutline = buildStructureScanInput(pages);
+  if (!pageOutline) {
+    return buildHeuristicPaperStructureMap(paper, pages);
+  }
+
+  const messages = [
+    {
+      role: "system",
+      content: [
+        "你是论文 PDF 全文结构预扫描助手。你的任务不是分段，而是先给后续分段提供全局地图。",
+        "必须只依据页面文本判断，不要翻译正文，不要补写论文内容。",
+        "请识别正文起点、References 起点、章节边界，以及作者/单位/版权/DOI/URL/页眉页脚/图表区域等非正文线索。",
+        "只输出合法 JSON，不要使用 Markdown 代码块。",
+      ].join("\n"),
+    },
+    {
+      role: "user",
+      content: [
+        `论文文件: ${paper.filename || paper.title || "未知论文"}`,
+        "",
+        "请根据下面按页抽取的文本，输出全文结构地图。",
+        "输出格式必须是：",
+        "{",
+        '  "paperTitle": "论文标题",',
+        '  "summary": "一句中文概括全文结构和主题，不超过 120 字",',
+        '  "bodyStartPage": 1,',
+        '  "referencesStartPage": 12,',
+        '  "keywords": ["术语1", "术语2"],',
+        '  "sections": [',
+        '    { "title": "Abstract", "startPage": 1, "endPage": 1 },',
+        '    { "title": "Introduction", "startPage": 1, "endPage": 2 }',
+        "  ],",
+        '  "nonBodyZones": [',
+        '    { "type": "authors", "label": "作者和单位", "startPage": 1, "endPage": 1, "description": "标题下方作者、邮箱和单位区域" },',
+        '    { "type": "references", "label": "参考文献", "startPage": 12, "endPage": 14, "description": "References 之后的参考文献列表" }',
+        "  ]",
+        "}",
+        "",
+        "注意：sections 只列正文结构标题，不要把作者、版权、DOI、图注、表格、参考文献条目列为章节。",
+        "",
+        "页面文本:",
+        pageOutline,
+      ].join("\n"),
+    },
+  ];
+
+  const content = await callModel(settings, messages, {
+    signal: options.signal,
+    maxTokens: 3200,
+    timeoutMs: 180_000,
+  });
+  const parsed = parseModelJson(content);
+  return normalizePaperStructureMap(parsed, paper, pages);
+}
+
+function buildStructureScanInput(pages) {
+  const readablePages = (pages || []).filter((page) => page && Number.isFinite(Number(page.pageNumber)));
+  if (!readablePages.length) {
+    return "";
+  }
+
+  const perPageLimit = Math.max(
+    360,
+    Math.min(SEGMENTATION_STRUCTURE_PAGE_LIMIT, Math.floor(SEGMENTATION_STRUCTURE_INPUT_LIMIT / readablePages.length) - 48),
+  );
+  const lines = [];
+  let totalLength = 0;
+  for (const page of readablePages) {
+    const pageText = buildStructurePageOutline(page, perPageLimit);
+    if (!pageText) {
+      continue;
+    }
+
+    const entry = [
+      `--- Page ${page.pageNumber} ---`,
+      truncateText(pageText, perPageLimit),
+    ].join("\n");
+    if (totalLength + entry.length > SEGMENTATION_STRUCTURE_INPUT_LIMIT) {
+      break;
+    }
+
+    lines.push(entry);
+    totalLength += entry.length;
+  }
+
+  return lines.join("\n\n");
+}
+
+function buildStructurePageOutline(page, limit = SEGMENTATION_STRUCTURE_PAGE_LIMIT) {
+  const blocks = Array.isArray(page.blocks) ? page.blocks : [];
+  if (blocks.length) {
+    const normalizedBlocks = blocks
+      .map((block, index) => ({
+        index,
+        text: normalizeArtifactText(block.text || ""),
+      }))
+      .filter((block) => block.text);
+    const selected = normalizedBlocks.filter((block) =>
+      block.index < 4 ||
+      block.index >= normalizedBlocks.length - 3 ||
+      isLikelyStructureOutlineText(block.text));
+    const outlineBlocks = selected.length ? selected : normalizedBlocks.slice(0, 6);
+    return truncateText(outlineBlocks
+      .map((block) => `[B${block.index + 1}] ${truncateText(block.text, 280)}`)
+      .join("\n"), limit);
+  }
+
+  return truncateText(normalizeArtifactText(page.text || ""), limit);
+}
+
+function isLikelyStructureOutlineText(text) {
+  const clean = normalizeParagraph(text);
+  if (!clean) {
+    return false;
+  }
+
+  if (isLikelyHeading(clean)) {
+    return true;
+  }
+
+  return /abstract|introduction|background|method|experiment|result|discussion|conclusion|appendix|reference|bibliography|acknowledg/i
+    .test(clean);
+}
+
+function normalizePaperStructureMap(parsed, paper, pages) {
+  const data = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const pageNumbers = (pages || []).map((page) => Number(page.pageNumber)).filter(Number.isFinite);
+  const firstPage = pageNumbers.length ? Math.min(...pageNumbers) : 1;
+  const lastPage = pageNumbers.length ? Math.max(...pageNumbers) : firstPage;
+  const sections = normalizeStructureSections(data.sections, firstPage, lastPage);
+  const referencesStartPage = normalizePageNumber(
+    data.referencesStartPage || data.referencesPage || data.bibliographyStartPage,
+    firstPage,
+    lastPage,
+    null,
+  );
+  const nonBodyZones = normalizeStructureZones(data.nonBodyZones || data.nonBodyRanges || [], firstPage, lastPage);
+  if (referencesStartPage && !nonBodyZones.some((zone) => zone.type === "references")) {
+    nonBodyZones.push({
+      type: "references",
+      label: "参考文献",
+      startPage: referencesStartPage,
+      endPage: lastPage,
+      description: "References/Bibliography 之后的参考文献区域",
+    });
+  }
+
+  return {
+    version: 1,
+    paperTitle: normalizeParagraph(data.paperTitle || data.title || paper.title || paper.filename || ""),
+    summary: truncateText(normalizeParagraph(data.summary || ""), 240),
+    bodyStartPage: normalizePageNumber(data.bodyStartPage, firstPage, lastPage, firstPage),
+    referencesStartPage,
+    keywords: normalizeKeywordList(data.keywords || data.keyTerms).slice(0, 18),
+    sections,
+    nonBodyZones,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function normalizeStructureSections(sections, firstPage, lastPage) {
+  if (!Array.isArray(sections)) {
+    return [];
+  }
+
+  return sections
+    .map((section) => {
+      const title = normalizeSectionTitleHint(section.title || section.sectionTitle || section.name || "");
+      if (!title || isReferencesSectionTitle(title)) {
+        return null;
+      }
+
+      const startPage = normalizePageNumber(section.startPage || section.pageNumber, firstPage, lastPage, firstPage);
+      const endPage = normalizePageNumber(section.endPage || section.pageEndNumber, firstPage, lastPage, startPage);
+      return {
+        title,
+        startPage,
+        endPage: Math.max(startPage, endPage),
+      };
+    })
+    .filter(Boolean)
+    .filter((section, index, all) =>
+      all.findIndex((item) => item.title.toLowerCase() === section.title.toLowerCase() &&
+        item.startPage === section.startPage) === index)
+    .slice(0, 32);
+}
+
+function normalizeStructureZones(zones, firstPage, lastPage) {
+  if (!Array.isArray(zones)) {
+    return [];
+  }
+
+  return zones
+    .map((zone) => {
+      const type = normalizeStructureZoneType(zone.type || zone.kind || zone.label);
+      const startPage = normalizePageNumber(zone.startPage || zone.pageNumber, firstPage, lastPage, firstPage);
+      const endPage = normalizePageNumber(zone.endPage || zone.pageEndNumber, firstPage, lastPage, startPage);
+      return {
+        type,
+        label: normalizeParagraph(zone.label || type || "非正文区域"),
+        startPage,
+        endPage: Math.max(startPage, endPage),
+        description: truncateText(normalizeParagraph(zone.description || zone.note || ""), 160),
+      };
+    })
+    .filter((zone) => zone.type)
+    .slice(0, 32);
+}
+
+function normalizeStructureZoneType(value) {
+  const clean = String(value || "").trim().toLowerCase();
+  if (/author|affiliation|email|作者|单位|邮箱/.test(clean)) {
+    return "authors";
+  }
+  if (/reference|bibliography|参考/.test(clean)) {
+    return "references";
+  }
+  if (/copyright|doi|metadata|conference|license|版权|元数据/.test(clean)) {
+    return "metadata";
+  }
+  if (/header|footer|页眉|页脚/.test(clean)) {
+    return "header-footer";
+  }
+  if (/figure|table|caption|图|表/.test(clean)) {
+    return "figure-table";
+  }
+  return clean ? "other" : "";
+}
+
+function normalizePageNumber(value, firstPage, lastPage, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) {
+    return fallback;
+  }
+
+  return Math.trunc(clampNumber(number, firstPage, lastPage));
+}
+
+function buildHeuristicPaperStructureMap(paper, pages) {
+  const pageNumbers = (pages || []).map((page) => Number(page.pageNumber)).filter(Number.isFinite);
+  const firstPage = pageNumbers.length ? Math.min(...pageNumbers) : 1;
+  const lastPage = pageNumbers.length ? Math.max(...pageNumbers) : firstPage;
+  return {
+    version: 1,
+    paperTitle: paper.title || paper.filename || "",
+    summary: "",
+    bodyStartPage: firstPage,
+    referencesStartPage: null,
+    keywords: [],
+    sections: [],
+    nonBodyZones: [],
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 async function segmentPaperWithAi(paper, settings, options = {}) {
-  const chunks = chunkPagesForSegmentation(paper.extractionPages || []);
+  const pages = paper.extractionPages || [];
+  const structureMap = await buildPaperStructureMapWithAi(paper, pages, settings, { signal: options.signal });
+  const chunks = chunkPagesForSegmentation(pages);
   const items = [];
   const chunkSummaries = [];
   const windowState = createSegmentationWindowState();
@@ -3338,6 +3622,7 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
       chunkIndex: index,
       totalChunks: chunks.length,
       windowContext: buildSegmentationWindowContext(windowState),
+      structureMap,
     });
     const chunkItems = result.items.map((item) => ({
       ...item,
@@ -3353,7 +3638,7 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
     });
   }
 
-  const paragraphs = buildParagraphsFromSegmentItems(items);
+  const paragraphs = buildParagraphsFromSegmentItems(items, structureMap);
   const readingCount = paragraphs.filter((paragraph) => isReadingParagraph(paragraph)).length;
 
   if (readingCount < 3) {
@@ -3367,9 +3652,10 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
     title: inferTitle(paragraphs, paper.filename),
     status: "ready",
     segmentationMode: "ai",
+    structureMap,
     sections,
     paragraphs,
-    contextProfile: buildPaperContextProfile(paragraphs, sections, chunkSummaries),
+    contextProfile: buildPaperContextProfile(paragraphs, sections, chunkSummaries, structureMap),
     updatedAt: new Date().toISOString(),
   };
 
@@ -3480,6 +3766,7 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
     .join("\n\n");
   const pageRange = getPageRangeLabel(pages);
   const windowContext = options.windowContext || "无。";
+  const structureContext = formatPaperStructureMapForPrompt(options.structureMap, pages);
 
   const messages = [
     {
@@ -3487,6 +3774,7 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
       content: [
         "你是论文 PDF 分段助手。你的任务是把 PDF 抽取出来的页面文本切成适合精读的语义段落。",
         "必须忠于原文，不翻译，不总结，不新增内容。",
+        "必须优先遵守全文结构地图；如果结构地图指出某页进入 References 或某区域是作者/版权/链接/页眉页脚，不要把这些内容输出成正文段落。",
         "合并同一自然段内的换行和断词，保留标题、编号、公式引用和术语。",
         "不要把上一窗口上下文重复输出成当前段落；它只用于判断跨页续接、章节脉络和术语一致性。",
         "只输出正文阅读需要的章节标题和自然段。作者列表、邮箱、单位、会议版权、ACM Reference、DOI/URL 脚注、页眉页脚、参考文献条目都必须省略。",
@@ -3501,6 +3789,9 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
       content: [
         `论文: ${paper.title || paper.filename}`,
         `当前窗口: ${options.chunkIndex + 1 || 1}/${options.totalChunks || 1}，页码 ${pageRange}`,
+        "",
+        "全文结构地图:",
+        structureContext,
         "",
         "上一窗口上下文:",
         windowContext,
@@ -3546,10 +3837,83 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
         };
       })
       .filter((item) => item.sourceText && (item.kind === "heading" || (
+        !isNonReadingByStructureMap(item, options.structureMap) &&
         !isLikelyNonReadingParagraphText(item.rawSourceText, item) &&
         !isLikelyNonReadingParagraphText(item.sourceText, item)
       ))),
   };
+}
+
+function formatPaperStructureMapForPrompt(structureMap, pages) {
+  if (!structureMap || structureMap.version !== 1) {
+    return "无。";
+  }
+
+  const { firstPage, lastPage } = getPageRangeBounds(pages);
+  const sections = (structureMap.sections || [])
+    .filter((section) => rangesOverlap(section.startPage, section.endPage || section.startPage, firstPage, lastPage))
+    .slice(0, 10);
+  const zones = (structureMap.nonBodyZones || [])
+    .filter((zone) => rangesOverlap(zone.startPage, zone.endPage || zone.startPage, firstPage, lastPage))
+    .slice(0, 10);
+  const lines = [
+    structureMap.paperTitle ? `标题: ${structureMap.paperTitle}` : "",
+    structureMap.summary ? `结构摘要: ${structureMap.summary}` : "",
+    structureMap.bodyStartPage ? `正文起始页: p.${structureMap.bodyStartPage}` : "",
+    structureMap.referencesStartPage ? `References 起始页: p.${structureMap.referencesStartPage}` : "",
+    sections.length
+      ? `当前窗口相关章节: ${sections.map((section) => `${section.title} ${formatPageRange(section.startPage, section.endPage)}`).join("；")}`
+      : "",
+    zones.length
+      ? `当前窗口非正文区域: ${zones.map((zone) => `${zone.label || zone.type} ${formatPageRange(zone.startPage, zone.endPage)} ${zone.description || ""}`.trim()).join("；")}`
+      : "",
+  ].filter(Boolean);
+
+  return lines.length ? truncateText(lines.join("\n"), SEGMENTATION_CONTEXT_TEXT_LIMIT) : "无。";
+}
+
+function getPageRangeBounds(pages) {
+  const numbers = (pages || []).map((page) => Number(page.pageNumber)).filter(Number.isFinite);
+  if (!numbers.length) {
+    return { firstPage: 1, lastPage: 1 };
+  }
+
+  return {
+    firstPage: Math.min(...numbers),
+    lastPage: Math.max(...numbers),
+  };
+}
+
+function rangesOverlap(startA, endA, startB, endB) {
+  if (![startA, endA, startB, endB].every(Number.isFinite)) {
+    return false;
+  }
+
+  return startA <= endB && endA >= startB;
+}
+
+function formatPageRange(startPage, endPage) {
+  return endPage && endPage !== startPage ? `p.${startPage}-${endPage}` : `p.${startPage || "?"}`;
+}
+
+function isNonReadingByStructureMap(item, structureMap) {
+  if (!structureMap || structureMap.version !== 1) {
+    return false;
+  }
+
+  const pageNumber = Number(item.pageNumber || 0);
+  if (!Number.isFinite(pageNumber) || pageNumber <= 0) {
+    return false;
+  }
+
+  if (structureMap.referencesStartPage && pageNumber >= Number(structureMap.referencesStartPage)) {
+    return true;
+  }
+
+  return (structureMap.nonBodyZones || []).some((zone) =>
+    zone.type === "references" &&
+    pageNumber >= Number(zone.startPage || 0) &&
+    pageNumber <= Number(zone.endPage || zone.startPage || 0));
 }
 
 function getSegmentationPageText(page) {
@@ -3566,7 +3930,7 @@ function getSegmentationPageText(page) {
   return String(page.text || "");
 }
 
-function buildParagraphsFromSegmentItems(items) {
+function buildParagraphsFromSegmentItems(items, structureMap = null) {
   const paragraphs = [];
   const seen = new Set();
 
@@ -3574,6 +3938,7 @@ function buildParagraphsFromSegmentItems(items) {
     const clean = normalizeParagraph(item.sourceText);
     if (!clean || (clean.length < 20 && item.kind !== "heading" && !isLikelyHeading(clean)) ||
       (item.kind !== "heading" && (
+        isNonReadingByStructureMap(item, structureMap) ||
         isLikelyNonReadingParagraphText(item.rawSourceText || clean, item) ||
         isLikelyNonReadingParagraphText(clean, item)
       ))) {
