@@ -448,6 +448,14 @@ select:focus {
   box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.1);
 }
 
+.page-artifact.formula .artifact-crop {
+  width: min(100%, 460px);
+}
+
+.page-artifact.code .artifact-crop {
+  width: min(100%, 680px);
+}
+
 .artifact-viewer {
   position: fixed;
   inset: 0;
@@ -521,10 +529,19 @@ select:focus {
 
 .artifact-viewer-caption {
   margin: 0;
+  overflow: auto;
   color: #2f3c38;
   font-size: 13px;
   line-height: 1.55;
   white-space: pre-wrap;
+}
+
+pre.artifact-viewer-caption {
+  padding: 10px;
+  border: 1px solid #e1e7e3;
+  border-radius: 6px;
+  background: #f8faf7;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
 .paragraph-card {

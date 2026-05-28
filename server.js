@@ -25,7 +25,7 @@ const WORKSPACE_CACHE_KEY = createHash("sha1").update(__dirname).digest("hex").s
 const SWIFT_MODULE_CACHE_DIR = path.join(CACHE_DIR, `swift-module-cache-${WORKSPACE_CACHE_KEY}`);
 const TMP_DIR = path.join(CACHE_DIR, "tmp");
 const MAX_UPLOAD_BYTES = 120 * 1024 * 1024;
-const ARTIFACT_CROP_VERSION = 5;
+const ARTIFACT_CROP_VERSION = 6;
 const JOB_ITEM_MAX_ATTEMPTS = 2;
 const JOB_POLL_LIMIT = 20;
 const ANALYSIS_CONTEXT_TEXT_LIMIT = 900;
@@ -1527,9 +1527,7 @@ function extractPageArtifacts(pages) {
         return;
       }
 
-      const captionFields = type === "caption"
-        ? buildCaptionArtifactFields(page, block)
-        : {};
+      const artifactFields = buildPageArtifactFields(page, block, type);
 
       artifacts.push({
         id: `artifact_${page.pageNumber}_${index}`,
@@ -1541,12 +1539,24 @@ function extractPageArtifacts(pages) {
         width: block.width ?? null,
         height: block.height ?? null,
         lineCount: block.lineCount || 1,
-        ...captionFields,
+        ...artifactFields,
       });
     });
   }
 
   return artifacts;
+}
+
+function buildPageArtifactFields(page, block, type) {
+  if (type === "caption") {
+    return buildCaptionArtifactFields(page, block);
+  }
+
+  if (type === "formula" || type === "code" || type === "figure-text") {
+    return buildBlockArtifactFields(page, block, type);
+  }
+
+  return {};
 }
 
 function buildCaptionArtifactFields(page, captionBlock) {
@@ -1567,6 +1577,23 @@ function buildCaptionArtifactFields(page, captionBlock) {
   };
 }
 
+function buildBlockArtifactFields(page, block, type) {
+  const text = normalizeArtifactText(block?.text || "");
+  const crop = inferBlockArtifactCrop(page, block, type);
+
+  return {
+    label: type === "formula" ? extractFormulaLabel(text) : "",
+    visualType: type,
+    cropVersion: ARTIFACT_CROP_VERSION,
+    imagePath: page.imagePath || null,
+    imageWidth: page.imageWidth || null,
+    imageHeight: page.imageHeight || null,
+    pageWidth: page.width || null,
+    pageHeight: page.height || null,
+    crop,
+  };
+}
+
 function extractArtifactLabel(text) {
   const match = String(text || "").match(/^(figure|fig\.|table)\s+(\d+[a-z]?)/i);
   if (!match) {
@@ -1575,6 +1602,11 @@ function extractArtifactLabel(text) {
 
   const kind = /^table$/i.test(match[1]) ? "Table" : "Figure";
   return `${kind} ${match[2]}`;
+}
+
+function extractFormulaLabel(text) {
+  const match = String(text || "").match(/(?:^|\s)\((\d+[a-z]?)\)\s*$/i);
+  return match ? `Equation ${match[1]}` : "";
 }
 
 function inferCaptionCrop(page, captionBlock, label) {
@@ -1803,6 +1835,141 @@ function getBlockBounds(blocks) {
   const y = Math.min(...boxes.map((box) => box.y));
   const right = Math.max(...boxes.map((box) => box.x + box.width));
   const bottom = Math.max(...boxes.map((box) => box.y + box.height));
+  return {
+    x,
+    y,
+    width: right - x,
+    height: bottom - y,
+  };
+}
+
+function inferBlockArtifactCrop(page, seedBlock, type) {
+  const pageWidth = Number(page.width || 0);
+  const pageHeight = Number(page.height || 0);
+  const seedBox = pickBlockBox(seedBlock);
+  if (!pageWidth || !pageHeight || !seedBox) {
+    return null;
+  }
+
+  const blocks = getClusteredArtifactBlocks(page, seedBlock, type);
+  const bounds = getBlockBounds(blocks.length ? blocks : [seedBlock]);
+  if (!bounds) {
+    return null;
+  }
+
+  const paddingX = type === "code" ? pageWidth * 0.014 : pageWidth * 0.02;
+  const paddingY = type === "code" ? pageHeight * 0.012 : pageHeight * 0.014;
+  return normalizeCrop({
+    x: bounds.x - paddingX,
+    y: bounds.y - paddingY,
+    width: bounds.width + paddingX * 2,
+    height: bounds.height + paddingY * 2,
+    pageWidth,
+    pageHeight,
+  });
+}
+
+function getClusteredArtifactBlocks(page, seedBlock, type) {
+  const blocks = Array.isArray(page.blocks) ? page.blocks : [];
+  const seedBox = pickBlockBox(seedBlock);
+  const pageHeight = Number(page.height || 0) || 792;
+  if (!seedBox) {
+    return [seedBlock].filter(Boolean);
+  }
+
+  const maxGap = type === "formula" ? pageHeight * 0.028 : pageHeight * 0.04;
+  const seedHorizontal = {
+    x: seedBox.x - Math.max(seedBox.width * 0.08, 12),
+    width: seedBox.width + Math.max(seedBox.width * 0.16, 24),
+  };
+
+  const cluster = [seedBlock];
+  let bounds = seedBox;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const block of blocks) {
+      if (cluster.includes(block) || !isCompatibleArtifactClusterBlock(block, type)) {
+        continue;
+      }
+
+      const box = pickBlockBox(block);
+      if (!box || !overlapsHorizontal(block, seedHorizontal, type === "formula" ? 0.08 : 0.24)) {
+        continue;
+      }
+
+      if (getVerticalGap(bounds, box) > maxGap) {
+        continue;
+      }
+
+      cluster.push(block);
+      bounds = mergeBoxes(bounds, box);
+      changed = true;
+    }
+  }
+
+  return cluster;
+}
+
+function isCompatibleArtifactClusterBlock(block, type) {
+  const text = normalizeArtifactText(block?.text || "");
+  if (!text) {
+    return false;
+  }
+
+  const blockType = classifyPageArtifact(block);
+  if (blockType === type) {
+    return true;
+  }
+  if (blockType) {
+    return false;
+  }
+
+  if (type === "formula") {
+    return isEquationNumberBlock(text) || isFormulaContinuationBlock(text, block);
+  }
+
+  if (type === "code") {
+    return isCodeContinuationBlock(text, block);
+  }
+
+  return false;
+}
+
+function isEquationNumberBlock(text) {
+  return /^\(?\d+[a-z]?\)?$/i.test(String(text || "").trim());
+}
+
+function isFormulaContinuationBlock(text, block = {}) {
+  const lineCount = Number(block.lineCount || 1);
+  const mathTokens = (text.match(/[=≤≥≠≈∑∏∫√∞→←↔±×÷∂λμσγαβθΩΔ]|\b(log|exp|min|max)\b/gi) || []).length;
+  return lineCount <= 3 && text.length <= 180 && mathTokens >= 1 && !/[.!?。！？].{8,}/.test(text);
+}
+
+function isCodeContinuationBlock(text, block = {}) {
+  const lineCount = Number(block.lineCount || 1);
+  const codeSymbols = (text.match(/[{}\[\]();=<>]|=>|::/g) || []).length;
+  const codeWords = (text.match(/\b(return|await|async|for|while|if|else|try|catch|throw|yield|print|self|this)\b/gi) || []).length;
+  return text.length <= 1400 && (lineCount >= 2 || codeSymbols >= 3 || codeWords >= 2);
+}
+
+function getVerticalGap(a, b) {
+  const aBottom = a.y + a.height;
+  const bBottom = b.y + b.height;
+  if (b.y > aBottom) {
+    return b.y - aBottom;
+  }
+  if (a.y > bBottom) {
+    return a.y - bBottom;
+  }
+  return 0;
+}
+
+function mergeBoxes(a, b) {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  const right = Math.max(a.x + a.width, b.x + b.width);
+  const bottom = Math.max(a.y + a.height, b.y + b.height);
   return {
     x,
     y,
@@ -3379,8 +3546,15 @@ async function loadPaper(paperId) {
 }
 
 function upgradePaperArtifacts(paper) {
-  const needsUpgrade = (paper.pageArtifacts || [])
-    .some((artifact) => artifact.type === "caption" && artifact.cropVersion !== ARTIFACT_CROP_VERSION);
+  const artifacts = Array.isArray(paper.pageArtifacts) ? paper.pageArtifacts : [];
+  const extractionPages = Array.isArray(paper.extractionPages) ? paper.extractionPages : [];
+  const hasExtractableArtifacts = extractionPages.some((page) =>
+    Array.isArray(page.blocks) && page.blocks.some((block) => classifyPageArtifact(block)));
+  const needsUpgrade = !artifacts.length
+    ? hasExtractableArtifacts
+    : artifacts.some((artifact) =>
+      ["caption", "formula", "code", "figure-text"].includes(artifact.type) &&
+        (artifact.cropVersion !== ARTIFACT_CROP_VERSION || !artifact.crop));
   if (!needsUpgrade || !Array.isArray(paper.extractionPages) || !paper.extractionPages.length) {
     return false;
   }

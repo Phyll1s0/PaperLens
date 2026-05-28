@@ -1061,7 +1061,7 @@ function renderArtifactCrop(artifact) {
   const frame = document.createElement("button");
   frame.className = "artifact-crop";
   frame.type = "button";
-  frame.title = "放大查看图表";
+  frame.title = `放大查看${getArtifactLabel(artifact.type, artifact.visualType)}`;
   frame.style.aspectRatio = `${crop.width} / ${crop.height}`;
   frame.addEventListener("click", () => openArtifactViewer(artifact));
 
@@ -1073,7 +1073,9 @@ function renderCropImage(artifact) {
   const crop = artifact.crop;
   const image = document.createElement("img");
   image.src = artifact.imagePath;
-  image.alt = artifact.label ? `${artifact.label} 裁剪预览` : "图表裁剪预览";
+  image.alt = artifact.label
+    ? `${artifact.label} 裁剪预览`
+    : `${getArtifactLabel(artifact.type, artifact.visualType)}裁剪预览`;
   image.loading = "lazy";
   image.decoding = "async";
   image.style.width = `${(crop.pageWidth / crop.width) * 100}%`;
@@ -1131,9 +1133,13 @@ function openArtifactViewer(artifact) {
   cropFrame.style.width = `min(100%, 1080px, calc(74vh * ${artifact.crop.width / artifact.crop.height}))`;
   cropFrame.append(renderCropImage(artifact));
 
-  const caption = document.createElement("p");
+  const caption = document.createElement(artifact.type === "code" ? "pre" : "p");
   caption.className = "artifact-viewer-caption";
-  renderRichText(caption, artifact.text);
+  if (artifact.type === "code") {
+    caption.textContent = artifact.text;
+  } else {
+    renderRichText(caption, artifact.text);
+  }
 
   panel.append(header, cropFrame, caption);
   overlay.append(panel);
