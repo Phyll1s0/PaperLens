@@ -82,6 +82,9 @@ const PROVIDERS = {
 };
 
 const API_TIMEOUT_MS = 240_000;
+const API_KEY_REF_STORAGE_KEY = "paper-reader-api-key-ref";
+const API_KEY_INFO_STORAGE_KEY = "paper-reader-api-key-info";
+const LEGACY_API_KEY_STORAGE_KEY = "paper-reader-api-key";
 
 loadSettings();
 bindEvents();
@@ -96,6 +99,7 @@ function bindEvents() {
   els.rerunAnalyzeButton.addEventListener("click", () => startAutoAnalyze({ rerunAll: true }));
   els.stopAutoButton.addEventListener("click", stopAutoAnalyze);
   els.providerSelect.addEventListener("change", () => {
+    clearSavedApiKeyRef();
     applyProvider(els.providerSelect.value);
     saveSettings();
   });
@@ -106,6 +110,9 @@ function bindEvents() {
 
   for (const input of [els.baseUrlInput, els.modelInput, els.apiKeyInput, els.agentBudgetInput, els.proxyUrlInput]) {
     input.addEventListener("input", () => {
+      if (input === els.baseUrlInput) {
+        clearSavedApiKeyRef();
+      }
       saveSettings();
       updateModelDiagnostics();
     });
@@ -118,8 +125,10 @@ function bindEvents() {
 
 function loadSettings() {
   const provider = sessionStorage.getItem("paper-reader-provider") || "deepseek";
+  const legacyApiKey = sessionStorage.getItem(LEGACY_API_KEY_STORAGE_KEY) || "";
+  sessionStorage.removeItem(LEGACY_API_KEY_STORAGE_KEY);
   els.providerSelect.value = provider;
-  els.apiKeyInput.value = sessionStorage.getItem("paper-reader-api-key") || "";
+  els.apiKeyInput.value = legacyApiKey;
   els.agentBudgetInput.value = sessionStorage.getItem("paper-reader-agent-budget") || "500";
   els.proxyUrlInput.value = sessionStorage.getItem("paper-reader-proxy-url") || "";
   els.aiSegmentInput.checked = sessionStorage.getItem("paper-reader-ai-segment") !== "false";
@@ -130,28 +139,82 @@ function loadSettings() {
     els.baseUrlInput.value = sessionStorage.getItem("paper-reader-base-url") || els.baseUrlInput.value;
     els.modelInput.value = sessionStorage.getItem("paper-reader-model") || els.modelInput.value;
   }
+  updateApiKeyPlaceholder();
 }
 
 function saveSettings() {
   sessionStorage.setItem("paper-reader-provider", els.providerSelect.value);
   sessionStorage.setItem("paper-reader-base-url", els.baseUrlInput.value.trim());
   sessionStorage.setItem("paper-reader-model", els.modelInput.value.trim());
-  sessionStorage.setItem("paper-reader-api-key", els.apiKeyInput.value.trim());
+  sessionStorage.removeItem(LEGACY_API_KEY_STORAGE_KEY);
   sessionStorage.setItem("paper-reader-agent-budget", els.agentBudgetInput.value.trim());
   sessionStorage.setItem("paper-reader-proxy-url", els.proxyUrlInput.value.trim());
   sessionStorage.setItem("paper-reader-ai-segment", String(els.aiSegmentInput.checked));
   sessionStorage.setItem("paper-reader-auto-analyze", String(els.autoAnalyzeInput.checked));
+  updateApiKeyPlaceholder();
 }
 
 function getSettings() {
+  const apiKey = normalizeApiKeyInput(els.apiKeyInput.value);
   return {
     provider: els.providerSelect.value,
     baseUrl: els.baseUrlInput.value.trim(),
     model: normalizeModelNameInput(els.modelInput.value),
-    apiKey: normalizeApiKeyInput(els.apiKeyInput.value),
+    apiKey,
+    apiKeyRef: apiKey ? "" : sessionStorage.getItem(API_KEY_REF_STORAGE_KEY) || "",
     agentBudgetUsd: Number(els.agentBudgetInput.value || 500),
     proxyUrl: els.proxyUrlInput.value.trim(),
   };
+}
+
+function getStoredKeyInfo() {
+  try {
+    return JSON.parse(sessionStorage.getItem(API_KEY_INFO_STORAGE_KEY) || "null");
+  } catch {
+    return null;
+  }
+}
+
+function applySecuredSettings(settings) {
+  if (!settings) {
+    return;
+  }
+
+  if (settings.provider) {
+    els.providerSelect.value = settings.provider;
+  }
+  if (settings.baseUrl) {
+    els.baseUrlInput.value = settings.baseUrl;
+  }
+  if (settings.model) {
+    els.modelInput.value = settings.model;
+  }
+
+  if (settings.apiKeyRef) {
+    sessionStorage.setItem(API_KEY_REF_STORAGE_KEY, settings.apiKeyRef);
+    if (settings.keyInfo) {
+      sessionStorage.setItem(API_KEY_INFO_STORAGE_KEY, JSON.stringify(settings.keyInfo));
+    }
+    els.apiKeyInput.value = "";
+  } else {
+    clearSavedApiKeyRef();
+  }
+
+  saveSettings();
+  updateModelDiagnostics();
+}
+
+function clearSavedApiKeyRef() {
+  sessionStorage.removeItem(API_KEY_REF_STORAGE_KEY);
+  sessionStorage.removeItem(API_KEY_INFO_STORAGE_KEY);
+  updateApiKeyPlaceholder();
+}
+
+function updateApiKeyPlaceholder() {
+  const keyInfo = getStoredKeyInfo();
+  els.apiKeyInput.placeholder = keyInfo
+    ? `已保存本地 ${keyInfo.keyPrefix || "API"} Key；输入新 Key 可替换`
+    : "";
 }
 
 function normalizeApiKeyInput(value) {
@@ -182,20 +245,22 @@ function normalizeModelNameInput(value) {
 function updateModelDiagnostics(remoteDiagnostics) {
   const settings = getSettings();
   const endpoint = getChatEndpoint(settings.baseUrl);
+  const savedKey = settings.apiKey ? null : getStoredKeyInfo();
   const keyPrefix = settings.apiKey.startsWith("sk-kimi-")
     ? "sk-kimi"
     : settings.apiKey.startsWith("sk-")
       ? "sk"
-      : settings.apiKey ? "unknown" : "missing";
-  const keyLength = settings.apiKey.length;
+      : settings.apiKey ? "unknown" : savedKey?.keyPrefix || "missing";
+  const keyLength = settings.apiKey ? settings.apiKey.length : savedKey?.keyLength || 0;
   const diagnostics = remoteDiagnostics || {
     provider: settings.provider,
     endpoint,
     model: settings.model,
-    keyPresent: Boolean(settings.apiKey),
+    keyPresent: Boolean(settings.apiKey || settings.apiKeyRef),
+    keySaved: Boolean(settings.apiKeyRef && !settings.apiKey),
     keyPrefix,
     keyLength,
-    keyFormatOk: settings.provider !== "claude-kimi-agent" || settings.apiKey.startsWith("sk-kimi-"),
+    keyFormatOk: settings.provider !== "claude-kimi-agent" || keyPrefix === "sk-kimi",
     proxyPresent: Boolean(settings.proxyUrl),
     proxySource: settings.proxyUrl ? "page" : "none",
   };
@@ -204,7 +269,7 @@ function updateModelDiagnostics(remoteDiagnostics) {
     `Provider: ${diagnostics.provider || settings.provider}`,
     `Endpoint: ${diagnostics.endpoint}`,
     `Model: ${diagnostics.model}`,
-    `Key: ${diagnostics.keyPresent ? `${diagnostics.keyPrefix}, ${diagnostics.keyLength} chars` : "missing"}`,
+    `Key: ${diagnostics.keyPresent ? `${diagnostics.keySaved ? "saved " : ""}${diagnostics.keyPrefix}, ${diagnostics.keyLength} chars` : "missing"}`,
   ];
 
   if (settings.provider === "claude-kimi-agent") {
@@ -328,6 +393,7 @@ async function segmentPaperWithAi(options = {}) {
       body: JSON.stringify({ settings: getSettings() }),
     }, "AI 分段");
     const result = await readResponse(response);
+    applySecuredSettings(result.settings);
     state.paper = result.paper;
     renderPaper();
     loadRecentPapers();
@@ -414,6 +480,7 @@ async function pingModel() {
     if (result.diagnostics) {
       updateModelDiagnostics(result.diagnostics);
     }
+    applySecuredSettings(result.settings);
 
     if (!response.ok) {
       throw new Error(result.error || `Request failed with ${response.status}`);
@@ -480,6 +547,7 @@ async function createAnalysisJob(payload = {}) {
       }),
     }, "创建分析任务");
     const result = await readResponse(response);
+    applySecuredSettings(result.settings);
     if (result.paper) {
       state.paper = result.paper;
     }
@@ -768,6 +836,7 @@ async function askParagraph(paragraphId, input) {
       }),
     }, "段落追问");
     const result = await readResponse(response);
+    applySecuredSettings(result.settings);
     replaceParagraph(result.paragraph);
     setStatus("回答完成");
   } catch (error) {
@@ -779,8 +848,8 @@ async function askParagraph(paragraphId, input) {
 }
 
 function ensureModelSettings(options = {}) {
-  const { apiKey, model, baseUrl } = getSettings();
-  if (!apiKey && baseUrl !== "local:claude-config") {
+  const { apiKey, apiKeyRef, model, baseUrl } = getSettings();
+  if (!apiKey && !apiKeyRef && baseUrl !== "local:claude-config") {
     if (!options.quiet) {
       setStatus("请输入 API Key", true);
     }

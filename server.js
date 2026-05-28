@@ -213,21 +213,22 @@ async function handleSegmentPaper(req, res, paperId) {
   const payload = await readJson(req);
   const paper = await loadPaper(paperId);
   const pages = Array.isArray(paper.extractionPages) ? paper.extractionPages : [];
+  const settings = await secureSettingsForJob(payload.settings || {});
   const signal = getResponseAbortSignal(res);
 
   if (!pages.length) {
     return json(res, { error: "这篇论文缺少原始页面文本，无法重新 AI 分段。请重新上传 PDF。" }, 400);
   }
 
-  const segmented = await segmentPaperWithAi(paper, payload.settings, { signal });
+  const segmented = await segmentPaperWithAi(paper, settings, { signal });
   await savePaper(segmented);
-  return json(res, { paper: segmented });
+  return json(res, { paper: segmented, settings: serializeClientSettings(settings) });
 }
 
 async function handleCreateAnalysisJob(req, res, paperId) {
   const payload = await readJson(req);
   const paper = await loadPaper(paperId);
-  const settings = await secureSettingsForJob(normalizeSettings(payload.settings || {}));
+  const settings = await secureSettingsForJob(payload.settings || {});
   const requestedIds = Array.isArray(payload.paragraphIds)
     ? payload.paragraphIds.map(String).filter(Boolean)
     : payload.paragraphId
@@ -238,7 +239,11 @@ async function handleCreateAnalysisJob(req, res, paperId) {
   const existing = findActiveAnalysisJobForPaper(paperId);
 
   if (existing && !rerunAll && !forceSelected) {
-    return json(res, { job: serializeJob(existing), paper });
+    return json(res, {
+      job: serializeJob(existing),
+      paper,
+      settings: serializeClientSettings(existing.settings || settings),
+    });
   }
 
   if (existing && (rerunAll || forceSelected)) {
@@ -259,6 +264,7 @@ async function handleCreateAnalysisJob(req, res, paperId) {
     return json(res, {
       job: null,
       paper,
+      settings: serializeClientSettings(settings),
       message: "没有待分析段落。",
     });
   }
@@ -285,6 +291,7 @@ async function handleCreateAnalysisJob(req, res, paperId) {
   return json(res, {
     job: serializeJob(job),
     paper,
+    settings: serializeClientSettings(settings),
   });
 }
 
@@ -420,7 +427,17 @@ async function loadJobs() {
     }
 
     const normalized = normalizeLoadedJob(job);
-    normalized.settings = await secureSettingsForJob(normalized.settings, { migrate: true });
+    try {
+      normalized.settings = await secureSettingsForJob(normalized.settings, { migrate: true });
+    } catch (error) {
+      console.warn(`Skipping invalid model settings for job ${normalized.id}: ${error.message}`);
+      normalized.settings = redactJobSettings(normalized.settings || {});
+      if (isActiveJobStatus(normalized.status)) {
+        normalized.status = "error";
+        normalized.error = "历史任务模型配置无法迁移，请重新创建分析任务。";
+        normalized.completedAt = new Date().toISOString();
+      }
+    }
     jobStore.jobs.set(job.id, normalized);
   }
 
@@ -456,27 +473,28 @@ async function loadSecrets() {
 }
 
 async function secureSettingsForJob(settings, options = {}) {
-  if (!settings?.apiKey) {
-    return settings;
+  const normalized = normalizeSettings(settings || {});
+  if (!normalized.apiKey) {
+    if (normalized.apiKeyRef && !options.migrate) {
+      resolveSecretForSettings(normalized);
+    }
+
+    return redactJobSettings(normalized);
   }
 
   const now = new Date().toISOString();
   const id = `key_${createHash("sha256")
-    .update([settings.provider, settings.baseUrl, settings.apiKey].join("\n"))
+    .update([normalized.provider, normalized.baseUrl, normalized.apiKey].join("\n"))
     .digest("hex")
     .slice(0, 20)}`;
   const existing = secretStore.keys.get(id);
   secretStore.keys.set(id, {
     id,
-    provider: settings.provider,
-    baseUrl: settings.baseUrl,
-    key: settings.apiKey,
-    keyPrefix: settings.apiKey.startsWith("sk-kimi-")
-      ? "sk-kimi"
-      : settings.apiKey.startsWith("sk-")
-        ? "sk"
-        : "unknown",
-    keyLength: settings.apiKey.length,
+    provider: normalized.provider,
+    baseUrl: normalized.baseUrl,
+    key: normalized.apiKey,
+    keyPrefix: getApiKeyPrefix(normalized.apiKey),
+    keyLength: normalized.apiKey.length,
     createdAt: existing?.createdAt || now,
     updatedAt: now,
   });
@@ -485,27 +503,77 @@ async function secureSettingsForJob(settings, options = {}) {
     await persistSecrets();
   }
 
-  const { apiKey, ...rest } = settings;
-  return {
-    ...rest,
+  return redactJobSettings({
+    ...normalized,
     apiKeyRef: id,
-  };
+  });
 }
 
 function resolveJobSettings(settings) {
-  if (!settings?.apiKeyRef) {
-    return settings;
+  return resolveSettingsForModel(settings);
+}
+
+function resolveSettingsForModel(settings) {
+  const normalized = normalizeSettings(settings || {});
+  if (normalized.apiKey || !normalized.apiKeyRef) {
+    return normalized;
   }
 
-  const secret = secretStore.keys.get(settings.apiKeyRef);
-  if (!secret) {
-    throw badRequest("任务引用的 API Key 不存在。请重新创建分析任务。");
-  }
-
+  const secret = resolveSecretForSettings(normalized);
   return {
-    ...settings,
+    ...normalized,
     apiKey: secret.key,
   };
+}
+
+function resolveSecretForSettings(settings) {
+  const secret = secretStore.keys.get(settings.apiKeyRef);
+  if (!secret) {
+    throw badRequest("本地 API Key 引用不存在。请重新输入 API Key。");
+  }
+
+  if (secret.provider !== settings.provider || secret.baseUrl !== settings.baseUrl) {
+    throw badRequest("本地 API Key 引用与当前 Provider/Base URL 不匹配。请重新输入 API Key。");
+  }
+
+  if (settings.baseUrl === "local:claude-kimi" && !secret.key.startsWith("sk-kimi-")) {
+    throw badRequest("Kimi Code Key 格式不对：Claude Code + Kimi Code Key 需要输入以 sk-kimi- 开头的完整 Key。请不要复制控制台列表里的脱敏显示值。");
+  }
+
+  return secret;
+}
+
+function serializeClientSettings(settings = {}) {
+  const safeSettings = redactJobSettings(settings);
+  const secret = safeSettings.apiKeyRef ? secretStore.keys.get(safeSettings.apiKeyRef) : null;
+  return {
+    ...safeSettings,
+    keyInfo: secret ? serializeKeyInfo(secret) : null,
+  };
+}
+
+function serializeKeyInfo(secret) {
+  return {
+    id: secret.id,
+    provider: secret.provider,
+    baseUrl: secret.baseUrl,
+    keyPrefix: secret.keyPrefix,
+    keyLength: secret.keyLength,
+    createdAt: secret.createdAt,
+    updatedAt: secret.updatedAt,
+  };
+}
+
+function getApiKeyPrefix(apiKey) {
+  if (apiKey.startsWith("sk-kimi-")) {
+    return "sk-kimi";
+  }
+
+  if (apiKey.startsWith("sk-")) {
+    return "sk";
+  }
+
+  return apiKey ? "unknown" : "missing";
 }
 
 async function persistSecrets() {
@@ -518,7 +586,7 @@ async function persistSecrets() {
   secretStore.savePromise = secretStore.savePromise
     .catch(() => {})
     .then(async () => {
-      await writeFile(tmpPath, JSON.stringify(payload, null, 2));
+      await writeFile(tmpPath, JSON.stringify(payload, null, 2), { mode: 0o600 });
       await rename(tmpPath, SECRETS_PATH);
     });
   await secretStore.savePromise;
@@ -720,6 +788,14 @@ async function persistJobs() {
 
 function redactJobSettings(settings = {}) {
   const { apiKey, ...rest } = settings;
+  if (!rest.apiKeyRef) {
+    delete rest.apiKeyRef;
+  }
+
+  if (rest.keyInfo) {
+    delete rest.keyInfo;
+  }
+
   return rest;
 }
 
@@ -940,6 +1016,7 @@ function sleep(ms) {
 async function handleAnalyze(req, res) {
   const payload = await readJson(req);
   const { paperId, paragraphId, settings } = payload;
+  const securedSettings = await secureSettingsForJob(settings || {});
   const signal = getResponseAbortSignal(res);
 
   if (!paperId || !paragraphId) {
@@ -957,9 +1034,9 @@ async function handleAnalyze(req, res) {
     return json(res, { error: "Section headings do not need paragraph analysis." }, 400);
   }
 
-  await analyzeParagraphInPaper(paper, paragraph, settings, { signal });
+  await analyzeParagraphInPaper(paper, paragraph, securedSettings, { signal });
   await savePaper(paper);
-  return json(res, { paragraph });
+  return json(res, { paragraph, settings: serializeClientSettings(securedSettings) });
 }
 
 async function analyzeParagraphInPaper(paper, paragraph, settings, options = {}) {
@@ -1145,11 +1222,12 @@ function truncateText(text, limit) {
 
 async function handleModelPing(req, res) {
   const payload = await readJson(req);
-  const diagnostics = getSettingsDiagnostics(payload.settings);
+  const rawSettings = normalizeSettings(payload.settings || {});
+  let diagnostics = getSettingsDiagnostics(rawSettings);
   const signal = getResponseAbortSignal(res);
 
   try {
-    const answer = await callModel(payload.settings, [
+    const answer = await callModel(rawSettings, [
       {
         role: "system",
         content: "你是 API 连通性测试助手。只用中文简短回答。",
@@ -1160,7 +1238,14 @@ async function handleModelPing(req, res) {
       },
     ], { maxTokens: 64, signal });
 
-    return json(res, { ok: true, answer, diagnostics });
+    const settings = await secureSettingsForJob(rawSettings);
+    diagnostics = getSettingsDiagnostics(settings);
+    return json(res, {
+      ok: true,
+      answer,
+      diagnostics,
+      settings: serializeClientSettings(settings),
+    });
   } catch (error) {
     return json(res, {
       error: error.message || "模型连接测试失败。",
@@ -1172,6 +1257,7 @@ async function handleModelPing(req, res) {
 async function handleChat(req, res) {
   const payload = await readJson(req);
   const { paperId, paragraphId, message, settings } = payload;
+  const securedSettings = await secureSettingsForJob(settings || {});
   const signal = getResponseAbortSignal(res);
 
   if (!paperId || !paragraphId || !message) {
@@ -1227,7 +1313,7 @@ async function handleChat(req, res) {
     },
   ];
 
-  const answer = await callModel(settings, messages, { signal });
+  const answer = await callModel(securedSettings, messages, { signal });
   paragraph.chatMessages = paragraph.chatMessages || [];
   paragraph.chatMessages.push({
     id: `msg_${randomUUID().slice(0, 12)}`,
@@ -1237,7 +1323,11 @@ async function handleChat(req, res) {
   });
 
   await savePaper(paper);
-  return json(res, { answer, paragraph });
+  return json(res, {
+    answer,
+    paragraph,
+    settings: serializeClientSettings(securedSettings),
+  });
 }
 
 function buildPaperRecord({ id, filename, pdfPath, extraction }) {
@@ -2651,7 +2741,7 @@ function normalizePopplerText(text) {
 }
 
 async function callModel(settings, messages, options = {}) {
-  const cleanSettings = normalizeSettings(settings);
+  const cleanSettings = resolveSettingsForModel(settings);
   if (cleanSettings.baseUrl === "local:claude-kimi") {
     return callClaudeAgent(cleanSettings, messages, { usePageKimiKey: true, signal: options.signal });
   }
@@ -3063,17 +3153,18 @@ function parseProviderError(body) {
 function normalizeSettings(settings = {}) {
   const provider = String(settings.provider || "").trim();
   const apiKey = String(settings.apiKey || "").trim();
+  const apiKeyRef = String(settings.apiKeyRef || "").trim();
   const model = normalizeModelName(String(settings.model || "").trim());
   const baseUrl = resolveBaseUrlForProvider(provider, String(settings.baseUrl || "https://api.openai.com/v1").trim());
   const agentBudgetUsd = Number(settings.agentBudgetUsd || 500);
   const normalizedApiKey = normalizeApiKey(apiKey);
   const proxyUrl = normalizeProxyUrl(String(settings.proxyUrl || ""));
 
-  if (!apiKey && baseUrl !== "local:claude-config") {
+  if (!normalizedApiKey && !apiKeyRef && baseUrl !== "local:claude-config") {
     throw badRequest("API Key is required.");
   }
 
-  if (baseUrl === "local:claude-kimi" && !normalizedApiKey.startsWith("sk-kimi-")) {
+  if (normalizedApiKey && baseUrl === "local:claude-kimi" && !normalizedApiKey.startsWith("sk-kimi-")) {
     throw badRequest("Kimi Code Key 格式不对：Claude Code + Kimi Code Key 需要输入以 sk-kimi- 开头的完整 Key。请不要复制控制台列表里的脱敏显示值。");
   }
 
@@ -3081,7 +3172,7 @@ function normalizeSettings(settings = {}) {
     throw badRequest("Model name is required.");
   }
 
-  return { provider, apiKey: normalizedApiKey, model, baseUrl, agentBudgetUsd, proxyUrl };
+  return { provider, apiKey: normalizedApiKey, apiKeyRef, model, baseUrl, agentBudgetUsd, proxyUrl };
 }
 
 function badRequest(message) {
@@ -3130,6 +3221,8 @@ function getSettingsDiagnostics(settings = {}) {
   const provider = String(settings.provider || "").trim();
   const baseUrl = resolveBaseUrlForProvider(provider, String(settings.baseUrl || "https://api.openai.com/v1").trim());
   const model = normalizeModelName(String(settings.model || "").trim());
+  const apiKeyRef = String(settings.apiKeyRef || "").trim();
+  const savedKey = apiKeyRef ? secretStore.keys.get(apiKeyRef) : null;
   const apiKey = normalizeApiKey(String(settings.apiKey || ""));
   let proxyUrl = "";
   try {
@@ -3137,11 +3230,8 @@ function getSettingsDiagnostics(settings = {}) {
   } catch {
     proxyUrl = String(settings.proxyUrl || "").trim();
   }
-  const keyPrefix = apiKey.startsWith("sk-kimi-")
-    ? "sk-kimi"
-    : apiKey.startsWith("sk-")
-      ? "sk"
-      : apiKey ? "unknown" : "missing";
+  const keyPrefix = apiKey ? getApiKeyPrefix(apiKey) : savedKey?.keyPrefix || "missing";
+  const keyLength = apiKey ? apiKey.length : savedKey?.keyLength || 0;
   const isClaudeProvider = baseUrl === "local:claude-kimi" || baseUrl === "local:claude-config";
   const commandPath = isClaudeProvider ? buildCommandPath() : "";
 
@@ -3153,10 +3243,12 @@ function getSettingsDiagnostics(settings = {}) {
         ? "local claude CLI configured auth"
       : getChatCompletionsEndpoint(baseUrl),
     model,
-    keyPresent: Boolean(apiKey),
+    keyPresent: Boolean(apiKey || savedKey),
+    keyRef: savedKey?.id || "",
+    keySaved: Boolean(savedKey && !apiKey),
     keyPrefix,
-    keyLength: apiKey.length,
-    keyFormatOk: baseUrl !== "local:claude-kimi" || apiKey.startsWith("sk-kimi-"),
+    keyLength,
+    keyFormatOk: baseUrl !== "local:claude-kimi" || keyPrefix === "sk-kimi",
     claudeCommand: isClaudeProvider ? resolveClaudeCommand(commandPath) : "",
     proxyPresent: isClaudeProvider ? hasProxyEnv(proxyUrl) : false,
     proxySource: isClaudeProvider ? getProxySource(proxyUrl) : "none",
