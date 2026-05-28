@@ -23,6 +23,7 @@ const WORKSPACE_CACHE_KEY = createHash("sha1").update(__dirname).digest("hex").s
 const SWIFT_MODULE_CACHE_DIR = path.join(CACHE_DIR, `swift-module-cache-${WORKSPACE_CACHE_KEY}`);
 const TMP_DIR = path.join(CACHE_DIR, "tmp");
 const MAX_UPLOAD_BYTES = 120 * 1024 * 1024;
+const ARTIFACT_CROP_VERSION = 5;
 const EXTRA_BIN_DIRS = [
   path.dirname(process.execPath),
   "/opt/homebrew/bin",
@@ -384,6 +385,8 @@ function buildPaperRecord({ id, filename, pdfPath, extraction }) {
     pageNumber: page.pageNumber,
     text: page.text || "",
     blocks: Array.isArray(page.blocks) ? page.blocks : [],
+    width: page.width || null,
+    height: page.height || null,
   }));
   const pageArtifacts = extractPageArtifacts(extraction.pages);
 
@@ -593,6 +596,7 @@ function buildCaptionArtifactFields(page, captionBlock) {
   return {
     label,
     visualType: /^table\b/i.test(text) ? "table" : "figure",
+    cropVersion: ARTIFACT_CROP_VERSION,
     imagePath: page.imagePath || null,
     imageWidth: page.imageWidth || null,
     imageHeight: page.imageHeight || null,
@@ -625,22 +629,45 @@ function inferCaptionCrop(page, captionBlock, label) {
   const captionBottom = clampNumber(captionY + captionHeight, 0, pageHeight);
   const minHeight = Math.max(56, pageHeight * 0.08);
   const isTable = /^table\b/i.test(label) || /^table\b/i.test(captionBlock.text || "");
+  if (isTable && captionBlock.lineCount >= 3 && Number(captionBlock.height || 0) > pageHeight * 0.06) {
+    const tableBox = pickBlockBox(captionBlock);
+    if (tableBox) {
+      const paddingX = pageWidth * 0.014;
+      const paddingY = pageHeight * 0.012;
+      return normalizeCrop({
+        x: tableBox.x - paddingX,
+        y: tableBox.y - paddingY,
+        width: tableBox.width + paddingX * 2,
+        height: tableBox.height + paddingY * 2,
+        pageWidth,
+        pageHeight,
+      });
+    }
+  }
+
+  const candidateCrop = inferCandidateVisualCrop(page, captionBlock, horizontal, pageWidth, pageHeight, isTable);
+  if (candidateCrop) {
+    return candidateCrop;
+  }
+
   let y;
   let bottom;
 
   if (isTable) {
-    y = Math.max(0, captionY - pageHeight * 0.012);
+    y = captionBlock.lineCount >= 3
+      ? Math.max(0, captionY - pageHeight * 0.012)
+      : Math.min(pageHeight, captionBottom + pageHeight * 0.006);
     bottom = findNextTextBoundary(page, captionBlock, horizontal, pageHeight) ||
-      Math.min(pageHeight, captionBottom + pageHeight * 0.32);
+      Math.min(pageHeight, captionBottom + pageHeight * 0.24);
     if (bottom - y < minHeight) {
-      bottom = Math.min(pageHeight, captionBottom + pageHeight * 0.28);
+      bottom = Math.min(pageHeight, captionBottom + pageHeight * 0.2);
     }
   } else {
-    bottom = Math.min(pageHeight, captionBottom + pageHeight * 0.01);
+    bottom = Math.max(0, captionY - pageHeight * 0.006);
     y = findPreviousTextBoundary(page, captionBlock, horizontal) ||
-      Math.max(0, captionY - pageHeight * 0.32);
+      Math.max(0, captionY - pageHeight * 0.26);
     if (captionY - y < minHeight) {
-      y = Math.max(0, captionY - pageHeight * 0.28);
+      y = Math.max(0, captionY - pageHeight * 0.22);
     }
   }
 
@@ -652,6 +679,175 @@ function inferCaptionCrop(page, captionBlock, label) {
     pageWidth,
     pageHeight,
   });
+}
+
+function inferCandidateVisualCrop(page, captionBlock, horizontal, pageWidth, pageHeight, isTable) {
+  const candidates = getVisualCandidateBlocks(page, captionBlock, horizontal, pageHeight, isTable);
+  if (!candidates.length) {
+    return null;
+  }
+
+  const captionY = clampNumber(Number(captionBlock.y || 0), 0, pageHeight);
+  const captionBottom = clampNumber(Number(captionBlock.y || 0) + Number(captionBlock.height || 0), 0, pageHeight);
+  const bounds = getBlockBounds(candidates);
+  if (!bounds) {
+    return null;
+  }
+
+  const paddingX = pageWidth * 0.018;
+  const paddingY = pageHeight * 0.014;
+  const subfigureLabels = candidates.filter((block) => /^\([a-z]\)/i.test(normalizeArtifactText(block.text))).length;
+  const yExpansion = !isTable && subfigureLabels >= 1
+    ? Math.min(pageHeight * 0.22, Math.max(pageHeight * 0.14, bounds.height * 0.9))
+    : 0;
+
+  let x = bounds.x - paddingX;
+  let y = bounds.y - paddingY - yExpansion;
+  let right = bounds.x + bounds.width + paddingX;
+  let bottom = bounds.y + bounds.height + paddingY;
+
+  if (isTable) {
+    if (captionBlock.lineCount >= 3 && Number(captionBlock.height || 0) > pageHeight * 0.06) {
+      const captionBounds = pickBlockBox(captionBlock);
+      if (captionBounds) {
+        x = Math.min(x, captionBounds.x - paddingX);
+        y = Math.min(y, captionBounds.y - paddingY);
+        right = Math.max(right, captionBounds.x + captionBounds.width + paddingX);
+        bottom = Math.max(bottom, captionBounds.y + captionBounds.height + paddingY);
+      }
+    } else {
+      y = Math.min(pageHeight, captionBottom + pageHeight * 0.006);
+    }
+
+    const nextCaptionBoundary = findNextCaptionBoundary(page, captionBlock, horizontal, pageHeight);
+    if (nextCaptionBoundary !== null) {
+      bottom = Math.min(bottom, nextCaptionBoundary);
+    }
+  } else {
+    bottom = Math.min(bottom, captionY - pageHeight * 0.006);
+    const previousCaptionBoundary = findPreviousCaptionBoundary(page, captionBlock, horizontal);
+    if (previousCaptionBoundary !== null) {
+      y = Math.max(y, previousCaptionBoundary);
+    }
+  }
+
+  return normalizeCrop({
+    x,
+    y,
+    width: right - x,
+    height: bottom - y,
+    pageWidth,
+    pageHeight,
+  });
+}
+
+function getVisualCandidateBlocks(page, captionBlock, horizontal, pageHeight, isTable) {
+  const blocks = Array.isArray(page.blocks) ? page.blocks : [];
+  const captionY = Number(captionBlock.y || 0);
+  const captionBottom = Number(captionBlock.y || 0) + Number(captionBlock.height || 0);
+  const captionColumn = Number(captionBlock.column || 0);
+  const nextCaptionBoundary = isTable
+    ? findNextCaptionBoundary(page, captionBlock, horizontal, pageHeight)
+    : null;
+
+  return blocks.filter((block) => {
+    if (block === captionBlock || !pickBlockBox(block)) {
+      return false;
+    }
+
+    if (!overlapsHorizontal(block, horizontal, 0.06)) {
+      return false;
+    }
+
+    if (classifyPageArtifact(block) === "caption") {
+      return false;
+    }
+
+    if (captionColumn && Number(block.column || 0) && Number(block.column || 0) !== captionColumn) {
+      const blockWidth = Number(block.width || 0);
+      if (blockWidth < horizontal.width * 0.45) {
+        return false;
+      }
+    }
+
+    const y = Number(block.y || 0);
+    const bottom = y + Number(block.height || 0);
+    if (isTable) {
+      if (nextCaptionBoundary !== null && y >= nextCaptionBoundary) {
+        return false;
+      }
+
+      if (y < captionY - pageHeight * 0.06 || y > captionBottom + pageHeight * 0.42) {
+        return false;
+      }
+      return isLikelyVisualCandidateBlock(block, true);
+    }
+
+    if (bottom > captionY + 2 || bottom < captionY - pageHeight * 0.52) {
+      return false;
+    }
+
+    return isLikelyVisualCandidateBlock(block, false);
+  });
+}
+
+function isLikelyVisualCandidateBlock(block, isTable) {
+  const text = normalizeArtifactText(block?.text || "");
+  if (!text) {
+    return false;
+  }
+
+  const type = classifyPageArtifact(block);
+  if (type && type !== "caption") {
+    return true;
+  }
+
+  if (/^\([a-z]\)/i.test(text)) {
+    return true;
+  }
+
+  const lineCount = Number(block.lineCount || 1);
+  const averageLineLength = text.length / Math.max(1, lineCount);
+
+  if (isTable) {
+    const numberTokens = (text.match(/\b\d+(?:[.,]\d+)*\b/g) || []).length;
+    const tableHeader = /\b(dataset|granularity|mae|rmse|accuracy|method|model|total|average|avg|horizon|time series|time points)\b|#/i.test(text);
+    const longSentence = /[A-Za-z][^.!?。！？]{45,}[.!?。！？]\s+[A-Z]/.test(text);
+    if (longSentence) {
+      return false;
+    }
+
+    if (numberTokens >= 2) {
+      return true;
+    }
+
+    if (tableHeader && text.length <= 220 && averageLineLength <= 70) {
+      return true;
+    }
+  }
+
+  const sentenceLike = /[.!?。！？][)"'\]]?(\s|$)/.test(text);
+  const visualTokens = /\b(input|output|query|token|patch|layer|request|engine|latency|throughput|summary|manager|task|code|model|dataset|mae|ett|flops)\b/i.test(text);
+
+  return lineCount >= 2 && averageLineLength <= 48 && (visualTokens || !sentenceLike);
+}
+
+function getBlockBounds(blocks) {
+  const boxes = blocks.map(pickBlockBox).filter(Boolean);
+  if (!boxes.length) {
+    return null;
+  }
+
+  const x = Math.min(...boxes.map((box) => box.x));
+  const y = Math.min(...boxes.map((box) => box.y));
+  const right = Math.max(...boxes.map((box) => box.x + box.width));
+  const bottom = Math.max(...boxes.map((box) => box.y + box.height));
+  return {
+    x,
+    y,
+    width: right - x,
+    height: bottom - y,
+  };
 }
 
 function inferVisualHorizontalBounds(page, captionBlock, pageWidth) {
@@ -725,6 +921,45 @@ function findNextTextBoundary(page, captionBlock, horizontal, pageHeight) {
   return clampNumber(Number(boundary.y || 0) - 4, captionBottom, pageHeight);
 }
 
+function findPreviousCaptionBoundary(page, captionBlock, horizontal) {
+  const captionY = Number(captionBlock.y || 0);
+  const captionsAbove = getNeighborCaptionBlocks(page, captionBlock, horizontal)
+    .filter((block) => Number(block.y || 0) + Number(block.height || 0) <= captionY)
+    .sort((a, b) => (Number(b.y || 0) + Number(b.height || 0)) - (Number(a.y || 0) + Number(a.height || 0)));
+
+  const boundary = captionsAbove[0];
+  if (!boundary) {
+    return null;
+  }
+
+  return Number(boundary.y || 0) + Number(boundary.height || 0) + 4;
+}
+
+function findNextCaptionBoundary(page, captionBlock, horizontal, pageHeight) {
+  const captionBottom = Number(captionBlock.y || 0) + Number(captionBlock.height || 0);
+  const captionsBelow = getNeighborCaptionBlocks(page, captionBlock, horizontal)
+    .filter((block) => Number(block.y || 0) >= captionBottom)
+    .sort((a, b) => Number(a.y || 0) - Number(b.y || 0));
+
+  const boundary = captionsBelow[0];
+  if (!boundary) {
+    return null;
+  }
+
+  return clampNumber(Number(boundary.y || 0) - 4, captionBottom, pageHeight);
+}
+
+function getNeighborCaptionBlocks(page, captionBlock, horizontal) {
+  const blocks = Array.isArray(page.blocks) ? page.blocks : [];
+  return blocks.filter((block) => {
+    if (block === captionBlock) {
+      return false;
+    }
+
+    return classifyPageArtifact(block) === "caption" && overlapsHorizontal(block, horizontal, 0.04);
+  });
+}
+
 function getRegularBoundaryBlocks(page, captionBlock, horizontal) {
   const blocks = Array.isArray(page.blocks) ? page.blocks : [];
   return blocks.filter((block) => {
@@ -745,7 +980,7 @@ function getRegularBoundaryBlocks(page, captionBlock, horizontal) {
   });
 }
 
-function overlapsHorizontal(block, horizontal) {
+function overlapsHorizontal(block, horizontal, ratio = 0.18) {
   const box = pickBlockBox(block);
   if (!box) {
     return false;
@@ -753,7 +988,7 @@ function overlapsHorizontal(block, horizontal) {
 
   const left = Math.max(box.x, horizontal.x);
   const right = Math.min(box.x + box.width, horizontal.x + horizontal.width);
-  return right - left > Math.min(box.width, horizontal.width) * 0.18;
+  return right - left > Math.min(box.width, horizontal.width) * ratio;
 }
 
 function normalizeCrop(crop) {
@@ -2173,7 +2408,57 @@ function parseMultipart(body, boundary) {
 
 async function loadPaper(paperId) {
   const paperPath = getPaperPath(paperId);
-  return JSON.parse(await readFile(paperPath, "utf8"));
+  const paper = JSON.parse(await readFile(paperPath, "utf8"));
+  if (upgradePaperArtifacts(paper)) {
+    await savePaper(paper);
+  }
+  return paper;
+}
+
+function upgradePaperArtifacts(paper) {
+  const needsUpgrade = (paper.pageArtifacts || [])
+    .some((artifact) => artifact.type === "caption" && artifact.cropVersion !== ARTIFACT_CROP_VERSION);
+  if (!needsUpgrade || !Array.isArray(paper.extractionPages) || !paper.extractionPages.length) {
+    return false;
+  }
+
+  const pages = paper.extractionPages.map((page) => {
+    const pageImage = (paper.pageImages || []).find((item) => item.pageNumber === page.pageNumber);
+    const size = inferStoredPageSize(paper, page);
+    return {
+      ...page,
+      width: page.width || size.width,
+      height: page.height || size.height,
+      imagePath: pageImage?.imagePath || null,
+      imageWidth: pageImage?.imageWidth || null,
+      imageHeight: pageImage?.imageHeight || null,
+    };
+  });
+
+  paper.pageArtifacts = extractPageArtifacts(pages);
+  attachParagraphArtifactLinks(paper);
+  return true;
+}
+
+function inferStoredPageSize(paper, page) {
+  const artifact = (paper.pageArtifacts || [])
+    .find((item) => item.pageNumber === page.pageNumber && item.pageWidth && item.pageHeight);
+  if (artifact) {
+    return {
+      width: artifact.pageWidth,
+      height: artifact.pageHeight,
+    };
+  }
+
+  const boxes = (page.blocks || []).map(pickBlockBox).filter(Boolean);
+  if (boxes.length) {
+    return {
+      width: Math.max(612, Math.max(...boxes.map((box) => box.x + box.width)) + 40),
+      height: Math.max(792, Math.max(...boxes.map((box) => box.y + box.height)) + 40),
+    };
+  }
+
+  return { width: 612, height: 792 };
 }
 
 async function savePaper(paper) {

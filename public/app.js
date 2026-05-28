@@ -832,14 +832,19 @@ function renderArtifactCrop(artifact) {
     return null;
   }
 
-  const frame = document.createElement("a");
+  const frame = document.createElement("button");
   frame.className = "artifact-crop";
-  frame.href = artifact.imagePath;
-  frame.target = "_blank";
-  frame.rel = "noreferrer";
-  frame.title = "打开整页页面快照";
+  frame.type = "button";
+  frame.title = "放大查看图表";
   frame.style.aspectRatio = `${crop.width} / ${crop.height}`;
+  frame.addEventListener("click", () => openArtifactViewer(artifact));
 
+  frame.append(renderCropImage(artifact));
+  return frame;
+}
+
+function renderCropImage(artifact) {
+  const crop = artifact.crop;
   const image = document.createElement("img");
   image.src = artifact.imagePath;
   image.alt = artifact.label ? `${artifact.label} 裁剪预览` : "图表裁剪预览";
@@ -849,9 +854,84 @@ function renderArtifactCrop(artifact) {
   image.style.height = `${(crop.pageHeight / crop.height) * 100}%`;
   image.style.left = `${-(crop.x / crop.width) * 100}%`;
   image.style.top = `${-(crop.y / crop.height) * 100}%`;
+  return image;
+}
 
-  frame.append(image);
-  return frame;
+function openArtifactViewer(artifact) {
+  closeArtifactViewer();
+
+  const overlay = document.createElement("div");
+  overlay.className = "artifact-viewer";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) {
+      closeArtifactViewer();
+    }
+  });
+
+  const panel = document.createElement("section");
+  panel.className = "artifact-viewer-panel";
+
+  const header = document.createElement("div");
+  header.className = "artifact-viewer-header";
+
+  const title = document.createElement("div");
+  title.className = "artifact-viewer-title";
+  title.textContent = artifact.label
+    ? `${artifact.label} · ${getArtifactLabel(artifact.type, artifact.visualType)}`
+    : getArtifactLabel(artifact.type, artifact.visualType);
+
+  const actions = document.createElement("div");
+  actions.className = "artifact-viewer-actions";
+
+  const pageLink = document.createElement("a");
+  pageLink.href = artifact.imagePath;
+  pageLink.target = "_blank";
+  pageLink.rel = "noreferrer";
+  pageLink.textContent = "打开整页";
+
+  const closeButton = document.createElement("button");
+  closeButton.type = "button";
+  closeButton.textContent = "关闭";
+  closeButton.addEventListener("click", closeArtifactViewer);
+
+  actions.append(pageLink, closeButton);
+  header.append(title, actions);
+
+  const cropFrame = document.createElement("div");
+  cropFrame.className = "artifact-viewer-crop";
+  cropFrame.style.aspectRatio = `${artifact.crop.width} / ${artifact.crop.height}`;
+  cropFrame.style.width = `min(100%, 1080px, calc(74vh * ${artifact.crop.width / artifact.crop.height}))`;
+  cropFrame.append(renderCropImage(artifact));
+
+  const caption = document.createElement("p");
+  caption.className = "artifact-viewer-caption";
+  renderRichText(caption, artifact.text);
+
+  panel.append(header, cropFrame, caption);
+  overlay.append(panel);
+  document.body.append(overlay);
+
+  const onKeydown = (event) => {
+    if (event.key === "Escape") {
+      closeArtifactViewer();
+    }
+  };
+  overlay._onKeydown = onKeydown;
+  document.addEventListener("keydown", onKeydown);
+}
+
+function closeArtifactViewer() {
+  const overlay = document.querySelector(".artifact-viewer");
+  if (!overlay) {
+    return;
+  }
+
+  if (overlay._onKeydown) {
+    document.removeEventListener("keydown", overlay._onKeydown);
+  }
+  overlay.remove();
 }
 
 function getArtifactLabel(type, visualType = "") {

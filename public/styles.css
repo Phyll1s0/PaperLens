@@ -425,10 +425,13 @@ select:focus {
   position: relative;
   display: block;
   width: min(100%, 560px);
+  min-height: 44px;
+  padding: 0;
   overflow: hidden;
   border: 1px solid #d8e0dc;
   border-radius: 6px;
   background: #ffffff;
+  cursor: zoom-in;
 }
 
 .artifact-crop img {
@@ -438,6 +441,90 @@ select:focus {
   border: 0;
   border-radius: 0;
   object-fit: fill;
+}
+
+.artifact-crop:hover {
+  border-color: rgba(15, 118, 110, 0.55);
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.1);
+}
+
+.artifact-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(20, 30, 27, 0.72);
+}
+
+.artifact-viewer-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  width: min(1120px, 96vw);
+  max-height: 92vh;
+  padding: 14px;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
+}
+
+.artifact-viewer-header {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.artifact-viewer-title {
+  color: #20302c;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.artifact-viewer-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.artifact-viewer-actions a,
+.artifact-viewer-actions button {
+  padding: 7px 10px;
+  border: 1px solid #d8e0dc;
+  border-radius: 6px;
+  background: #f8faf7;
+  color: #24312e;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 760;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.artifact-viewer-crop {
+  position: relative;
+  width: min(100%, 1080px);
+  max-height: 74vh;
+  overflow: auto;
+  border: 1px solid #d8e0dc;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.artifact-viewer-crop img {
+  position: absolute;
+  display: block;
+  max-width: none;
+}
+
+.artifact-viewer-caption {
+  margin: 0;
+  color: #2f3c38;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
 }
 
 .paragraph-card {
