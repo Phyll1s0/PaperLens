@@ -2,6 +2,7 @@ const state = {
   paper: null,
   query: "",
   busyParagraphId: null,
+  pipelineBusy: false,
   jobHistory: [],
   autoAnalyze: {
     running: false,
@@ -97,7 +98,7 @@ function bindEvents() {
   els.uploadButton.addEventListener("click", uploadPdf);
   els.pingButton.addEventListener("click", pingModel);
   els.autoAnalyzeButton.addEventListener("click", () => startAutoAnalyze());
-  els.rerunAnalyzeButton.addEventListener("click", () => startAutoAnalyze({ rerunAll: true }));
+  els.rerunAnalyzeButton.addEventListener("click", rerunFullPipeline);
   els.stopAutoButton.addEventListener("click", stopAutoAnalyze);
   els.providerSelect.addEventListener("change", () => {
     clearSavedApiKeyRef();
@@ -528,6 +529,35 @@ async function startAutoAnalyze(options = {}) {
     rerunAll: Boolean(options.rerunAll),
     statusLabel: options.rerunAll ? "已重新加入后端分析队列" : "已启动后端自动分析队列",
   });
+}
+
+async function rerunFullPipeline() {
+  if (!state.paper || state.autoAnalyze.running || state.pipelineBusy) {
+    return;
+  }
+
+  if (!ensureModelSettings()) {
+    return;
+  }
+
+  state.pipelineBusy = true;
+  updateAutoButtons();
+
+  try {
+    const segmented = await segmentPaperWithAi();
+    if (!segmented) {
+      setStatus("重新分段失败，未启动重新生成。", true);
+      return;
+    }
+
+    await createAnalysisJob({
+      rerunAll: true,
+      statusLabel: "已重新分段并加入后端分析队列",
+    });
+  } finally {
+    state.pipelineBusy = false;
+    updateAutoButtons();
+  }
 }
 
 async function createAnalysisJob(payload = {}) {
@@ -1913,8 +1943,9 @@ function updateAutoStatus() {
 }
 
 function updateAutoButtons() {
-  els.autoAnalyzeButton.disabled = !state.paper || state.autoAnalyze.running;
-  els.rerunAnalyzeButton.disabled = !state.paper || state.autoAnalyze.running;
+  const busy = state.autoAnalyze.running || state.pipelineBusy;
+  els.autoAnalyzeButton.disabled = !state.paper || busy;
+  els.rerunAnalyzeButton.disabled = !state.paper || busy;
   els.stopAutoButton.classList.toggle("hidden", !state.autoAnalyze.running);
   els.stopAutoButton.disabled = !state.autoAnalyze.running || state.autoAnalyze.stopRequested;
   renderJobHistory();
