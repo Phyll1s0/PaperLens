@@ -2,6 +2,7 @@ const state = {
   paper: null,
   query: "",
   busyParagraphId: null,
+  jobHistory: [],
   autoAnalyze: {
     running: false,
     stopRequested: false,
@@ -43,6 +44,7 @@ const els = {
   autoAnalyzeButton: document.querySelector("#autoAnalyzeButton"),
   rerunAnalyzeButton: document.querySelector("#rerunAnalyzeButton"),
   stopAutoButton: document.querySelector("#stopAutoButton"),
+  jobHistory: document.querySelector("#jobHistory"),
   pingButton: document.querySelector("#pingButton"),
 };
 
@@ -361,6 +363,7 @@ async function openPaper(paperId) {
     setStatus("论文已载入");
     renderPaper();
     await syncActiveAnalysisJob();
+    await loadJobHistory();
   } catch (error) {
     setStatus(error.message, true);
   }
@@ -490,6 +493,7 @@ async function createAnalysisJob(payload = {}) {
 
     beginAnalysisJob(result.job);
     renderPaper();
+    await loadJobHistory();
     setStatus(payload.statusLabel || "已加入后端分析队列");
   } catch (error) {
     setStatus(error.message, true);
@@ -515,6 +519,7 @@ async function stopAutoAnalyze() {
       applyAnalysisJob(result.job);
     }
     await pollAnalysisJob({ forceRefresh: true });
+    await loadJobHistory();
   } catch (error) {
     setStatus(error.message, true);
   }
@@ -585,6 +590,7 @@ async function pollAnalysisJob(options = {}) {
 
     if (!state.autoAnalyze.running) {
       loadRecentPapers();
+      loadJobHistory();
       if (job.status === "canceled") {
         setStatus(`已停止自动分析：完成 ${job.completed} 段，失败 ${job.failed} 段`);
       } else {
@@ -593,6 +599,99 @@ async function pollAnalysisJob(options = {}) {
     }
   } finally {
     state.autoAnalyze.pollInFlight = false;
+  }
+}
+
+async function loadJobHistory() {
+  if (!state.paper) {
+    state.jobHistory = [];
+    renderJobHistory();
+    return;
+  }
+
+  try {
+    const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}/analysis-jobs`, {}, "载入任务历史");
+    const result = await readResponse(response);
+    state.jobHistory = result.jobs || [];
+    renderJobHistory();
+  } catch {
+    state.jobHistory = [];
+    renderJobHistory();
+  }
+}
+
+function renderJobHistory() {
+  if (!els.jobHistory) {
+    return;
+  }
+
+  if (!state.paper || !state.jobHistory.length) {
+    els.jobHistory.replaceChildren();
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (const job of state.jobHistory.slice(0, 3)) {
+    const item = document.createElement("div");
+    item.className = `job-history-item ${job.status}`;
+
+    const summary = document.createElement("span");
+    summary.textContent = [
+      getJobStatusText(job.status),
+      `${Number(job.completed || 0) + Number(job.failed || 0)}/${job.total || 0}`,
+      `失败 ${job.failed || 0}`,
+    ].join(" · ");
+    item.append(summary);
+
+    if (!isActiveAnalysisJob(job) && Number(job.failed || 0) > 0) {
+      const retryButton = document.createElement("button");
+      retryButton.type = "button";
+      retryButton.textContent = "重跑失败";
+      retryButton.disabled = state.autoAnalyze.running;
+      retryButton.addEventListener("click", () => retryFailedJob(job.id));
+      item.append(retryButton);
+    }
+
+    fragment.append(item);
+  }
+
+  els.jobHistory.replaceChildren(fragment);
+}
+
+function getJobStatusText(status) {
+  if (status === "queued") {
+    return "排队中";
+  }
+  if (status === "running") {
+    return "运行中";
+  }
+  if (status === "canceling") {
+    return "停止中";
+  }
+  if (status === "canceled") {
+    return "已停止";
+  }
+  if (status === "error") {
+    return "失败";
+  }
+  return "已完成";
+}
+
+async function retryFailedJob(jobId) {
+  setStatus("正在重跑失败段落");
+  try {
+    const response = await apiFetch(`/api/jobs/${encodeURIComponent(jobId)}/retry-failed`, {
+      method: "POST",
+    }, "重跑失败段落");
+    const result = await readResponse(response);
+    if (result.job) {
+      beginAnalysisJob(result.job);
+    }
+    await refreshCurrentPaper();
+    await loadJobHistory();
+    setStatus(result.message || "失败段落已重新加入队列");
+  } catch (error) {
+    setStatus(error.message, true);
   }
 }
 
@@ -1680,6 +1779,7 @@ function updateAutoButtons() {
   els.rerunAnalyzeButton.disabled = !state.paper || state.autoAnalyze.running;
   els.stopAutoButton.classList.toggle("hidden", !state.autoAnalyze.running);
   els.stopAutoButton.disabled = !state.autoAnalyze.running || state.autoAnalyze.stopRequested;
+  renderJobHistory();
 }
 
 function clearAutoTimer() {

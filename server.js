@@ -20,6 +20,7 @@ const DATA_DIR = path.join(__dirname, "data");
 const ASSET_DIR = path.join(__dirname, "paper-assets");
 const CACHE_DIR = path.join(__dirname, ".cache");
 const JOBS_PATH = path.join(DATA_DIR, "jobs.json");
+const SECRETS_PATH = path.join(DATA_DIR, "secrets.json");
 const WORKSPACE_CACHE_KEY = createHash("sha1").update(__dirname).digest("hex").slice(0, 12);
 const SWIFT_MODULE_CACHE_DIR = path.join(CACHE_DIR, `swift-module-cache-${WORKSPACE_CACHE_KEY}`);
 const TMP_DIR = path.join(CACHE_DIR, "tmp");
@@ -52,7 +53,12 @@ const jobStore = {
   workerScheduled: false,
   savePromise: Promise.resolve(),
 };
+const secretStore = {
+  keys: new Map(),
+  savePromise: Promise.resolve(),
+};
 
+await loadSecrets();
 await loadJobs();
 recoverInterruptedJobs();
 scheduleJobWorker();
@@ -96,6 +102,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     const analysisJobsMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/analysis-jobs$/);
+    if (req.method === "GET" && analysisJobsMatch) {
+      return await handleListAnalysisJobs(res, analysisJobsMatch[1]);
+    }
+
     if (req.method === "POST" && analysisJobsMatch) {
       return await handleCreateAnalysisJob(req, res, analysisJobsMatch[1]);
     }
@@ -113,6 +123,11 @@ const server = http.createServer(async (req, res) => {
     const jobCancelMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/cancel$/);
     if (req.method === "POST" && jobCancelMatch) {
       return await handleCancelJob(res, jobCancelMatch[1]);
+    }
+
+    const jobRetryFailedMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/retry-failed$/);
+    if (req.method === "POST" && jobRetryFailedMatch) {
+      return await handleRetryFailedJob(res, jobRetryFailedMatch[1]);
     }
 
     const jobMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)$/);
@@ -210,7 +225,7 @@ async function handleSegmentPaper(req, res, paperId) {
 async function handleCreateAnalysisJob(req, res, paperId) {
   const payload = await readJson(req);
   const paper = await loadPaper(paperId);
-  const settings = normalizeSettings(payload.settings || {});
+  const settings = await secureSettingsForJob(normalizeSettings(payload.settings || {}));
   const requestedIds = Array.isArray(payload.paragraphIds)
     ? payload.paragraphIds.map(String).filter(Boolean)
     : payload.paragraphId
@@ -271,6 +286,16 @@ async function handleCreateAnalysisJob(req, res, paperId) {
   });
 }
 
+async function handleListAnalysisJobs(res, paperId) {
+  const jobs = [...jobStore.jobs.values()]
+    .filter((job) => job.type === "analysis" && job.paperId === paperId)
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+    .slice(0, JOB_POLL_LIMIT)
+    .map(serializeJobSummary);
+
+  return json(res, { jobs });
+}
+
 async function handleGetActiveAnalysisJob(res, paperId) {
   const job = findActiveAnalysisJobForPaper(paperId);
   return json(res, { job: job ? serializeJob(job) : null });
@@ -292,6 +317,47 @@ async function handleCancelJob(res, jobId) {
   }
 
   await cancelJob(jobId);
+  return json(res, { job: serializeJob(job) });
+}
+
+async function handleRetryFailedJob(res, jobId) {
+  const job = jobStore.jobs.get(jobId);
+  if (!job) {
+    return json(res, { error: "Job not found." }, 404);
+  }
+
+  if (isActiveJobStatus(job.status)) {
+    return json(res, { error: "任务还在运行，不能同时重跑失败项。" }, 409);
+  }
+
+  const failedItems = job.items.filter((item) => item.status === "error");
+  if (!failedItems.length) {
+    return json(res, { job: serializeJob(job), message: "没有失败项需要重跑。" });
+  }
+
+  for (const item of failedItems) {
+    item.status = "queued";
+    item.attempts = 0;
+    item.error = "";
+    item.startedAt = "";
+    item.completedAt = "";
+    await updatePaperParagraph(job.paperId, item.paragraphId, (paragraph) => {
+      paragraph.analysisStatus = "queued";
+      paragraph.analysisError = "";
+    });
+  }
+
+  job.status = "queued";
+  job.cancelRequested = false;
+  job.currentParagraphId = "";
+  job.error = "";
+  job.startedAt = "";
+  job.completedAt = "";
+  job.updatedAt = new Date().toISOString();
+  recalculateJobProgress(job);
+  await persistJobs();
+  scheduleJobWorker();
+
   return json(res, { job: serializeJob(job) });
 }
 
@@ -351,8 +417,109 @@ async function loadJobs() {
       continue;
     }
 
-    jobStore.jobs.set(job.id, normalizeLoadedJob(job));
+    const normalized = normalizeLoadedJob(job);
+    normalized.settings = await secureSettingsForJob(normalized.settings, { migrate: true });
+    jobStore.jobs.set(job.id, normalized);
   }
+
+  await persistSecrets();
+  await persistJobs();
+}
+
+async function loadSecrets() {
+  let payload = null;
+  try {
+    payload = JSON.parse(await readFile(SECRETS_PATH, "utf8"));
+  } catch {
+    payload = null;
+  }
+
+  const keys = Array.isArray(payload?.keys) ? payload.keys : [];
+  for (const item of keys) {
+    if (!item?.id || !item.key) {
+      continue;
+    }
+
+    secretStore.keys.set(String(item.id), {
+      id: String(item.id),
+      provider: String(item.provider || ""),
+      baseUrl: String(item.baseUrl || ""),
+      key: String(item.key),
+      keyPrefix: String(item.keyPrefix || ""),
+      keyLength: Number(item.keyLength || String(item.key || "").length),
+      createdAt: item.createdAt || new Date().toISOString(),
+      updatedAt: item.updatedAt || new Date().toISOString(),
+    });
+  }
+}
+
+async function secureSettingsForJob(settings, options = {}) {
+  if (!settings?.apiKey) {
+    return settings;
+  }
+
+  const now = new Date().toISOString();
+  const id = `key_${createHash("sha256")
+    .update([settings.provider, settings.baseUrl, settings.apiKey].join("\n"))
+    .digest("hex")
+    .slice(0, 20)}`;
+  const existing = secretStore.keys.get(id);
+  secretStore.keys.set(id, {
+    id,
+    provider: settings.provider,
+    baseUrl: settings.baseUrl,
+    key: settings.apiKey,
+    keyPrefix: settings.apiKey.startsWith("sk-kimi-")
+      ? "sk-kimi"
+      : settings.apiKey.startsWith("sk-")
+        ? "sk"
+        : "unknown",
+    keyLength: settings.apiKey.length,
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+  });
+
+  if (!options.migrate) {
+    await persistSecrets();
+  }
+
+  const { apiKey, ...rest } = settings;
+  return {
+    ...rest,
+    apiKeyRef: id,
+  };
+}
+
+function resolveJobSettings(settings) {
+  if (!settings?.apiKeyRef) {
+    return settings;
+  }
+
+  const secret = secretStore.keys.get(settings.apiKeyRef);
+  if (!secret) {
+    throw badRequest("任务引用的 API Key 不存在。请重新创建分析任务。");
+  }
+
+  return {
+    ...settings,
+    apiKey: secret.key,
+  };
+}
+
+async function persistSecrets() {
+  const payload = {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    keys: [...secretStore.keys.values()].sort((a, b) => String(a.id).localeCompare(String(b.id))),
+  };
+  const tmpPath = `${SECRETS_PATH}.tmp`;
+  secretStore.savePromise = secretStore.savePromise
+    .catch(() => {})
+    .then(async () => {
+      await writeFile(tmpPath, JSON.stringify(payload, null, 2));
+      await rename(tmpPath, SECRETS_PATH);
+    });
+  await secretStore.savePromise;
 }
 
 function normalizeLoadedJob(job) {
@@ -502,6 +669,30 @@ function serializeJob(job) {
   };
 }
 
+function serializeJobSummary(job) {
+  return {
+    id: job.id,
+    type: job.type,
+    paperId: job.paperId,
+    paperTitle: job.paperTitle,
+    status: job.status,
+    total: job.total,
+    completed: job.completed,
+    failed: job.failed,
+    currentParagraphId: job.currentParagraphId || "",
+    createdAt: job.createdAt,
+    startedAt: job.startedAt || "",
+    completedAt: job.completedAt || "",
+    updatedAt: job.updatedAt,
+  };
+}
+
+function recalculateJobProgress(job) {
+  job.total = job.items.length;
+  job.completed = job.items.filter((item) => item.status === "done").length;
+  job.failed = job.items.filter((item) => item.status === "error").length;
+}
+
 async function persistJobs() {
   const jobs = [...jobStore.jobs.values()]
     .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
@@ -511,7 +702,7 @@ async function persistJobs() {
     updatedAt: new Date().toISOString(),
     jobs: jobs.map((job) => ({
       ...job,
-      settings: job.settings || {},
+      settings: redactJobSettings(job.settings || {}),
       cancelRequested: Boolean(job.cancelRequested),
     })),
   };
@@ -523,6 +714,11 @@ async function persistJobs() {
       await rename(tmpPath, JOBS_PATH);
     });
   await jobStore.savePromise;
+}
+
+function redactJobSettings(settings = {}) {
+  const { apiKey, ...rest } = settings;
+  return rest;
 }
 
 function scheduleJobWorker() {
@@ -623,7 +819,7 @@ async function runAnalysisJobItem(job, item, signal) {
       throw new Error("Paragraph not found.");
     }
 
-    await analyzeParagraphInPaper(paper, paragraph, job.settings, { signal });
+    await analyzeParagraphInPaper(paper, paragraph, resolveJobSettings(job.settings), { signal });
     await savePaper(paper);
     item.status = "done";
     item.completedAt = new Date().toISOString();

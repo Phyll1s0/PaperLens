@@ -586,6 +586,54 @@ select:focus {
   color: var(--danger);
 }
 
+.job-history {
+  display: grid;
+  gap: 6px;
+  min-width: min(100%, 260px);
+}
+
+.job-history:empty {
+  display: none;
+}
+
+.job-history-item {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  border: 1px solid #dfe7e2;
+  border-radius: 6px;
+  background: #f8faf7;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.job-history-item.running,
+.job-history-item.queued {
+  border-color: rgba(15, 118, 110, 0.24);
+  background: rgba(15, 118, 110, 0.08);
+  color: #28544d;
+}
+
+.job-history-item button {
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  border: 1px solid #d8e0dc;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #24312e;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.job-history-item button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .paragraph-content {
   display: grid;
   gap: 14px;
