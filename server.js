@@ -211,7 +211,7 @@ async function handleUpload(req, res) {
     extraction,
   });
 
-  if (!paper.paragraphs.some((paragraph) => paragraph.kind !== "heading")) {
+  if (!getReadingParagraphs(paper).length) {
     return json(res, {
       error: "没有从 PDF 中提取到可阅读文本。这个 PDF 可能是扫描版，暂时需要先 OCR 后再上传。",
     }, 422);
@@ -402,7 +402,7 @@ async function listPapers() {
         title: paper.title,
         filename: paper.filename,
         pageCount: paper.pageCount,
-        paragraphCount: paper.paragraphs?.filter((item) => item.kind !== "heading").length || 0,
+        paragraphCount: getReadingParagraphs(paper).length,
         updatedAt: paper.updatedAt,
       });
     } catch {
@@ -926,6 +926,11 @@ async function runAnalysisJobItem(job, item, signal) {
       throw new Error("Paragraph not found.");
     }
 
+    if (!isReadingParagraphForPaper(paper, paragraph)) {
+      await markJobItemSkipped(job, item);
+      return;
+    }
+
     await analyzeParagraphInPaper(paper, paragraph, resolveJobSettings(job.settings), { signal });
     await updatePaperParagraph(job.paperId, item.paragraphId, (target) => {
       copyParagraphAnalysisFields(target, paragraph);
@@ -1083,60 +1088,77 @@ async function runAnalysisJobBatch(job, items, signal, options = {}) {
 
   try {
     const paper = await loadPaper(job.paperId);
-    const paragraphs = items.map((item) => {
+    const loaded = items.map((item) => {
       const paragraph = (paper.paragraphs || []).find((entry) => entry.id === item.paragraphId);
       if (!paragraph || paragraph.kind === "heading") {
         throw new Error(`Paragraph not found: ${item.paragraphId}`);
       }
 
-      return paragraph;
+      return { item, paragraph };
     });
+    const readable = loaded.filter(({ paragraph }) => isReadingParagraphForPaper(paper, paragraph));
+    const skipped = loaded.filter(({ paragraph }) => !isReadingParagraphForPaper(paper, paragraph));
+    if (skipped.length) {
+      await markJobItemsSkipped(job, skipped.map(({ item }) => item));
+    }
+
+    if (!readable.length) {
+      return;
+    }
+
+    const paragraphs = readable.map(({ paragraph }) => paragraph);
+    const readableItems = readable.map(({ item }) => item);
 
     const analyzedParagraphs = await analyzeParagraphBatchInPaper(paper, paragraphs, resolveJobSettings(job.settings), { signal });
     const analyzedById = new Map(analyzedParagraphs.map((paragraph) => [paragraph.id, paragraph]));
-    await updatePaperParagraphs(job.paperId, items.map((item) => item.paragraphId), (paragraph) => {
+    await updatePaperParagraphs(job.paperId, readableItems.map((item) => item.paragraphId), (paragraph) => {
       const analyzed = analyzedById.get(paragraph.id);
       if (analyzed) {
         copyParagraphAnalysisFields(paragraph, analyzed);
       }
     });
     const completedAt = new Date().toISOString();
-    for (const item of items) {
+    for (const item of readableItems) {
       item.status = "done";
       item.completedAt = completedAt;
       item.error = "";
     }
-    job.completed += items.length;
+    job.completed += readableItems.length;
   } catch (error) {
+    const affectedItems = items.filter((item) => item.status !== "done");
+    if (!affectedItems.length) {
+      return;
+    }
+
     if (job.cancelRequested || signal.aborted || error.statusCode === 499) {
       const completedAt = new Date().toISOString();
-      for (const item of items) {
+      for (const item of affectedItems) {
         item.status = "canceled";
         item.error = "";
         item.completedAt = completedAt;
       }
-      await updatePaperParagraphs(job.paperId, items.map((item) => item.paragraphId), (paragraph) => {
+      await updatePaperParagraphs(job.paperId, affectedItems.map((item) => item.paragraphId), (paragraph) => {
         paragraph.analysisStatus = "pending";
         paragraph.analysisError = "";
       });
       return;
     }
 
-    if (items.length > 1 && isFatalModelConfigurationError(error)) {
-      await markJobBatchItemsError(job, items, error);
+    if (affectedItems.length > 1 && isFatalModelConfigurationError(error)) {
+      await markJobBatchItemsError(job, affectedItems, error);
       return;
     }
 
-    if (items.length > 1) {
-      const chunks = splitJobItemsForBatchRetry(items, options.splitDepth || 0);
-      for (const item of items) {
+    if (affectedItems.length > 1) {
+      const chunks = splitJobItemsForBatchRetry(affectedItems, options.splitDepth || 0);
+      for (const item of affectedItems) {
         item.status = "queued";
         item.error = `批量分析失败，已拆分小批量重试：${error.message || "模型请求失败。"}`;
       }
       job.currentParagraphId = "";
       job.currentBatchSize = 0;
       job.updatedAt = new Date().toISOString();
-      await updatePaperParagraphs(job.paperId, items.map((item) => item.paragraphId), (paragraph) => {
+      await updatePaperParagraphs(job.paperId, affectedItems.map((item) => item.paragraphId), (paragraph) => {
         paragraph.analysisStatus = "queued";
         paragraph.analysisError = "";
       });
@@ -1152,7 +1174,7 @@ async function runAnalysisJobBatch(job, items, signal, options = {}) {
       return;
     }
 
-    const item = items[0];
+    const item = affectedItems[0];
     if (item.attempts < JOB_ITEM_MAX_ATTEMPTS && isRetryableJobError(error)) {
       item.status = "queued";
       item.error = error.message || "模型请求失败。";
@@ -1194,6 +1216,29 @@ async function markJobBatchItemsError(job, items, error) {
   await updatePaperParagraphs(job.paperId, items.map((item) => item.paragraphId), (paragraph) => {
     paragraph.analysisStatus = "error";
     paragraph.analysisError = message;
+  });
+}
+
+async function markJobItemSkipped(job, item) {
+  await markJobItemsSkipped(job, [item]);
+}
+
+async function markJobItemsSkipped(job, items) {
+  if (!items.length) {
+    return;
+  }
+
+  const completedAt = new Date().toISOString();
+  for (const item of items) {
+    item.status = "done";
+    item.error = "";
+    item.completedAt = completedAt;
+  }
+  job.completed += items.length;
+  await updatePaperParagraphs(job.paperId, items.map((item) => item.paragraphId), (paragraph) => {
+    paragraph.analysisEligible = false;
+    paragraph.analysisStatus = "done";
+    paragraph.analysisError = "";
   });
 }
 
@@ -1310,11 +1355,28 @@ async function withPaperWriteLock(paperId, operation) {
 }
 
 function getReadingParagraphs(paper) {
-  return (paper.paragraphs || []).filter((paragraph) => paragraph.kind !== "heading");
+  return (paper.paragraphs || []).filter((paragraph) => isReadingParagraphForPaper(paper, paragraph));
 }
 
 function needsParagraphAnalysis(paragraph) {
-  return !paragraph.translation && !paragraph.explanation && paragraph.analysisStatus !== "done";
+  return isReadingParagraph(paragraph) &&
+    !paragraph.translation &&
+    !paragraph.explanation &&
+    paragraph.analysisStatus !== "done";
+}
+
+function isReadingParagraphForPaper(paper, paragraph) {
+  const section = (paper.sections || []).find((item) => item.id === paragraph.sectionId);
+  return isReadingParagraph(paragraph, section);
+}
+
+function isReadingParagraph(paragraph, section = null) {
+  return paragraph?.kind === "paragraph" &&
+    paragraph.analysisEligible !== false &&
+    !isLikelyNonReadingParagraphText(paragraph.sourceText || "", {
+      ...paragraph,
+      sectionTitle: section?.title || paragraph.sectionTitleHint || "",
+    });
 }
 
 function resetParagraphAnalysis(paragraph) {
@@ -1354,8 +1416,8 @@ async function handleAnalyze(req, res) {
     return json(res, { error: "Paragraph not found." }, 404);
   }
 
-  if (paragraph.kind === "heading") {
-    return json(res, { error: "Section headings do not need paragraph analysis." }, 400);
+  if (!isReadingParagraphForPaper(paper, paragraph)) {
+    return json(res, { error: "这个条目不是正文段落，不需要分析。" }, 400);
   }
 
   await analyzeParagraphInPaper(paper, paragraph, securedSettings, { signal });
@@ -1650,7 +1712,7 @@ function buildSectionWindowContext(paper, paragraph) {
 
   const paragraphs = Array.isArray(paper.paragraphs) ? paper.paragraphs : [];
   const sectionParagraphs = paragraphs
-    .filter((item) => item.sectionId === section.id && item.kind !== "heading" && item.id !== paragraph.id)
+    .filter((item) => item.sectionId === section.id && item.id !== paragraph.id && isReadingParagraph(item, section))
     .slice(0, 4);
   const opener = sectionParagraphs[0]
     ? formatContextParagraph(sectionParagraphs[0], `章节开头 P${sectionParagraphs[0].order + 1}`)
@@ -1698,7 +1760,7 @@ function findReadableNeighbor(paragraphs, index, offset) {
   let remaining = Math.abs(offset);
   for (let cursor = index + direction; cursor >= 0 && cursor < paragraphs.length; cursor += direction) {
     const paragraph = paragraphs[cursor];
-    if (paragraph.kind === "heading") {
+    if (!isReadingParagraph(paragraph)) {
       continue;
     }
 
@@ -1754,7 +1816,7 @@ function buildReferenceWindowContext(paper, paragraph) {
 
   const currentOrder = Number(paragraph.order || 0);
   const selected = paper.paragraphs
-    .filter((item) => item.id !== paragraph.id && item.kind !== "heading")
+    .filter((item) => item.id !== paragraph.id && isReadingParagraph(item))
     .filter((item) => tokens.some((token) => paragraphContainsContextToken(item.sourceText || "", token)))
     .sort((a, b) => Math.abs(Number(a.order || 0) - currentOrder) - Math.abs(Number(b.order || 0) - currentOrder))
     .slice(0, 3);
@@ -1926,14 +1988,14 @@ async function handleChat(req, res) {
   }
 
   const paragraph = paper.paragraphs[index];
-  if (paragraph.kind === "heading") {
-    return json(res, { error: "Section headings do not support paragraph chat." }, 400);
+  if (!isReadingParagraphForPaper(paper, paragraph)) {
+    return json(res, { error: "这个条目不是正文段落，不支持提问。" }, 400);
   }
 
   const section = paper.sections.find((item) => item.id === paragraph.sectionId);
   const nearbyParagraphs = paper.paragraphs
     .slice(Math.max(0, index - 2), Math.min(paper.paragraphs.length, index + 3))
-    .filter((item) => item.kind !== "heading")
+    .filter((item) => isReadingParagraphForPaper(paper, item))
     .map((item) => `P${item.order + 1}: ${item.sourceText}`)
     .join("\n\n");
 
@@ -2033,8 +2095,13 @@ function splitIntoParagraphs(pages) {
     const blocks = getReadablePageBlocks(page);
 
     for (const block of blocks) {
-      const clean = normalizeParagraph(typeof block === "string" ? block : block.text);
-      if (!clean || (clean.length < 20 && !isLikelyHeading(clean))) {
+      const raw = typeof block === "string" ? block : block.text;
+      const clean = normalizeParagraph(raw);
+      if (!clean || (clean.length < 20 && !isLikelyHeading(clean)) || isLikelyNonReadingParagraphText(clean, {
+        pageNumber: page.pageNumber,
+      }) || isLikelyNonReadingParagraphText(raw, {
+        pageNumber: page.pageNumber,
+      })) {
         continue;
       }
 
@@ -2090,7 +2157,7 @@ function shouldMergeAcrossPage(previous, paragraph) {
 
   const previousEndPage = previous.pageEndNumber || previous.pageNumber;
   if (paragraph.pageNumber === previousEndPage) {
-    return previous.sourceText.endsWith("-") && startsLikeContinuation(paragraph.sourceText);
+    return shouldMergeSamePageParagraphs(previous, paragraph);
   }
 
   if (paragraph.pageNumber !== previousEndPage + 1) {
@@ -2113,6 +2180,32 @@ function shouldMergeAcrossPage(previous, paragraph) {
   return previous.sourceText.endsWith("-") ||
     !endsWithSentence(previous.sourceText) ||
     startsLikeContinuation(paragraph.sourceText);
+}
+
+function shouldMergeSamePageParagraphs(previous, paragraph) {
+  if (previous.sectionTitleHint && paragraph.sectionTitleHint &&
+    previous.sectionTitleHint !== paragraph.sectionTitleHint) {
+    return false;
+  }
+
+  if (isLikelyHeading(paragraph.sourceText) || isLikelySectionOpening(paragraph.sourceText)) {
+    return false;
+  }
+
+  if (isLikelyNonReadingParagraphText(previous.sourceText) || isLikelyNonReadingParagraphText(paragraph.sourceText)) {
+    return false;
+  }
+
+  if (previous.sourceText.endsWith("-") && startsLikeContinuation(paragraph.sourceText)) {
+    return true;
+  }
+
+  if (paragraph.continuesFromPrevious || previous.continuesToNext) {
+    return true;
+  }
+
+  const previousShortOpen = previous.sourceText.length < 900 && !endsWithSentence(previous.sourceText);
+  return previousShortOpen && startsLikeContinuation(paragraph.sourceText);
 }
 
 function mergeParagraphText(previous, next) {
@@ -2198,6 +2291,10 @@ function isLikelyNonReadingBlock(block) {
     return true;
   }
 
+  if (isLikelyNonReadingParagraphText(text, block)) {
+    return true;
+  }
+
   if (/^[∗*†‡]/.test(text)) {
     return true;
   }
@@ -2211,6 +2308,94 @@ function isLikelyNonReadingBlock(block) {
   const sentenceLike = /[.!?。！？][)"'\]]?(\s|$)/.test(text);
   const manyDiagramTokens = /\b(LLM|Query|Chunk|Task|Final|Summary|Checker|Architect|Engineer|Code)\b/i.test(text);
   return lineCount >= 6 && averageLineLength < 34 && (!sentenceLike || manyDiagramTokens);
+}
+
+function isLikelyNonReadingParagraphText(text, context = {}) {
+  const raw = normalizeArtifactText(text);
+  if (isLikelyCaptionText(raw)) {
+    return true;
+  }
+
+  const clean = normalizeParagraph(text);
+  if (!clean) {
+    return true;
+  }
+
+  if (isLikelyHeading(clean)) {
+    return false;
+  }
+
+  if (isReferencesSectionTitle(context.sectionTitle || context.sectionTitleHint)) {
+    return true;
+  }
+
+  return isLikelyAuthorOrAffiliationText(clean, context) ||
+    isLikelyPublicationMetadataText(clean) ||
+    isLikelyStandaloneLinkText(clean) ||
+    isLikelyBibliographyEntry(clean) ||
+    isLikelyDiagramOnlyText(clean, context);
+}
+
+function isLikelyCaptionText(text) {
+  return /^(?:figure|fig\.|table)\s+\d+[a-z]?\s*[:.]/i.test(text);
+}
+
+function isLikelyAuthorOrAffiliationText(text, context = {}) {
+  const pageNumber = Number(context.pageNumber || 0);
+  const emails = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
+  if (emails.length >= 2 && text.length < 520) {
+    return true;
+  }
+
+  if (emails.length && pageNumber <= 2 && text.length < 260 && !/[.!?。！？]/.test(text)) {
+    return true;
+  }
+
+  if (/^\{[^}]+}\s*@/i.test(text) || /\b(?:university|institute|college|department|laboratory|labs|technologies)\b/i.test(text) &&
+    emails.length && text.length < 420) {
+    return true;
+  }
+
+  return /\b(?:author names are listed|equal contribution|corresponding author|correspondence to|authors contributed equally)\b/i.test(text);
+}
+
+function isLikelyPublicationMetadataText(text) {
+  return /\b(?:ACM Reference Format|Permission to make digital|Copyright held by|Proceedings of|ISBN|ISSN|DOI:|https:\/\/doi\.org|arXiv:\d|Creative Commons|©)\b/i.test(text) ||
+    /^EUROSYS\s+[’'\d]/i.test(text);
+}
+
+function isLikelyStandaloneLinkText(text) {
+  const urls = text.match(/(?:https?:\/\/|www\.)\S+/gi) || [];
+  if (!urls.length) {
+    return false;
+  }
+
+  const stripped = text
+    .replace(/(?:https?:\/\/|www\.)\S+/gi, " ")
+    .replace(/\b\d+\b/g, " ")
+    .replace(/[^\p{L}]+/gu, " ")
+    .trim();
+  const wordCount = stripped ? stripped.split(/\s+/).length : 0;
+  const urlChars = urls.join("").length;
+  return text.length < 260 && (wordCount <= 10 || urlChars / Math.max(1, text.length) > 0.35);
+}
+
+function isLikelyBibliographyEntry(text) {
+  return /^\[\d+\]\s+/.test(text) ||
+    /^\d+\.\s+[A-Z][A-Za-z-]+,\s+[A-Z]/.test(text) ||
+    /\b(?:In Proceedings of|Journal of|Conference on|Transactions on|arXiv preprint)\b/i.test(text) && text.length < 420;
+}
+
+function isLikelyDiagramOnlyText(text, context = {}) {
+  const lineCount = Number(context.lineCount || 1);
+  const averageLineLength = text.length / Math.max(1, lineCount);
+  const diagramTokens = (text.match(/\b(?:LLM|Query|Chunk|Task|Final|Summary|Checker|Workflow|GPU|Node|Layer|Input|Output|Encoder|Decoder|Figure)\b/gi) || []).length;
+  const sentenceLike = /[.!?。！？][)"'\]]?(\s|$)/.test(text);
+  return lineCount >= 4 && averageLineLength < 42 && diagramTokens >= 4 && !sentenceLike;
+}
+
+function isReferencesSectionTitle(title) {
+  return /^(references|bibliography|参考文献)$/i.test(normalizeSectionTitleHint(title || ""));
 }
 
 function extractPageArtifacts(pages) {
@@ -3042,7 +3227,7 @@ function inferSections(paragraphs) {
 function enrichSectionsWithContext(sections, paragraphs, chunkSummaries = []) {
   for (const section of sections) {
     const sectionParagraphs = paragraphs.filter((paragraph) =>
-      paragraph.sectionId === section.id && paragraph.kind !== "heading");
+      paragraph.sectionId === section.id && isReadingParagraph(paragraph, section));
     const pageStart = Math.min(...sectionParagraphs.map((paragraph) => Number(paragraph.pageNumber || 0)).filter(Boolean));
     const pageEnd = Math.max(...sectionParagraphs.map((paragraph) => Number(paragraph.pageEndNumber || paragraph.pageNumber || 0)).filter(Boolean));
     const keywords = [];
@@ -3090,7 +3275,8 @@ function summaryOverlapsPages(pageRangeLabel, pageStart, pageEnd) {
 }
 
 function buildHeuristicSectionSummary(paragraphs) {
-  const first = paragraphs.find((paragraph) => paragraph.sourceText && paragraph.sourceText.length > 40);
+  const first = paragraphs.find((paragraph) =>
+    paragraph.sourceText && paragraph.sourceText.length > 40 && isReadingParagraph(paragraph));
   if (!first) {
     return "";
   }
@@ -3099,6 +3285,9 @@ function buildHeuristicSectionSummary(paragraphs) {
 }
 
 function buildPaperContextProfile(paragraphs, sections, chunkSummaries = []) {
+  const sectionById = new Map((sections || []).map((section) => [section.id, section]));
+  const readingParagraphs = paragraphs.filter((paragraph) =>
+    isReadingParagraph(paragraph, sectionById.get(paragraph.sectionId)));
   const keywords = [];
   for (const summary of chunkSummaries) {
     for (const keyword of normalizeKeywordList(summary.keywords)) {
@@ -3120,7 +3309,7 @@ function buildPaperContextProfile(paragraphs, sections, chunkSummaries = []) {
 
   return {
     version: 1,
-    summary: truncateText(summaryText || buildHeuristicSectionSummary(paragraphs), 900),
+    summary: truncateText(summaryText || buildHeuristicSectionSummary(readingParagraphs), 900),
     keywords: keywords.slice(0, 24),
     updatedAt: new Date().toISOString(),
   };
@@ -3129,6 +3318,7 @@ function buildPaperContextProfile(paragraphs, sections, chunkSummaries = []) {
 function inferTitle(paragraphs, filename) {
   const firstLongText = paragraphs
     .slice(0, 5)
+    .filter((item) => item.kind === "heading" || !isLikelyNonReadingParagraphText(item.sourceText || "", item))
     .map((item) => item.sourceText)
     .find((text) => text.length >= 20 && text.length <= 180);
 
@@ -3163,7 +3353,7 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
   }
 
   const paragraphs = buildParagraphsFromSegmentItems(items);
-  const readingCount = paragraphs.filter((paragraph) => paragraph.kind !== "heading").length;
+  const readingCount = paragraphs.filter((paragraph) => isReadingParagraph(paragraph)).length;
 
   if (readingCount < 3) {
     throw new Error("AI 分段结果太少，已保留基础分段。");
@@ -3265,7 +3455,7 @@ function updateSegmentationWindowState(state, items, result, pages) {
   state.keywords = state.keywords.slice(0, 24);
 
   state.previousTailItems = items
-    .filter((item) => item.kind !== "heading" && item.sourceText)
+    .filter((item) => item.kind !== "heading" && item.sourceText && !isLikelyNonReadingParagraphText(item.sourceText, item))
     .slice(-3);
 }
 
@@ -3298,7 +3488,10 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
         "必须忠于原文，不翻译，不总结，不新增内容。",
         "合并同一自然段内的换行和断词，保留标题、编号、公式引用和术语。",
         "不要把上一窗口上下文重复输出成当前段落；它只用于判断跨页续接、章节脉络和术语一致性。",
-        "不要把图注、表格单元格、公式块、代码块单独切成正文段落；正文里提到的 Figure/Table/Eq 引用要保留。",
+        "只输出正文阅读需要的章节标题和自然段。作者列表、邮箱、单位、会议版权、ACM Reference、DOI/URL 脚注、页眉页脚、参考文献条目都必须省略。",
+        "不要把图注、表格单元格、图片里的文字、公式块、代码块单独切成正文段落；正文里提到的 Figure/Table/Eq 引用要保留。",
+        "如果一段只有链接、图片链接、数据集链接、脚注编号或联系信息，直接省略，不要输出为 paragraph。",
+        "跨页或跨栏的同一自然段要合并成一个 paragraph，并正确设置 continuesFromPrevious / continuesToNext。",
         "只输出合法 JSON，不要使用 Markdown 代码块。",
       ].join("\n"),
     },
@@ -3336,18 +3529,25 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
     chunkSummary: normalizeParagraph(parsed.chunkSummary || parsed.summary || ""),
     keywords: normalizeKeywordList(parsed.keywords || parsed.keyTerms).slice(0, 16),
     items: rawItems
-      .map((item) => ({
-        kind: String(item.kind || "").toLowerCase() === "heading" ? "heading" : "paragraph",
-        pageNumber: Number(item.pageNumber || pages[0]?.pageNumber || 1),
-        pageEndNumber: Number(item.pageEndNumber || item.endPageNumber || item.pageNumber || pages[0]?.pageNumber || 1),
-        sectionTitle: normalizeSectionTitleHint(item.sectionTitle || item.section || ""),
-        continuesFromPrevious: parseModelBoolean(item.continuesFromPrevious),
-        continuesToNext: parseModelBoolean(item.continuesToNext),
-        keywords: normalizeKeywordList(item.keywords || item.keyTerms).slice(0, 10),
-        role: normalizeSegmentationRole(item.role || ""),
-        sourceText: normalizeParagraph(item.sourceText || item.text || ""),
-      }))
-      .filter((item) => item.sourceText),
+      .map((item) => {
+        const rawSourceText = String(item.sourceText || item.text || "");
+        return {
+          kind: String(item.kind || "").toLowerCase() === "heading" ? "heading" : "paragraph",
+          pageNumber: Number(item.pageNumber || pages[0]?.pageNumber || 1),
+          pageEndNumber: Number(item.pageEndNumber || item.endPageNumber || item.pageNumber || pages[0]?.pageNumber || 1),
+          sectionTitle: normalizeSectionTitleHint(item.sectionTitle || item.section || ""),
+          continuesFromPrevious: parseModelBoolean(item.continuesFromPrevious),
+          continuesToNext: parseModelBoolean(item.continuesToNext),
+          keywords: normalizeKeywordList(item.keywords || item.keyTerms).slice(0, 10),
+          role: normalizeSegmentationRole(item.role || ""),
+          rawSourceText,
+          sourceText: normalizeParagraph(rawSourceText),
+        };
+      })
+      .filter((item) => item.sourceText && (item.kind === "heading" || (
+        !isLikelyNonReadingParagraphText(item.rawSourceText, item) &&
+        !isLikelyNonReadingParagraphText(item.sourceText, item)
+      ))),
   };
 }
 
@@ -3371,7 +3571,11 @@ function buildParagraphsFromSegmentItems(items) {
 
   for (const item of items) {
     const clean = normalizeParagraph(item.sourceText);
-    if (!clean || (clean.length < 20 && item.kind !== "heading" && !isLikelyHeading(clean))) {
+    if (!clean || (clean.length < 20 && item.kind !== "heading" && !isLikelyHeading(clean)) ||
+      (item.kind !== "heading" && (
+        isLikelyNonReadingParagraphText(item.rawSourceText || clean, item) ||
+        isLikelyNonReadingParagraphText(clean, item)
+      ))) {
       continue;
     }
 
@@ -3427,7 +3631,7 @@ function attachParagraphArtifactLinks(paper) {
   }
 
   for (const paragraph of paper.paragraphs) {
-    if (paragraph.kind === "heading") {
+    if (!isReadingParagraphForPaper(paper, paragraph)) {
       paragraph.relatedArtifactIds = [];
       continue;
     }

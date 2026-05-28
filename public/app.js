@@ -362,11 +362,17 @@ async function runPostUploadPipeline() {
     return;
   }
 
+  let segmentationReady = true;
   if (els.aiSegmentInput.checked) {
-    await segmentPaperWithAi({ continueOnError: true });
+    segmentationReady = await segmentPaperWithAi({ continueOnError: true });
   }
 
   if (els.autoAnalyzeInput.checked) {
+    if (!segmentationReady) {
+      setStatus("AI 分段失败，已暂停自动分析。请重新分段后再启动翻译讲解。", true);
+      return;
+    }
+
     await startAutoAnalyze();
   }
 }
@@ -800,7 +806,12 @@ async function refreshCurrentPaper() {
 }
 
 function needsAnalysis(paragraph) {
-  return !paragraph.translation && !paragraph.explanation && paragraph.analysisStatus !== "done";
+  return paragraph.kind === "paragraph" &&
+    paragraph.analysisEligible !== false &&
+    !isLikelyNonReadingText(paragraph.sourceText || "", paragraph.sectionTitleHint || "") &&
+    !paragraph.translation &&
+    !paragraph.explanation &&
+    paragraph.analysisStatus !== "done";
 }
 
 function resetParagraphAnalyses(paragraphs) {
@@ -923,7 +934,7 @@ function renderOutline(paper) {
     button.type = "button";
     button.textContent = section.title;
     button.addEventListener("click", () => {
-      const paragraph = paper.paragraphs.find((item) => item.sectionId === section.id && item.kind !== "heading");
+      const paragraph = paper.paragraphs.find((item) => item.sectionId === section.id && isReadingParagraph(paper, item));
       if (paragraph) {
         document.querySelector(`#${CSS.escape(paragraph.id)}`)?.scrollIntoView({
           behavior: "smooth",
@@ -1187,7 +1198,55 @@ function getArtifactLabel(type, visualType = "") {
 }
 
 function getReadingParagraphs(paper) {
-  return paper.paragraphs.filter((paragraph) => paragraph.kind !== "heading");
+  return paper.paragraphs.filter((paragraph) => isReadingParagraph(paper, paragraph));
+}
+
+function isReadingParagraph(paper, paragraph) {
+  if (!paragraph || paragraph.kind !== "paragraph" || paragraph.analysisEligible === false) {
+    return false;
+  }
+
+  const section = paper?.sections?.find((item) => item.id === paragraph.sectionId);
+  return !isLikelyNonReadingText(paragraph.sourceText || "", section?.title || paragraph.sectionTitleHint || "");
+}
+
+function isLikelyNonReadingText(text, sectionTitle = "") {
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  if (!clean) {
+    return true;
+  }
+
+  if (/^(references|bibliography|参考文献)$/i.test(String(sectionTitle || "").trim())) {
+    return true;
+  }
+
+  if (/^(?:figure|fig\.|table)\s+\d+[a-z]?\s*[:.]/i.test(clean)) {
+    return true;
+  }
+
+  const emails = clean.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
+  if ((emails.length >= 2 && clean.length < 520) || /^\{[^}]+}\s*@/i.test(clean)) {
+    return true;
+  }
+
+  if (/\b(?:author names are listed|equal contribution|corresponding author|correspondence to|ACM Reference Format|Copyright held by|Proceedings of|ISBN|ISSN|https:\/\/doi\.org|Creative Commons|©)\b/i.test(clean)) {
+    return true;
+  }
+
+  const urls = clean.match(/(?:https?:\/\/|www\.)\S+/gi) || [];
+  if (urls.length) {
+    const stripped = clean
+      .replace(/(?:https?:\/\/|www\.)\S+/gi, " ")
+      .replace(/\b\d+\b/g, " ")
+      .replace(/[^A-Za-z\u4e00-\u9fff]+/g, " ")
+      .trim();
+    const wordCount = stripped ? stripped.split(/\s+/).length : 0;
+    if (clean.length < 260 && (wordCount <= 10 || urls.join("").length / Math.max(1, clean.length) > 0.35)) {
+      return true;
+    }
+  }
+
+  return /^\[\d+\]\s+/.test(clean);
 }
 
 function renderSectionDivider(section) {
