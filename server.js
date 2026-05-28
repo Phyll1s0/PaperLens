@@ -25,7 +25,8 @@ const WORKSPACE_CACHE_KEY = createHash("sha1").update(__dirname).digest("hex").s
 const SWIFT_MODULE_CACHE_DIR = path.join(CACHE_DIR, `swift-module-cache-${WORKSPACE_CACHE_KEY}`);
 const TMP_DIR = path.join(CACHE_DIR, "tmp");
 const MAX_UPLOAD_BYTES = 120 * 1024 * 1024;
-const ARTIFACT_CROP_VERSION = 6;
+const ARTIFACT_CROP_VERSION = 7;
+const VISUAL_STRUCTURE_VERSION = 1;
 const JOB_ITEM_MAX_ATTEMPTS = 2;
 const JOB_POLL_LIMIT = 20;
 const ANALYSIS_BATCH_SIZE = readIntegerEnv("PAPERLENS_ANALYSIS_BATCH_SIZE", 12, 1, 24);
@@ -2071,10 +2072,11 @@ async function handleChat(req, res) {
 }
 
 function buildPaperRecord({ id, filename, pdfPath, extraction }) {
-  const paragraphs = splitIntoParagraphs(extraction.pages);
+  const pages = enhancePagesWithVisualStructure(extraction.pages);
+  const paragraphs = splitIntoParagraphs(pages);
   const sections = inferSections(paragraphs);
   const title = inferTitle(paragraphs, filename);
-  const pageImages = extraction.pages
+  const pageImages = pages
     .filter((page) => page.imagePath)
     .map((page) => ({
       pageNumber: page.pageNumber,
@@ -2082,14 +2084,16 @@ function buildPaperRecord({ id, filename, pdfPath, extraction }) {
       imageWidth: page.imageWidth || null,
       imageHeight: page.imageHeight || null,
     }));
-  const extractionPages = extraction.pages.map((page) => ({
+  const extractionPages = pages.map((page) => ({
     pageNumber: page.pageNumber,
     text: page.text || "",
     blocks: Array.isArray(page.blocks) ? page.blocks : [],
+    visualRegions: Array.isArray(page.visualRegions) ? page.visualRegions : [],
+    visualStructureVersion: page.visualStructureVersion || null,
     width: page.width || null,
     height: page.height || null,
   }));
-  const pageArtifacts = extractPageArtifacts(extraction.pages);
+  const pageArtifacts = extractPageArtifacts(pages);
 
   const paper = {
     id,
@@ -2110,6 +2114,91 @@ function buildPaperRecord({ id, filename, pdfPath, extraction }) {
 
   attachParagraphArtifactLinks(paper);
   return paper;
+}
+
+function enhancePagesWithVisualStructure(pages) {
+  return (pages || []).map((page) => {
+    const visualRegions = inferPageVisualRegions(page);
+    return {
+      ...page,
+      visualRegions,
+      visualStructureVersion: VISUAL_STRUCTURE_VERSION,
+    };
+  });
+}
+
+function inferPageVisualRegions(page) {
+  const blocks = Array.isArray(page.blocks) ? page.blocks : [];
+  const regions = [];
+
+  blocks.forEach((block, index) => {
+    const type = classifyPageArtifact(block);
+    if (!type) {
+      return;
+    }
+
+    if (type === "caption") {
+      const text = normalizeArtifactText(block.text || "");
+      const label = extractArtifactLabel(text);
+      const crop = inferCaptionCrop(page, block, label);
+      if (!crop) {
+        return;
+      }
+
+      regions.push({
+        id: `visual_${page.pageNumber}_${index}`,
+        source: "caption-anchor",
+        visualType: /^table\b/i.test(text) ? "table" : "figure",
+        label,
+        captionBlockIndex: index,
+        x: crop.x,
+        y: crop.y,
+        width: crop.width,
+        height: crop.height,
+        pageWidth: crop.pageWidth,
+        pageHeight: crop.pageHeight,
+      });
+      return;
+    }
+
+    if (type === "formula" || type === "code" || type === "figure-text") {
+      const crop = inferBlockArtifactCrop(page, block, type);
+      if (!crop) {
+        return;
+      }
+
+      regions.push({
+        id: `visual_${page.pageNumber}_${index}`,
+        source: "block-cluster",
+        visualType: type === "figure-text" ? "figure" : type,
+        label: type === "formula" ? extractFormulaLabel(block.text || "") : "",
+        seedBlockIndex: index,
+        x: crop.x,
+        y: crop.y,
+        width: crop.width,
+        height: crop.height,
+        pageWidth: crop.pageWidth,
+        pageHeight: crop.pageHeight,
+      });
+    }
+  });
+
+  return dedupeVisualRegions(regions);
+}
+
+function dedupeVisualRegions(regions) {
+  const result = [];
+  for (const region of regions) {
+    const duplicate = result.some((item) =>
+      item.visualType === region.visualType &&
+      item.captionBlockIndex === region.captionBlockIndex &&
+      regionOverlapRatio(item, region) > 0.82);
+    if (!duplicate) {
+      result.push(region);
+    }
+  }
+
+  return result.slice(0, 40);
 }
 
 function splitIntoParagraphs(pages) {
@@ -2289,7 +2378,7 @@ function parseModelBoolean(value) {
 function getReadablePageBlocks(page) {
   if (Array.isArray(page.blocks) && page.blocks.length) {
     const blocks = page.blocks
-      .filter((block) => block?.text && !isLikelyNonReadingBlock(block))
+      .filter((block) => block?.text && !isLikelyNonReadingBlock(block, page))
       .map((block) => ({
         ...block,
         text: normalizeParagraph(block.text),
@@ -2304,9 +2393,13 @@ function getReadablePageBlocks(page) {
   return extractTextBlocks(page.text);
 }
 
-function isLikelyNonReadingBlock(block) {
+function isLikelyNonReadingBlock(block, page = null) {
   const rawText = String(block.text || "").replace(/\s+/g, " ").trim();
   if (classifyPageArtifact(block)) {
+    return true;
+  }
+
+  if (isBlockCoveredByVisualStructure(block, page)) {
     return true;
   }
 
@@ -2332,6 +2425,38 @@ function isLikelyNonReadingBlock(block) {
   const sentenceLike = /[.!?。！？][)"'\]]?(\s|$)/.test(text);
   const manyDiagramTokens = /\b(LLM|Query|Chunk|Task|Final|Summary|Checker|Architect|Engineer|Code)\b/i.test(text);
   return lineCount >= 6 && averageLineLength < 34 && (!sentenceLike || manyDiagramTokens);
+}
+
+function isBlockCoveredByVisualStructure(block, page) {
+  if (!page || !Array.isArray(page.visualRegions) || !page.visualRegions.length) {
+    return false;
+  }
+
+  const box = pickBlockBox(block);
+  if (!box) {
+    return false;
+  }
+
+  return page.visualRegions.some((region) => {
+    if (!["figure", "table", "formula", "code"].includes(region.visualType)) {
+      return false;
+    }
+
+    const overlapRatio = boxOverlapRatio(box, region);
+    if (overlapRatio < 0.62) {
+      return false;
+    }
+
+    if (region.visualType === "formula") {
+      return isFormulaContinuationBlock(block.text || "", block);
+    }
+
+    if (region.visualType === "code") {
+      return isCodeContinuationBlock(block.text || "", block);
+    }
+
+    return isLikelyVisualCandidateBlock(block, region.visualType === "table");
+  });
 }
 
 function isLikelyNonReadingParagraphText(text, context = {}) {
@@ -2438,7 +2563,7 @@ function extractPageArtifacts(pages) {
         return;
       }
 
-      const artifactFields = buildPageArtifactFields(page, block, type);
+      const artifactFields = buildPageArtifactFields(page, block, type, index);
 
       artifacts.push({
         id: `artifact_${page.pageNumber}_${index}`,
@@ -2458,26 +2583,29 @@ function extractPageArtifacts(pages) {
   return artifacts;
 }
 
-function buildPageArtifactFields(page, block, type) {
+function buildPageArtifactFields(page, block, type, blockIndex = -1) {
   if (type === "caption") {
-    return buildCaptionArtifactFields(page, block);
+    return buildCaptionArtifactFields(page, block, blockIndex);
   }
 
   if (type === "formula" || type === "code" || type === "figure-text") {
-    return buildBlockArtifactFields(page, block, type);
+    return buildBlockArtifactFields(page, block, type, blockIndex);
   }
 
   return {};
 }
 
-function buildCaptionArtifactFields(page, captionBlock) {
+function buildCaptionArtifactFields(page, captionBlock, blockIndex = -1) {
   const text = normalizeArtifactText(captionBlock?.text || "");
   const label = extractArtifactLabel(text);
-  const crop = inferCaptionCrop(page, captionBlock, label);
+  const visualRegion = findVisualRegionForBlock(page, blockIndex, "caption-anchor");
+  const crop = visualRegionToCrop(visualRegion) || inferCaptionCrop(page, captionBlock, label);
 
   return {
     label,
     visualType: /^table\b/i.test(text) ? "table" : "figure",
+    visualRegionId: visualRegion?.id || "",
+    visualSource: visualRegion?.source || "",
     cropVersion: ARTIFACT_CROP_VERSION,
     imagePath: page.imagePath || null,
     imageWidth: page.imageWidth || null,
@@ -2488,13 +2616,16 @@ function buildCaptionArtifactFields(page, captionBlock) {
   };
 }
 
-function buildBlockArtifactFields(page, block, type) {
+function buildBlockArtifactFields(page, block, type, blockIndex = -1) {
   const text = normalizeArtifactText(block?.text || "");
-  const crop = inferBlockArtifactCrop(page, block, type);
+  const visualRegion = findVisualRegionForBlock(page, blockIndex, "block-cluster");
+  const crop = visualRegionToCrop(visualRegion) || inferBlockArtifactCrop(page, block, type);
 
   return {
     label: type === "formula" ? extractFormulaLabel(text) : "",
     visualType: type,
+    visualRegionId: visualRegion?.id || "",
+    visualSource: visualRegion?.source || "",
     cropVersion: ARTIFACT_CROP_VERSION,
     imagePath: page.imagePath || null,
     imageWidth: page.imageWidth || null,
@@ -2503,6 +2634,30 @@ function buildBlockArtifactFields(page, block, type) {
     pageHeight: page.height || null,
     crop,
   };
+}
+
+function findVisualRegionForBlock(page, blockIndex, source) {
+  if (!Array.isArray(page.visualRegions) || blockIndex < 0) {
+    return null;
+  }
+
+  const key = source === "caption-anchor" ? "captionBlockIndex" : "seedBlockIndex";
+  return page.visualRegions.find((region) => region.source === source && Number(region[key]) === blockIndex) || null;
+}
+
+function visualRegionToCrop(region) {
+  if (!region) {
+    return null;
+  }
+
+  return normalizeCrop({
+    x: Number(region.x),
+    y: Number(region.y),
+    width: Number(region.width),
+    height: Number(region.height),
+    pageWidth: Number(region.pageWidth),
+    pageHeight: Number(region.pageHeight),
+  });
 }
 
 function extractArtifactLabel(text) {
@@ -2566,12 +2721,20 @@ function inferCaptionCrop(page, captionBlock, label) {
     if (bottom - y < minHeight) {
       bottom = Math.min(pageHeight, captionBottom + pageHeight * 0.2);
     }
+    const maxHeight = pageHeight * 0.34;
+    if (bottom - y > maxHeight) {
+      bottom = Math.min(bottom, y + maxHeight);
+    }
   } else {
     bottom = Math.max(0, captionY - pageHeight * 0.006);
     y = findPreviousTextBoundary(page, captionBlock, horizontal) ||
       Math.max(0, captionY - pageHeight * 0.26);
     if (captionY - y < minHeight) {
       y = Math.max(0, captionY - pageHeight * 0.22);
+    }
+    const maxHeight = horizontal.width > pageWidth * 0.7 ? pageHeight * 0.42 : pageHeight * 0.32;
+    if (bottom - y > maxHeight) {
+      y = Math.max(0, bottom - maxHeight);
     }
   }
 
@@ -2889,10 +3052,27 @@ function mergeBoxes(a, b) {
   };
 }
 
+function boxOverlapRatio(a, b) {
+  const left = Math.max(Number(a.x || 0), Number(b.x || 0));
+  const top = Math.max(Number(a.y || 0), Number(b.y || 0));
+  const right = Math.min(Number(a.x || 0) + Number(a.width || 0), Number(b.x || 0) + Number(b.width || 0));
+  const bottom = Math.min(Number(a.y || 0) + Number(a.height || 0), Number(b.y || 0) + Number(b.height || 0));
+  const overlap = Math.max(0, right - left) * Math.max(0, bottom - top);
+  const area = Math.max(1, Number(a.width || 0) * Number(a.height || 0));
+  return overlap / area;
+}
+
+function regionOverlapRatio(a, b) {
+  const overlapA = boxOverlapRatio(a, b);
+  const overlapB = boxOverlapRatio(b, a);
+  return Math.min(overlapA, overlapB);
+}
+
 function inferVisualHorizontalBounds(page, captionBlock, pageWidth) {
   const blocks = Array.isArray(page.blocks) ? page.blocks : [];
   const content = getContentBounds(blocks, pageWidth);
   const captionColumn = Number(captionBlock.column || 0);
+  const captionBox = pickBlockBox(captionBlock);
 
   if (captionColumn === 1 || captionColumn === 2) {
     const columnBlocks = blocks.filter((block) => Number(block.column || 0) === captionColumn);
@@ -2900,7 +3080,40 @@ function inferVisualHorizontalBounds(page, captionBlock, pageWidth) {
     return expandHorizontalBounds(columnBounds, pageWidth, pageWidth * 0.015);
   }
 
+  if (captionBox) {
+    const captionCenter = captionBox.x + captionBox.width / 2;
+    const contentCenter = content.x + content.width / 2;
+    const looksSingleColumnCaption = captionBox.width < content.width * 0.58 ||
+      (captionBox.width < content.width * 0.68 && Number(captionBlock.lineCount || 1) <= 3);
+    if (looksSingleColumnCaption) {
+      const inferredColumn = captionCenter < contentCenter ? 1 : 2;
+      const columnBlocks = getLikelyColumnBlocks(blocks, content, inferredColumn);
+      const columnBounds = getContentBounds(columnBlocks, pageWidth);
+      return expandHorizontalBounds(columnBounds, pageWidth, pageWidth * 0.015);
+    }
+  }
+
   return expandHorizontalBounds(content, pageWidth, pageWidth * 0.02);
+}
+
+function getLikelyColumnBlocks(blocks, content, column) {
+  const midpoint = content.x + content.width / 2;
+  const explicit = blocks.filter((block) => Number(block.column || 0) === column);
+  if (explicit.length >= 3) {
+    return explicit;
+  }
+
+  const inferred = blocks.filter((block) => {
+    const box = pickBlockBox(block);
+    if (!box) {
+      return false;
+    }
+
+    const center = box.x + box.width / 2;
+    return column === 1 ? center < midpoint : center >= midpoint;
+  });
+
+  return inferred.length ? inferred : blocks;
 }
 
 function getContentBounds(blocks, pageWidth) {
@@ -5087,6 +5300,8 @@ function upgradePaperContextProfile(paper) {
 function upgradePaperArtifacts(paper) {
   const artifacts = Array.isArray(paper.pageArtifacts) ? paper.pageArtifacts : [];
   const extractionPages = Array.isArray(paper.extractionPages) ? paper.extractionPages : [];
+  const needsVisualStructure = extractionPages.some((page) =>
+    page.visualStructureVersion !== VISUAL_STRUCTURE_VERSION || !Array.isArray(page.visualRegions));
   const hasExtractableArtifacts = extractionPages.some((page) =>
     Array.isArray(page.blocks) && page.blocks.some((block) => classifyPageArtifact(block)));
   const needsUpgrade = !artifacts.length
@@ -5094,11 +5309,11 @@ function upgradePaperArtifacts(paper) {
     : artifacts.some((artifact) =>
       ["caption", "formula", "code", "figure-text"].includes(artifact.type) &&
         (artifact.cropVersion !== ARTIFACT_CROP_VERSION || !artifact.crop));
-  if (!needsUpgrade || !Array.isArray(paper.extractionPages) || !paper.extractionPages.length) {
+  if ((!needsUpgrade && !needsVisualStructure) || !Array.isArray(paper.extractionPages) || !paper.extractionPages.length) {
     return false;
   }
 
-  const pages = paper.extractionPages.map((page) => {
+  const pages = enhancePagesWithVisualStructure(paper.extractionPages.map((page) => {
     const pageImage = (paper.pageImages || []).find((item) => item.pageNumber === page.pageNumber);
     const size = inferStoredPageSize(paper, page);
     return {
@@ -5109,8 +5324,17 @@ function upgradePaperArtifacts(paper) {
       imageWidth: pageImage?.imageWidth || null,
       imageHeight: pageImage?.imageHeight || null,
     };
-  });
+  }));
 
+  paper.extractionPages = pages.map((page) => ({
+    pageNumber: page.pageNumber,
+    text: page.text || "",
+    blocks: Array.isArray(page.blocks) ? page.blocks : [],
+    visualRegions: Array.isArray(page.visualRegions) ? page.visualRegions : [],
+    visualStructureVersion: page.visualStructureVersion || null,
+    width: page.width || null,
+    height: page.height || null,
+  }));
   paper.pageArtifacts = extractPageArtifacts(pages);
   attachParagraphArtifactLinks(paper);
   return true;
