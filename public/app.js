@@ -9,6 +9,7 @@ const state = {
     failed: 0,
     total: 0,
     currentId: null,
+    abortController: null,
     startedAt: 0,
     timer: null,
   },
@@ -38,6 +39,7 @@ const els = {
   outline: document.querySelector("#outline"),
   searchInput: document.querySelector("#searchInput"),
   autoAnalyzeButton: document.querySelector("#autoAnalyzeButton"),
+  rerunAnalyzeButton: document.querySelector("#rerunAnalyzeButton"),
   stopAutoButton: document.querySelector("#stopAutoButton"),
   pingButton: document.querySelector("#pingButton"),
 };
@@ -87,6 +89,7 @@ function bindEvents() {
   els.uploadButton.addEventListener("click", uploadPdf);
   els.pingButton.addEventListener("click", pingModel);
   els.autoAnalyzeButton.addEventListener("click", () => startAutoAnalyze());
+  els.rerunAnalyzeButton.addEventListener("click", () => startAutoAnalyze({ rerunAll: true }));
   els.stopAutoButton.addEventListener("click", stopAutoAnalyze);
   els.providerSelect.addEventListener("change", () => {
     applyProvider(els.providerSelect.value);
@@ -430,14 +433,17 @@ async function analyzeParagraph(paragraphId, options = {}) {
   renderPaper();
 
   try {
-    const paragraph = await requestAnalyzeParagraph(paragraphId);
+    const paragraph = await requestAnalyzeParagraph(paragraphId, { signal: options.signal });
     replaceParagraph(paragraph);
     if (!options.fromAuto) {
       setStatus("分析完成");
     }
     return paragraph;
   } catch (error) {
-    markParagraph(paragraphId, { analysisStatus: "error", analysisError: error.message });
+    const patch = error.isAbort
+      ? { analysisStatus: "pending", analysisError: "" }
+      : { analysisStatus: "error", analysisError: error.message };
+    markParagraph(paragraphId, patch);
     if (!options.fromAuto) {
       setStatus(error.message, true);
       return null;
@@ -449,10 +455,11 @@ async function analyzeParagraph(paragraphId, options = {}) {
   }
 }
 
-async function requestAnalyzeParagraph(paragraphId) {
+async function requestAnalyzeParagraph(paragraphId, options = {}) {
   const response = await apiFetch("/api/analyze", {
     method: "POST",
     headers: { "content-type": "application/json" },
+    signal: options.signal,
     body: JSON.stringify({
       paperId: state.paper.id,
       paragraphId,
@@ -463,7 +470,7 @@ async function requestAnalyzeParagraph(paragraphId) {
   return result.paragraph;
 }
 
-async function startAutoAnalyze() {
+async function startAutoAnalyze(options = {}) {
   if (!state.paper || state.autoAnalyze.running) {
     return;
   }
@@ -472,7 +479,14 @@ async function startAutoAnalyze() {
     return;
   }
 
-  const pending = getReadingParagraphs(state.paper).filter(needsAnalysis);
+  if (options.rerunAll) {
+    resetParagraphAnalyses(getReadingParagraphs(state.paper));
+    renderPaper();
+  }
+
+  const pending = options.rerunAll
+    ? getReadingParagraphs(state.paper)
+    : getReadingParagraphs(state.paper).filter(needsAnalysis);
   if (!pending.length) {
     setStatus("没有待分析段落");
     updateAutoButtons();
@@ -486,6 +500,7 @@ async function startAutoAnalyze() {
     failed: 0,
     total: pending.length,
     currentId: null,
+    abortController: null,
     startedAt: Date.now(),
     timer: window.setInterval(updateAutoStatus, 1000),
   };
@@ -497,18 +512,29 @@ async function startAutoAnalyze() {
     }
 
     state.autoAnalyze.currentId = paragraph.id;
+    state.autoAnalyze.abortController = new AbortController();
     updateAutoStatus();
 
     try {
-      await analyzeParagraph(paragraph.id, { fromAuto: true });
+      await analyzeParagraph(paragraph.id, {
+        fromAuto: true,
+        signal: state.autoAnalyze.abortController.signal,
+      });
       state.autoAnalyze.completed += 1;
     } catch (error) {
+      if (error.isAbort && state.autoAnalyze.stopRequested) {
+        markParagraph(paragraph.id, { analysisStatus: "pending", analysisError: "" });
+        break;
+      }
+
       state.autoAnalyze.failed += 1;
       if (error.isNetworkError) {
         state.autoAnalyze.stopRequested = true;
         setStatus(error.message, true);
         break;
       }
+    } finally {
+      state.autoAnalyze.abortController = null;
     }
 
     updateAutoStatus();
@@ -521,6 +547,7 @@ async function startAutoAnalyze() {
   state.autoAnalyze.running = false;
   state.autoAnalyze.stopRequested = false;
   state.autoAnalyze.currentId = null;
+  state.autoAnalyze.abortController = null;
   updateAutoButtons();
   renderPaper();
   loadRecentPapers();
@@ -539,12 +566,23 @@ function stopAutoAnalyze() {
   }
 
   state.autoAnalyze.stopRequested = true;
-  setStatus("正在停止，当前段落完成后会暂停");
+  state.autoAnalyze.abortController?.abort();
+  setStatus("正在停止，已取消当前请求");
   updateAutoButtons();
 }
 
 function needsAnalysis(paragraph) {
   return !paragraph.translation && !paragraph.explanation && paragraph.analysisStatus !== "done";
+}
+
+function resetParagraphAnalyses(paragraphs) {
+  for (const paragraph of paragraphs) {
+    paragraph.translation = "";
+    paragraph.explanation = "";
+    paragraph.keyTerms = [];
+    paragraph.analysisStatus = "pending";
+    paragraph.analysisError = "";
+  }
 }
 
 async function askParagraph(paragraphId, input) {
@@ -1487,6 +1525,7 @@ function updateAutoStatus() {
 
 function updateAutoButtons() {
   els.autoAnalyzeButton.disabled = !state.paper || state.autoAnalyze.running;
+  els.rerunAnalyzeButton.disabled = !state.paper || state.autoAnalyze.running;
   els.stopAutoButton.classList.toggle("hidden", !state.autoAnalyze.running);
   els.stopAutoButton.disabled = !state.autoAnalyze.running || state.autoAnalyze.stopRequested;
 }
@@ -1517,7 +1556,15 @@ function setModelStatus(text, isError = false) {
 
 async function apiFetch(url, options = {}, label = "请求") {
   const controller = new AbortController();
-  const { timeoutMs, ...fetchOptions } = options;
+  const { timeoutMs, signal, ...fetchOptions } = options;
+  const abortFromExternalSignal = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) {
+      controller.abort();
+    } else {
+      signal.addEventListener("abort", abortFromExternalSignal, { once: true });
+    }
+  }
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs || API_TIMEOUT_MS);
 
   try {
@@ -1527,13 +1574,17 @@ async function apiFetch(url, options = {}, label = "请求") {
     });
   } catch (error) {
     const message = error.name === "AbortError"
-      ? `${label}超时。模型可能仍在处理，或本机服务暂时无响应。`
+      ? signal?.aborted
+        ? `${label}已停止。`
+        : `${label}超时。模型可能仍在处理，或本机服务暂时无响应。`
       : `${label}失败：无法连接 PaperLens 本机服务。请确认服务仍在运行，或刷新页面后重试。`;
     const wrapped = new Error(message);
     wrapped.cause = error;
     wrapped.isNetworkError = true;
+    wrapped.isAbort = error.name === "AbortError" && Boolean(signal?.aborted);
     throw wrapped;
   } finally {
+    signal?.removeEventListener("abort", abortFromExternalSignal);
     window.clearTimeout(timeout);
   }
 }

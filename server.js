@@ -98,6 +98,9 @@ const server = http.createServer(async (req, res) => {
 
     return json(res, { error: "Not found" }, 404);
   } catch (error) {
+    if (res.destroyed || res.writableEnded) {
+      return;
+    }
     console.error(error);
     return json(res, { error: error.message || "Internal server error" }, error.statusCode || 500);
   }
@@ -157,12 +160,13 @@ async function handleSegmentPaper(req, res, paperId) {
   const payload = await readJson(req);
   const paper = await loadPaper(paperId);
   const pages = Array.isArray(paper.extractionPages) ? paper.extractionPages : [];
+  const signal = getResponseAbortSignal(res);
 
   if (!pages.length) {
     return json(res, { error: "这篇论文缺少原始页面文本，无法重新 AI 分段。请重新上传 PDF。" }, 400);
   }
 
-  const segmented = await segmentPaperWithAi(paper, payload.settings);
+  const segmented = await segmentPaperWithAi(paper, payload.settings, { signal });
   await savePaper(segmented);
   return json(res, { paper: segmented });
 }
@@ -195,9 +199,20 @@ async function listPapers() {
   return { papers };
 }
 
+function getResponseAbortSignal(res) {
+  const controller = new AbortController();
+  res.on("close", () => {
+    if (!res.writableEnded) {
+      controller.abort();
+    }
+  });
+  return controller.signal;
+}
+
 async function handleAnalyze(req, res) {
   const payload = await readJson(req);
   const { paperId, paragraphId, settings } = payload;
+  const signal = getResponseAbortSignal(res);
 
   if (!paperId || !paragraphId) {
     return json(res, { error: "paperId and paragraphId are required." }, 400);
@@ -242,7 +257,7 @@ async function handleAnalyze(req, res) {
     },
   ];
 
-  const content = await callModel(settings, messages);
+  const content = await callModel(settings, messages, { signal });
   const parsed = parseModelJson(content);
 
   paragraph.translation = parsed.translation || "";
@@ -259,6 +274,7 @@ async function handleAnalyze(req, res) {
 async function handleModelPing(req, res) {
   const payload = await readJson(req);
   const diagnostics = getSettingsDiagnostics(payload.settings);
+  const signal = getResponseAbortSignal(res);
 
   try {
     const answer = await callModel(payload.settings, [
@@ -270,7 +286,7 @@ async function handleModelPing(req, res) {
         role: "user",
         content: "请回复：连接成功。",
       },
-    ], { maxTokens: 64 });
+    ], { maxTokens: 64, signal });
 
     return json(res, { ok: true, answer, diagnostics });
   } catch (error) {
@@ -284,6 +300,7 @@ async function handleModelPing(req, res) {
 async function handleChat(req, res) {
   const payload = await readJson(req);
   const { paperId, paragraphId, message, settings } = payload;
+  const signal = getResponseAbortSignal(res);
 
   if (!paperId || !paragraphId || !message) {
     return json(res, { error: "paperId, paragraphId and message are required." }, 400);
@@ -338,7 +355,7 @@ async function handleChat(req, res) {
     },
   ];
 
-  const answer = await callModel(settings, messages);
+  const answer = await callModel(settings, messages, { signal });
   paragraph.chatMessages = paragraph.chatMessages || [];
   paragraph.chatMessages.push({
     id: `msg_${randomUUID().slice(0, 12)}`,
@@ -943,12 +960,12 @@ function inferTitle(paragraphs, filename) {
   return firstLongText || filename.replace(/\.pdf$/i, "");
 }
 
-async function segmentPaperWithAi(paper, settings) {
+async function segmentPaperWithAi(paper, settings, options = {}) {
   const chunks = chunkPagesForSegmentation(paper.extractionPages || []);
   const items = [];
 
   for (const chunk of chunks) {
-    const chunkItems = await segmentPageChunkWithAi(paper, chunk, settings);
+    const chunkItems = await segmentPageChunkWithAi(paper, chunk, settings, { signal: options.signal });
     items.push(...chunkItems);
   }
 
@@ -1000,7 +1017,7 @@ function chunkPagesForSegmentation(pages) {
   return chunks;
 }
 
-async function segmentPageChunkWithAi(paper, pages, settings) {
+async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
   const pageText = pages
     .map((page) => [
       `--- Page ${page.pageNumber} ---`,
@@ -1038,7 +1055,7 @@ async function segmentPageChunkWithAi(paper, pages, settings) {
     },
   ];
 
-  const content = await callModel(settings, messages, { maxTokens: 6000 });
+  const content = await callModel(settings, messages, { maxTokens: 6000, signal: options.signal });
   const parsed = parseModelJson(content);
   const rawItems = Array.isArray(parsed.items) ? parsed.items : [];
 
@@ -1530,15 +1547,23 @@ function normalizePopplerText(text) {
 async function callModel(settings, messages, options = {}) {
   const cleanSettings = normalizeSettings(settings);
   if (cleanSettings.baseUrl === "local:claude-kimi") {
-    return callClaudeAgent(cleanSettings, messages, { usePageKimiKey: true });
+    return callClaudeAgent(cleanSettings, messages, { usePageKimiKey: true, signal: options.signal });
   }
 
   if (cleanSettings.baseUrl === "local:claude-config") {
-    return callClaudeAgent(cleanSettings, messages, { usePageKimiKey: false });
+    return callClaudeAgent(cleanSettings, messages, { usePageKimiKey: false, signal: options.signal });
   }
 
   const endpoint = getChatCompletionsEndpoint(cleanSettings.baseUrl);
   const controller = new AbortController();
+  const abortFromExternalSignal = () => controller.abort();
+  if (options.signal) {
+    if (options.signal.aborted) {
+      controller.abort();
+    } else {
+      options.signal.addEventListener("abort", abortFromExternalSignal, { once: true });
+    }
+  }
   const timeout = setTimeout(() => controller.abort(), 90_000);
 
   try {
@@ -1561,7 +1586,9 @@ async function callModel(settings, messages, options = {}) {
       });
     } catch (error) {
       if (error.name === "AbortError") {
-        throw new Error("模型请求超时，请稍后重试。");
+        throw options.signal?.aborted
+          ? requestCanceledError()
+          : new Error("模型请求超时，请稍后重试。");
       }
 
       throw new Error(formatModelNetworkError(error, cleanSettings));
@@ -1581,6 +1608,7 @@ async function callModel(settings, messages, options = {}) {
 
     return content.trim();
   } finally {
+    options.signal?.removeEventListener("abort", abortFromExternalSignal);
     clearTimeout(timeout);
   }
 }
@@ -1591,6 +1619,12 @@ function formatModelNetworkError(error, settings) {
     : "如果你的网络需要代理，请在网页 Proxy URL 或 .env 的 PAPERLENS_PROXY_URL 中填写代理地址。";
 
   return `模型网络请求失败：${error.message || "fetch failed"}。${proxyHint}`;
+}
+
+function requestCanceledError() {
+  const error = new Error("请求已取消。");
+  error.statusCode = 499;
+  return error;
 }
 
 function callClaudeAgent(settings, messages, options = {}) {
@@ -1640,10 +1674,31 @@ function callClaudeAgent(settings, messages, options = {}) {
 
     let stdout = "";
     let stderr = "";
+    let settled = false;
     const timeout = setTimeout(() => {
       child.kill("SIGTERM");
+      settled = true;
+      options.signal?.removeEventListener("abort", abortHandler);
       reject(new Error("Claude Code 本地 Agent 调用超时。"));
     }, 180_000);
+    const abortHandler = () => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timeout);
+      child.kill("SIGTERM");
+      reject(requestCanceledError());
+    };
+
+    if (options.signal) {
+      if (options.signal.aborted) {
+        abortHandler();
+      } else {
+        options.signal.addEventListener("abort", abortHandler, { once: true });
+      }
+    }
 
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString("utf8");
@@ -1652,7 +1707,12 @@ function callClaudeAgent(settings, messages, options = {}) {
       stderr += chunk.toString("utf8");
     });
     child.on("error", (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
       clearTimeout(timeout);
+      options.signal?.removeEventListener("abort", abortHandler);
       if (error.code === "ENOENT") {
         reject(new Error("未找到 claude CLI。请先安装 Claude Code，或设置 PAPERLENS_CLAUDE_CLI 指向 claude 可执行文件。"));
         return;
@@ -1661,7 +1721,12 @@ function callClaudeAgent(settings, messages, options = {}) {
       reject(error);
     });
     child.on("close", (code) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
       clearTimeout(timeout);
+      options.signal?.removeEventListener("abort", abortHandler);
       const result = parseClaudeJsonResult(stdout);
 
       if (code !== 0) {
