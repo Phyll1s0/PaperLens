@@ -30,6 +30,9 @@ const JOB_ITEM_MAX_ATTEMPTS = 2;
 const JOB_POLL_LIMIT = 20;
 const ANALYSIS_CONTEXT_TEXT_LIMIT = 900;
 const ANALYSIS_CONTEXT_TOTAL_LIMIT = 5200;
+const SEGMENTATION_CONTEXT_TEXT_LIMIT = 1600;
+const SEGMENTATION_ITEM_TEXT_LIMIT = 900;
+const SECTION_CONTEXT_TEXT_LIMIT = 900;
 const EXTRA_BIN_DIRS = [
   path.dirname(process.execPath),
   "/opt/homebrew/bin",
@@ -1090,12 +1093,54 @@ function buildParagraphAnalysisMessages(paper, paragraph) {
 
 function buildParagraphAnalysisContext(paper, paragraph) {
   const blocks = [
+    buildPaperProfileContext(paper),
+    buildSectionWindowContext(paper, paragraph),
     buildNearbyParagraphContext(paper, paragraph),
+    buildReferenceWindowContext(paper, paragraph),
     buildRelatedArtifactContext(paper, paragraph),
     buildPriorTermsContext(paper, paragraph),
   ].filter(Boolean);
 
   return truncateText(blocks.join("\n\n"), ANALYSIS_CONTEXT_TOTAL_LIMIT);
+}
+
+function buildPaperProfileContext(paper) {
+  const profile = paper.contextProfile || {};
+  const lines = [];
+  if (profile.summary) {
+    lines.push(`全文线索: ${truncateText(profile.summary, 520)}`);
+  }
+
+  const keywords = normalizeKeywordList(profile.keywords).slice(0, 16);
+  if (keywords.length) {
+    lines.push(`全文关键词: ${keywords.join("、")}`);
+  }
+
+  return lines.length ? lines.join("\n") : "";
+}
+
+function buildSectionWindowContext(paper, paragraph) {
+  const section = (paper.sections || []).find((item) => item.id === paragraph.sectionId);
+  if (!section) {
+    return "";
+  }
+
+  const paragraphs = Array.isArray(paper.paragraphs) ? paper.paragraphs : [];
+  const sectionParagraphs = paragraphs
+    .filter((item) => item.sectionId === section.id && item.kind !== "heading" && item.id !== paragraph.id)
+    .slice(0, 4);
+  const opener = sectionParagraphs[0]
+    ? formatContextParagraph(sectionParagraphs[0], `章节开头 P${sectionParagraphs[0].order + 1}`)
+    : "";
+  const keywords = normalizeKeywordList(section.keywords).slice(0, 10);
+  const lines = [
+    `章节窗口: ${section.title || "正文"}`,
+    section.summary ? `章节摘要: ${truncateText(section.summary, SECTION_CONTEXT_TEXT_LIMIT)}` : "",
+    keywords.length ? `章节关键词: ${keywords.join("、")}` : "",
+    opener,
+  ].filter(Boolean);
+
+  return lines.length > 1 ? lines.join("\n") : "";
 }
 
 function buildNearbyParagraphContext(paper, paragraph) {
@@ -1178,23 +1223,78 @@ function buildRelatedArtifactContext(paper, paragraph) {
   ].join("\n");
 }
 
+function buildReferenceWindowContext(paper, paragraph) {
+  const tokens = extractContextReferenceTokens(paragraph.sourceText || "");
+  if (!tokens.length || !Array.isArray(paper.paragraphs)) {
+    return "";
+  }
+
+  const currentOrder = Number(paragraph.order || 0);
+  const selected = paper.paragraphs
+    .filter((item) => item.id !== paragraph.id && item.kind !== "heading")
+    .filter((item) => tokens.some((token) => paragraphContainsContextToken(item.sourceText || "", token)))
+    .sort((a, b) => Math.abs(Number(a.order || 0) - currentOrder) - Math.abs(Number(b.order || 0) - currentOrder))
+    .slice(0, 3);
+
+  if (!selected.length) {
+    return "";
+  }
+
+  return [
+    `引用窗口: ${tokens.map((token) => token.label).join("、")}`,
+    ...selected.map((item) => formatContextParagraph(item, `相关 P${item.order + 1}`)),
+  ].join("\n");
+}
+
+function extractContextReferenceTokens(text) {
+  const tokens = [];
+  const source = String(text || "");
+  const patterns = [
+    /\b(?:figure|fig\.|table|tab\.?)\s*\d+[a-z]?(?:\s*\([a-z]\))?/gi,
+    /\b(?:eq\.?|equation)\s*\(?\d+[a-z]?\)?/gi,
+    /\[[0-9,\s-]{1,32}\]/g,
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of source.matchAll(pattern)) {
+      const label = match[0].replace(/\s+/g, " ").trim();
+      const key = normalizeContextReferenceKey(label);
+      if (label && !tokens.some((token) => token.key === key)) {
+        tokens.push({ key, label });
+      }
+      if (tokens.length >= 8) {
+        return tokens;
+      }
+    }
+  }
+
+  return tokens;
+}
+
+function paragraphContainsContextToken(text, token) {
+  const source = normalizeContextReferenceKey(text);
+  return source.includes(token.key);
+}
+
+function normalizeContextReferenceKey(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/\bfigure\b/g, "fig")
+    .replace(/\btable\b/g, "tab")
+    .replace(/\bequation\b/g, "eq")
+    .replace(/[\s.()]/g, "");
+}
+
 function buildPriorTermsContext(paper, paragraph) {
   const paragraphs = Array.isArray(paper.paragraphs) ? paper.paragraphs : [];
-  const terms = [];
+  const terms = normalizeKeywordList(paper.contextProfile?.keywords).slice(0, 6);
   for (const item of paragraphs) {
     if (item.id === paragraph.id) {
       break;
     }
 
-    if (!Array.isArray(item.keyTerms)) {
-      continue;
-    }
-
-    for (const term of item.keyTerms) {
-      const clean = String(term || "").trim();
-      if (clean && !terms.includes(clean)) {
-        terms.push(clean);
-      }
+    for (const term of normalizeKeywordList(item.keyTerms)) {
+      pushUnique(terms, term);
       if (terms.length >= 12) {
         break;
       }
@@ -1218,6 +1318,37 @@ function truncateText(text, limit) {
   }
 
   return `${clean.slice(0, Math.max(0, limit - 1)).trim()}...`;
+}
+
+function normalizeKeywordList(value) {
+  const raw = Array.isArray(value)
+    ? value
+    : String(value || "")
+      .split(/[,，;；、\n]/g);
+  const keywords = [];
+  for (const item of raw) {
+    const clean = String(item || "").replace(/\s+/g, " ").trim();
+    if (clean && clean.length <= 80) {
+      pushUnique(keywords, clean);
+    }
+  }
+
+  return keywords;
+}
+
+function pushUnique(items, value) {
+  const clean = String(value || "").trim();
+  if (!clean) {
+    return false;
+  }
+
+  const key = clean.toLowerCase();
+  if (items.some((item) => String(item).toLowerCase() === key)) {
+    return false;
+  }
+
+  items.push(clean);
+  return true;
 }
 
 async function handleModelPing(req, res) {
@@ -1417,6 +1548,12 @@ function appendParagraph(paragraphs, paragraph) {
   if (shouldMergeAcrossPage(previous, paragraph)) {
     previous.sourceText = mergeParagraphText(previous.sourceText, paragraph.sourceText);
     previous.pageEndNumber = paragraph.pageEndNumber;
+    previous.continuesToNext = Boolean(paragraph.continuesToNext);
+    previous.contextKeywords = [
+      ...normalizeKeywordList(previous.contextKeywords),
+      ...normalizeKeywordList(paragraph.contextKeywords),
+    ].filter((term, index, all) => all.findIndex((item) => item.toLowerCase() === term.toLowerCase()) === index)
+      .slice(0, 12);
     return;
   }
 
@@ -1437,8 +1574,17 @@ function shouldMergeAcrossPage(previous, paragraph) {
     return false;
   }
 
+  if (previous.sectionTitleHint && paragraph.sectionTitleHint &&
+    previous.sectionTitleHint !== paragraph.sectionTitleHint) {
+    return false;
+  }
+
   if (isLikelyHeading(paragraph.sourceText) || isLikelySectionOpening(paragraph.sourceText)) {
     return false;
+  }
+
+  if (previous.continuesToNext || paragraph.continuesFromPrevious) {
+    return true;
   }
 
   return previous.sourceText.endsWith("-") ||
@@ -1465,6 +1611,39 @@ function startsLikeContinuation(text) {
 function isLikelySectionOpening(text) {
   return /^(abstract|introduction|related work|background|method|methods|methodology|experiments|results|discussion|conclusion|references|appendix)\b/i
     .test(String(text || "").trim());
+}
+
+function normalizeSectionTitleHint(title) {
+  const clean = normalizeParagraph(title)
+    .replace(/^\d+(?:\.\d+)*\s+/, "")
+    .replace(/[:：]+$/g, "")
+    .trim();
+  if (!clean || clean.length < 2 || clean.length > 90) {
+    return "";
+  }
+
+  if (/^(正文|body|unknown|n\/a|null|none)$/i.test(clean)) {
+    return "";
+  }
+
+  return clean;
+}
+
+function normalizeSegmentationRole(role) {
+  const clean = String(role || "").trim().toLowerCase();
+  if (["abstract", "background", "method", "result", "discussion", "limitation", "conclusion"].includes(clean)) {
+    return clean;
+  }
+
+  return "";
+}
+
+function parseModelBoolean(value) {
+  if (value === true || value === false) {
+    return value;
+  }
+
+  return /^(true|yes|1)$/i.test(String(value || "").trim());
 }
 
 function getReadablePageBlocks(page) {
@@ -2295,10 +2474,13 @@ function inferSections(paragraphs) {
   }];
 
   let currentSectionId = "section_0";
+  let currentSectionTitle = "";
 
   for (const paragraph of paragraphs) {
+    const hintedTitle = normalizeSectionTitleHint(paragraph.sectionTitleHint || "");
     if (paragraph.kind === "heading" || isLikelyHeading(paragraph.sourceText)) {
       currentSectionId = `section_${sections.length}`;
+      currentSectionTitle = normalizeSectionTitleHint(paragraph.sourceText);
       sections.push({
         id: currentSectionId,
         title: paragraph.sourceText,
@@ -2306,12 +2488,110 @@ function inferSections(paragraphs) {
         order: sections.length,
         summary: "",
       });
+    } else if (hintedTitle && hintedTitle !== currentSectionTitle) {
+      currentSectionId = `section_${sections.length}`;
+      currentSectionTitle = hintedTitle;
+      sections.push({
+        id: currentSectionId,
+        title: hintedTitle,
+        level: 1,
+        order: sections.length,
+        summary: "",
+        source: "ai-segmentation",
+      });
     }
 
     paragraph.sectionId = currentSectionId;
   }
 
   return sections;
+}
+
+function enrichSectionsWithContext(sections, paragraphs, chunkSummaries = []) {
+  for (const section of sections) {
+    const sectionParagraphs = paragraphs.filter((paragraph) =>
+      paragraph.sectionId === section.id && paragraph.kind !== "heading");
+    const pageStart = Math.min(...sectionParagraphs.map((paragraph) => Number(paragraph.pageNumber || 0)).filter(Boolean));
+    const pageEnd = Math.max(...sectionParagraphs.map((paragraph) => Number(paragraph.pageEndNumber || paragraph.pageNumber || 0)).filter(Boolean));
+    const keywords = [];
+    for (const paragraph of sectionParagraphs) {
+      const paragraphKeywords = [
+        ...normalizeKeywordList(paragraph.contextKeywords),
+        ...normalizeKeywordList(paragraph.keyTerms),
+      ];
+      for (const keyword of paragraphKeywords) {
+        pushUnique(keywords, keyword);
+      }
+      if (keywords.length >= 14) {
+        break;
+      }
+    }
+
+    const overlappingSummaries = chunkSummaries
+      .filter((summary) => summaryOverlapsPages(summary.pages, pageStart, pageEnd))
+      .map((summary) => summary.summary)
+      .filter(Boolean);
+
+    section.pageStart = Number.isFinite(pageStart) ? pageStart : null;
+    section.pageEnd = Number.isFinite(pageEnd) ? pageEnd : null;
+    section.keywords = keywords.slice(0, 12);
+    section.summary = truncateText(
+      overlappingSummaries[0] || buildHeuristicSectionSummary(sectionParagraphs),
+      SECTION_CONTEXT_TEXT_LIMIT,
+    );
+  }
+}
+
+function summaryOverlapsPages(pageRangeLabel, pageStart, pageEnd) {
+  if (!Number.isFinite(pageStart) || !Number.isFinite(pageEnd)) {
+    return false;
+  }
+
+  const match = String(pageRangeLabel || "").match(/p\.(\d+)(?:-(\d+))?/);
+  if (!match) {
+    return false;
+  }
+
+  const start = Number(match[1]);
+  const end = Number(match[2] || match[1]);
+  return start <= pageEnd && end >= pageStart;
+}
+
+function buildHeuristicSectionSummary(paragraphs) {
+  const first = paragraphs.find((paragraph) => paragraph.sourceText && paragraph.sourceText.length > 40);
+  if (!first) {
+    return "";
+  }
+
+  return `开头内容: ${truncateText(first.sourceText, 420)}`;
+}
+
+function buildPaperContextProfile(paragraphs, sections, chunkSummaries = []) {
+  const keywords = [];
+  for (const summary of chunkSummaries) {
+    for (const keyword of normalizeKeywordList(summary.keywords)) {
+      pushUnique(keywords, keyword);
+    }
+  }
+
+  for (const section of sections) {
+    for (const keyword of normalizeKeywordList(section.keywords)) {
+      pushUnique(keywords, keyword);
+    }
+  }
+
+  const summaryText = chunkSummaries
+    .map((summary) => summary.summary)
+    .filter(Boolean)
+    .slice(0, 6)
+    .join(" ");
+
+  return {
+    version: 1,
+    summary: truncateText(summaryText || buildHeuristicSectionSummary(paragraphs), 900),
+    keywords: keywords.slice(0, 24),
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 function inferTitle(paragraphs, filename) {
@@ -2326,10 +2606,28 @@ function inferTitle(paragraphs, filename) {
 async function segmentPaperWithAi(paper, settings, options = {}) {
   const chunks = chunkPagesForSegmentation(paper.extractionPages || []);
   const items = [];
+  const chunkSummaries = [];
+  const windowState = createSegmentationWindowState();
 
-  for (const chunk of chunks) {
-    const chunkItems = await segmentPageChunkWithAi(paper, chunk, settings, { signal: options.signal });
+  for (const [index, chunk] of chunks.entries()) {
+    const result = await segmentPageChunkWithAi(paper, chunk, settings, {
+      signal: options.signal,
+      chunkIndex: index,
+      totalChunks: chunks.length,
+      windowContext: buildSegmentationWindowContext(windowState),
+    });
+    const chunkItems = result.items.map((item) => ({
+      ...item,
+      chunkIndex: index,
+    }));
     items.push(...chunkItems);
+    updateSegmentationWindowState(windowState, chunkItems, result, chunk);
+    chunkSummaries.push({
+      pages: getPageRangeLabel(chunk),
+      summary: normalizeParagraph(result.chunkSummary || ""),
+      keywords: normalizeKeywordList(result.keywords).slice(0, 12),
+      activeSectionTitle: windowState.activeSectionTitle,
+    });
   }
 
   const paragraphs = buildParagraphsFromSegmentItems(items);
@@ -2340,6 +2638,7 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
   }
 
   const sections = inferSections(paragraphs);
+  enrichSectionsWithContext(sections, paragraphs, chunkSummaries);
   const segmented = {
     ...paper,
     title: inferTitle(paragraphs, paper.filename),
@@ -2347,6 +2646,7 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
     segmentationMode: "ai",
     sections,
     paragraphs,
+    contextProfile: buildPaperContextProfile(paragraphs, sections, chunkSummaries),
     updatedAt: new Date().toISOString(),
   };
 
@@ -2380,6 +2680,74 @@ function chunkPagesForSegmentation(pages) {
   return chunks;
 }
 
+function createSegmentationWindowState() {
+  return {
+    activeSectionTitle: "",
+    previousTailItems: [],
+    summaries: [],
+    keywords: [],
+  };
+}
+
+function buildSegmentationWindowContext(state) {
+  const lines = [];
+  if (state.activeSectionTitle) {
+    lines.push(`当前章节线索: ${state.activeSectionTitle}`);
+  }
+
+  if (state.summaries.length) {
+    lines.push(`前序窗口摘要: ${state.summaries.slice(-2).join(" / ")}`);
+  }
+
+  if (state.keywords.length) {
+    lines.push(`前序关键词: ${state.keywords.slice(0, 14).join("、")}`);
+  }
+
+  if (state.previousTailItems.length) {
+    lines.push("前序尾段:");
+    for (const [index, item] of state.previousTailItems.entries()) {
+      lines.push(`T${index + 1}: ${truncateText(item.sourceText, SEGMENTATION_ITEM_TEXT_LIMIT)}`);
+    }
+  }
+
+  return lines.length ? truncateText(lines.join("\n"), SEGMENTATION_CONTEXT_TEXT_LIMIT) : "无。";
+}
+
+function updateSegmentationWindowState(state, items, result, pages) {
+  const headings = items
+    .filter((item) => item.kind === "heading" || item.sectionTitle)
+    .map((item) => normalizeSectionTitleHint(item.sectionTitle || item.sourceText))
+    .filter(Boolean);
+  if (headings.length) {
+    state.activeSectionTitle = headings.at(-1);
+  }
+
+  if (result.chunkSummary) {
+    state.summaries.push(`${getPageRangeLabel(pages)}: ${truncateText(result.chunkSummary, 220)}`);
+    state.summaries = state.summaries.slice(-4);
+  }
+
+  for (const keyword of normalizeKeywordList(result.keywords)) {
+    pushUnique(state.keywords, keyword);
+  }
+  state.keywords = state.keywords.slice(0, 24);
+
+  state.previousTailItems = items
+    .filter((item) => item.kind !== "heading" && item.sourceText)
+    .slice(-3);
+}
+
+function getPageRangeLabel(pages) {
+  const numbers = pages.map((page) => Number(page.pageNumber)).filter(Number.isFinite);
+  if (!numbers.length) {
+    return "未知页";
+  }
+
+  const first = numbers[0];
+  const last = numbers.at(-1);
+  return first === last ? `p.${first}` : `p.${first}-${last}`;
+}
+
 async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
   const pageText = pages
     .map((page) => [
@@ -2387,6 +2755,8 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
       getSegmentationPageText(page).slice(0, 12_000),
     ].join("\n"))
     .join("\n\n");
+  const pageRange = getPageRangeLabel(pages);
+  const windowContext = options.windowContext || "无。";
 
   const messages = [
     {
@@ -2395,6 +2765,8 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
         "你是论文 PDF 分段助手。你的任务是把 PDF 抽取出来的页面文本切成适合精读的语义段落。",
         "必须忠于原文，不翻译，不总结，不新增内容。",
         "合并同一自然段内的换行和断词，保留标题、编号、公式引用和术语。",
+        "不要把上一窗口上下文重复输出成当前段落；它只用于判断跨页续接、章节脉络和术语一致性。",
+        "不要把图注、表格单元格、公式块、代码块单独切成正文段落；正文里提到的 Figure/Table/Eq 引用要保留。",
         "只输出合法 JSON，不要使用 Markdown 代码块。",
       ].join("\n"),
     },
@@ -2402,13 +2774,19 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
       role: "user",
       content: [
         `论文: ${paper.title || paper.filename}`,
+        `当前窗口: ${options.chunkIndex + 1 || 1}/${options.totalChunks || 1}，页码 ${pageRange}`,
+        "",
+        "上一窗口上下文:",
+        windowContext,
         "",
         "请把下面页面文本切分为语义段落。",
         "输出格式必须是：",
         "{",
+        '  "chunkSummary": "当前窗口的极简脉络摘要，中文，不超过 120 字",',
+        '  "keywords": ["术语1", "术语2"],',
         '  "items": [',
-        '    { "kind": "heading", "pageNumber": 1, "sourceText": "章节标题" },',
-        '    { "kind": "paragraph", "pageNumber": 1, "sourceText": "自然段原文" }',
+        '    { "kind": "heading", "pageNumber": 1, "pageEndNumber": 1, "sectionTitle": "章节标题", "sourceText": "章节标题" },',
+        '    { "kind": "paragraph", "pageNumber": 1, "pageEndNumber": 1, "sectionTitle": "所属章节", "continuesFromPrevious": false, "continuesToNext": false, "keywords": ["术语"], "sourceText": "自然段原文" }',
         "  ]",
         "}",
         "",
@@ -2422,13 +2800,23 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
   const parsed = parseModelJson(content);
   const rawItems = Array.isArray(parsed.items) ? parsed.items : [];
 
-  return rawItems
-    .map((item) => ({
-      kind: String(item.kind || "").toLowerCase() === "heading" ? "heading" : "paragraph",
-      pageNumber: Number(item.pageNumber || pages[0]?.pageNumber || 1),
-      sourceText: normalizeParagraph(item.sourceText || item.text || ""),
-    }))
-    .filter((item) => item.sourceText);
+  return {
+    chunkSummary: normalizeParagraph(parsed.chunkSummary || parsed.summary || ""),
+    keywords: normalizeKeywordList(parsed.keywords || parsed.keyTerms).slice(0, 16),
+    items: rawItems
+      .map((item) => ({
+        kind: String(item.kind || "").toLowerCase() === "heading" ? "heading" : "paragraph",
+        pageNumber: Number(item.pageNumber || pages[0]?.pageNumber || 1),
+        pageEndNumber: Number(item.pageEndNumber || item.endPageNumber || item.pageNumber || pages[0]?.pageNumber || 1),
+        sectionTitle: normalizeSectionTitleHint(item.sectionTitle || item.section || ""),
+        continuesFromPrevious: parseModelBoolean(item.continuesFromPrevious),
+        continuesToNext: parseModelBoolean(item.continuesToNext),
+        keywords: normalizeKeywordList(item.keywords || item.keyTerms).slice(0, 10),
+        role: normalizeSegmentationRole(item.role || ""),
+        sourceText: normalizeParagraph(item.sourceText || item.text || ""),
+      }))
+      .filter((item) => item.sourceText),
+  };
 }
 
 function getSegmentationPageText(page) {
@@ -2463,13 +2851,20 @@ function buildParagraphsFromSegmentItems(items) {
 
     const order = paragraphs.length;
     const kind = item.kind === "heading" || isLikelyHeading(clean) ? "heading" : "paragraph";
-    paragraphs.push({
+    const paragraph = {
       id: `para_${order}_${randomUUID().slice(0, 8)}`,
       kind,
       order,
       pageNumber: Number.isFinite(item.pageNumber) && item.pageNumber > 0 ? item.pageNumber : 1,
-      pageEndNumber: Number.isFinite(item.pageNumber) && item.pageNumber > 0 ? item.pageNumber : 1,
+      pageEndNumber: Number.isFinite(item.pageEndNumber) && item.pageEndNumber > 0
+        ? item.pageEndNumber
+        : Number.isFinite(item.pageNumber) && item.pageNumber > 0 ? item.pageNumber : 1,
       sectionId: "section_0",
+      sectionTitleHint: normalizeSectionTitleHint(item.sectionTitle || ""),
+      segmentationRole: normalizeSegmentationRole(item.role || ""),
+      contextKeywords: normalizeKeywordList(item.keywords).slice(0, 10),
+      continuesFromPrevious: Boolean(item.continuesFromPrevious),
+      continuesToNext: Boolean(item.continuesToNext),
       sourceText: clean,
       translation: "",
       explanation: "",
@@ -2478,8 +2873,14 @@ function buildParagraphsFromSegmentItems(items) {
       chatMessages: [],
       analysisStatus: "pending",
       analysisError: "",
-    });
+    };
+
+    appendParagraph(paragraphs, paragraph);
   }
+
+  paragraphs.forEach((paragraph, index) => {
+    paragraph.order = index;
+  });
 
   return paragraphs;
 }
@@ -3539,10 +3940,38 @@ function parseMultipart(body, boundary) {
 async function loadPaper(paperId) {
   const paperPath = getPaperPath(paperId);
   const paper = JSON.parse(await readFile(paperPath, "utf8"));
-  if (upgradePaperArtifacts(paper)) {
+  const upgradedArtifacts = upgradePaperArtifacts(paper);
+  const upgradedContext = upgradePaperContextProfile(paper);
+  if (upgradedArtifacts || upgradedContext) {
     await savePaper(paper);
   }
   return paper;
+}
+
+function upgradePaperContextProfile(paper) {
+  if (!Array.isArray(paper.paragraphs) || !paper.paragraphs.length) {
+    return false;
+  }
+
+  let changed = false;
+  if (!Array.isArray(paper.sections) || !paper.sections.length) {
+    paper.sections = inferSections(paper.paragraphs);
+    changed = true;
+  }
+
+  const needsSectionContext = paper.sections.some((section) =>
+    !section.summary || !Array.isArray(section.keywords));
+  if (needsSectionContext) {
+    enrichSectionsWithContext(paper.sections, paper.paragraphs, []);
+    changed = true;
+  }
+
+  if (!paper.contextProfile || paper.contextProfile.version !== 1) {
+    paper.contextProfile = buildPaperContextProfile(paper.paragraphs, paper.sections, []);
+    changed = true;
+  }
+
+  return changed;
 }
 
 function upgradePaperArtifacts(paper) {
