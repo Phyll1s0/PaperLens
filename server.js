@@ -28,8 +28,11 @@ const MAX_UPLOAD_BYTES = 120 * 1024 * 1024;
 const ARTIFACT_CROP_VERSION = 6;
 const JOB_ITEM_MAX_ATTEMPTS = 2;
 const JOB_POLL_LIMIT = 20;
+const ANALYSIS_BATCH_SIZE = readIntegerEnv("PAPERLENS_ANALYSIS_BATCH_SIZE", 4, 1, 8);
+const CLAUDE_AGENT_ANALYSIS_BATCH_SIZE = readIntegerEnv("PAPERLENS_AGENT_ANALYSIS_BATCH_SIZE", 6, 1, 10);
 const ANALYSIS_CONTEXT_TEXT_LIMIT = 900;
 const ANALYSIS_CONTEXT_TOTAL_LIMIT = 5200;
+const BATCH_ANALYSIS_CONTEXT_TOTAL_LIMIT = 2400;
 const SEGMENTATION_CONTEXT_TEXT_LIMIT = 1600;
 const SEGMENTATION_ITEM_TEXT_LIMIT = 900;
 const SECTION_CONTEXT_TEXT_LIMIT = 900;
@@ -865,7 +868,12 @@ async function runAnalysisJob(job, signal) {
       continue;
     }
 
-    await runAnalysisJobItem(job, item, signal);
+    const batchItems = getNextAnalysisBatchItems(job, item);
+    if (batchItems.length > 1) {
+      await runAnalysisJobBatch(job, batchItems, signal);
+    } else {
+      await runAnalysisJobItem(job, item, signal);
+    }
   }
 
   const finishedAt = new Date().toISOString();
@@ -944,6 +952,141 @@ async function runAnalysisJobItem(job, item, signal) {
   }
 }
 
+function getNextAnalysisBatchItems(job, startItem) {
+  const batchSize = getAnalysisBatchSize(job.settings);
+  if (batchSize <= 1) {
+    return [startItem];
+  }
+
+  const startIndex = job.items.indexOf(startItem);
+  if (startIndex === -1) {
+    return [startItem];
+  }
+
+  const items = [];
+  for (const item of job.items.slice(startIndex)) {
+    if (item.status === "done" || item.status === "error" || item.status === "canceled") {
+      continue;
+    }
+
+    if (item.status !== "queued" && item !== startItem) {
+      continue;
+    }
+
+    items.push(item);
+    if (items.length >= batchSize) {
+      break;
+    }
+  }
+
+  return items;
+}
+
+function getAnalysisBatchSize(settings = {}) {
+  const provider = String(settings.provider || "");
+  const baseUrl = String(settings.baseUrl || "");
+  if (provider.startsWith("claude") || baseUrl.startsWith("local:claude")) {
+    return CLAUDE_AGENT_ANALYSIS_BATCH_SIZE;
+  }
+
+  return ANALYSIS_BATCH_SIZE;
+}
+
+async function runAnalysisJobBatch(job, items, signal) {
+  const now = new Date().toISOString();
+  for (const item of items) {
+    item.status = "running";
+    item.startedAt = now;
+    item.error = "";
+    item.attempts += 1;
+  }
+  job.currentParagraphId = items[0]?.paragraphId || "";
+  job.updatedAt = now;
+  await updatePaperParagraphs(job.paperId, items.map((item) => item.paragraphId), (paragraph) => {
+    paragraph.analysisStatus = "running";
+    paragraph.analysisError = "";
+  });
+  await persistJobs();
+
+  try {
+    const paper = await loadPaper(job.paperId);
+    const paragraphs = items.map((item) => {
+      const paragraph = (paper.paragraphs || []).find((entry) => entry.id === item.paragraphId);
+      if (!paragraph || paragraph.kind === "heading") {
+        throw new Error(`Paragraph not found: ${item.paragraphId}`);
+      }
+
+      return paragraph;
+    });
+
+    await analyzeParagraphBatchInPaper(paper, paragraphs, resolveJobSettings(job.settings), { signal });
+    await savePaper(paper);
+    const completedAt = new Date().toISOString();
+    for (const item of items) {
+      item.status = "done";
+      item.completedAt = completedAt;
+      item.error = "";
+    }
+    job.completed += items.length;
+  } catch (error) {
+    if (job.cancelRequested || signal.aborted || error.statusCode === 499) {
+      const completedAt = new Date().toISOString();
+      for (const item of items) {
+        item.status = "canceled";
+        item.error = "";
+        item.completedAt = completedAt;
+      }
+      await updatePaperParagraphs(job.paperId, items.map((item) => item.paragraphId), (paragraph) => {
+        paragraph.analysisStatus = "pending";
+        paragraph.analysisError = "";
+      });
+      return;
+    }
+
+    if (items.length > 1) {
+      for (const item of items) {
+        item.status = "queued";
+        item.error = `批量分析失败，已回退单段：${error.message || "模型请求失败。"}`;
+      }
+      job.currentParagraphId = "";
+      job.updatedAt = new Date().toISOString();
+      await persistJobs();
+      for (const item of items) {
+        if (job.cancelRequested || signal.aborted) {
+          break;
+        }
+        await runAnalysisJobItem(job, item, signal);
+      }
+      return;
+    }
+
+    const item = items[0];
+    if (item.attempts < JOB_ITEM_MAX_ATTEMPTS && isRetryableJobError(error)) {
+      item.status = "queued";
+      item.error = error.message || "模型请求失败。";
+      job.updatedAt = new Date().toISOString();
+      await persistJobs();
+      await sleep(1500);
+      return await runAnalysisJobBatch(job, items, signal);
+    }
+
+    item.status = "error";
+    item.error = error.message || "模型请求失败。";
+    item.completedAt = new Date().toISOString();
+    job.failed += 1;
+    await updatePaperParagraph(job.paperId, item.paragraphId, (paragraph) => {
+      paragraph.analysisStatus = "error";
+      paragraph.analysisError = item.error;
+    });
+  } finally {
+    if (items.some((item) => item.paragraphId === job.currentParagraphId)) {
+      job.currentParagraphId = "";
+    }
+    job.updatedAt = new Date().toISOString();
+    await persistJobs();
+  }
+}
+
 function isRetryableJobError(error) {
   const message = String(error?.message || "");
   return /网络请求失败|fetch failed|超时|temporarily|timeout|ECONN|ENOTFOUND|ETIMEDOUT/i.test(message);
@@ -994,6 +1137,31 @@ async function updatePaperParagraph(paperId, paragraphId, update) {
   paragraph.updatedAt = new Date().toISOString();
   await savePaper(paper);
   return paragraph;
+}
+
+async function updatePaperParagraphs(paperId, paragraphIds, update) {
+  const wanted = new Set(paragraphIds);
+  if (!wanted.size) {
+    return [];
+  }
+
+  const paper = await loadPaper(paperId);
+  const updated = [];
+  for (const paragraph of paper.paragraphs || []) {
+    if (!wanted.has(paragraph.id)) {
+      continue;
+    }
+
+    update(paragraph, paper);
+    paragraph.updatedAt = new Date().toISOString();
+    updated.push(paragraph);
+  }
+
+  if (updated.length) {
+    await savePaper(paper);
+  }
+
+  return updated;
 }
 
 function getReadingParagraphs(paper) {
@@ -1057,6 +1225,74 @@ async function analyzeParagraphInPaper(paper, paragraph, settings, options = {})
   return paragraph;
 }
 
+async function analyzeParagraphBatchInPaper(paper, paragraphs, settings, options = {}) {
+  if (paragraphs.length === 1) {
+    await analyzeParagraphInPaper(paper, paragraphs[0], settings, options);
+    return paragraphs;
+  }
+
+  const content = await callModel(settings, buildParagraphBatchAnalysisMessages(paper, paragraphs), {
+    signal: options.signal,
+    maxTokens: Math.min(12000, Math.max(2400, paragraphs.length * 1600)),
+    timeoutMs: getBatchAnalysisTimeoutMs(paragraphs.length, settings),
+  });
+  const parsed = parseBatchAnalysisResult(content);
+  const results = new Map(parsed.map((item) => [String(item.paragraphId || item.id || ""), item]));
+  const missing = [];
+  for (const paragraph of paragraphs) {
+    const result = results.get(paragraph.id);
+    if (!result) {
+      missing.push(paragraph.id);
+      continue;
+    }
+
+    paragraph.translation = result.translation || "";
+    paragraph.explanation = result.explanation || "";
+    paragraph.keyTerms = normalizeKeywordList(result.keyTerms || result.keywords).slice(0, 16);
+    paragraph.analysisStatus = "done";
+    paragraph.analysisError = "";
+    paragraph.updatedAt = new Date().toISOString();
+  }
+
+  if (missing.length) {
+    throw new Error(`Batch response missed paragraphs: ${missing.join(", ")}`);
+  }
+
+  return paragraphs;
+}
+
+function getBatchAnalysisTimeoutMs(batchLength, settings = {}) {
+  const provider = String(settings.provider || "");
+  const baseUrl = String(settings.baseUrl || "");
+  const agentLike = provider.startsWith("claude") || baseUrl.startsWith("local:claude");
+  const baseMs = agentLike ? 180_000 : 90_000;
+  const perParagraphMs = agentLike ? 45_000 : 18_000;
+  return Math.min(agentLike ? 480_000 : 180_000, baseMs + Math.max(0, batchLength - 1) * perParagraphMs);
+}
+
+function parseBatchAnalysisResult(content) {
+  const parsed = parseModelJson(content);
+  if (Array.isArray(parsed)) {
+    return parsed;
+  }
+
+  if (Array.isArray(parsed.items)) {
+    return parsed.items;
+  }
+
+  if (Array.isArray(parsed.paragraphs)) {
+    return parsed.paragraphs;
+  }
+
+  if (Array.isArray(parsed.results)) {
+    return parsed.results;
+  }
+
+  return Object.entries(parsed)
+    .filter(([, value]) => value && typeof value === "object")
+    .map(([paragraphId, value]) => ({ paragraphId, ...value }));
+}
+
 function buildParagraphAnalysisMessages(paper, paragraph) {
   const section = (paper.sections || []).find((item) => item.id === paragraph.sectionId);
   const analysisContext = buildParagraphAnalysisContext(paper, paragraph);
@@ -1089,6 +1325,58 @@ function buildParagraphAnalysisMessages(paper, paragraph) {
       ].join("\n"),
     },
   ];
+}
+
+function buildParagraphBatchAnalysisMessages(paper, paragraphs) {
+  const globalContext = buildPaperProfileContext(paper) || "无。";
+  return [
+    {
+      role: "system",
+      content:
+        "你是一个严谨的论文精读助手。必须忠于论文原文，不编造。请分别分析批次中的每个 paragraphId；上下文只用于理解术语、承接关系和图表引用，不要把上下文内容误当作当前段落翻译。请只输出合法 JSON，不要使用 Markdown 代码块。涉及公式时请保留 LaTeX，并用 $...$ 或 $$...$$ 包裹。",
+    },
+    {
+      role: "user",
+      content: [
+        "请批量分析下面这些论文段落。",
+        "",
+        "全局上下文:",
+        truncateText(globalContext, 900),
+        "",
+        "段落列表:",
+        ...paragraphs.map((paragraph) => formatBatchAnalysisParagraph(paper, paragraph)),
+        "",
+        "输出 JSON 格式:",
+        "{",
+        '  "items": [',
+        '    { "paragraphId": "para_xxx", "translation": "忠实中文翻译，保留必要英文术语", "explanation": "中文讲解，说明这段在论文中的作用、关键概念和阅读难点", "keyTerms": ["术语1", "术语2"] }',
+        "  ]",
+        "}",
+      ].join("\n"),
+    },
+  ];
+}
+
+function formatBatchAnalysisParagraph(paper, paragraph) {
+  const section = (paper.sections || []).find((item) => item.id === paragraph.sectionId);
+  const pageLabel = paragraph.pageEndNumber && paragraph.pageEndNumber !== paragraph.pageNumber
+    ? `${paragraph.pageNumber}-${paragraph.pageEndNumber}`
+    : `${paragraph.pageNumber}`;
+  const context = truncateText(
+    buildParagraphAnalysisContext(paper, paragraph),
+    BATCH_ANALYSIS_CONTEXT_TOTAL_LIMIT,
+  );
+
+  return [
+    `<paragraph id="${paragraph.id}">`,
+    `章节: ${section?.title || "未知章节"}`,
+    `页码: ${pageLabel}`,
+    "上下文:",
+    context || "无额外上下文。",
+    "原文:",
+    paragraph.sourceText,
+    "</paragraph>",
+  ].join("\n");
 }
 
 function buildParagraphAnalysisContext(paper, paragraph) {
@@ -2338,6 +2626,15 @@ function clampNumber(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
+function readIntegerEnv(name, defaultValue, min, max) {
+  const value = Number(process.env[name]);
+  if (!Number.isFinite(value)) {
+    return defaultValue;
+  }
+
+  return Math.trunc(clampNumber(value, min, max));
+}
+
 function classifyPageArtifact(block) {
   const text = normalizeArtifactText(block?.text || "");
   if (!text) {
@@ -3311,11 +3608,19 @@ function normalizePopplerText(text) {
 async function callModel(settings, messages, options = {}) {
   const cleanSettings = resolveSettingsForModel(settings);
   if (cleanSettings.baseUrl === "local:claude-kimi") {
-    return callClaudeAgent(cleanSettings, messages, { usePageKimiKey: true, signal: options.signal });
+    return callClaudeAgent(cleanSettings, messages, {
+      usePageKimiKey: true,
+      signal: options.signal,
+      timeoutMs: options.timeoutMs,
+    });
   }
 
   if (cleanSettings.baseUrl === "local:claude-config") {
-    return callClaudeAgent(cleanSettings, messages, { usePageKimiKey: false, signal: options.signal });
+    return callClaudeAgent(cleanSettings, messages, {
+      usePageKimiKey: false,
+      signal: options.signal,
+      timeoutMs: options.timeoutMs,
+    });
   }
 
   const endpoint = getChatCompletionsEndpoint(cleanSettings.baseUrl);
@@ -3328,7 +3633,7 @@ async function callModel(settings, messages, options = {}) {
       options.signal.addEventListener("abort", abortFromExternalSignal, { once: true });
     }
   }
-  const timeout = setTimeout(() => controller.abort(), 90_000);
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 90_000);
 
   try {
     let response;
@@ -3444,7 +3749,7 @@ function callClaudeAgent(settings, messages, options = {}) {
       settled = true;
       options.signal?.removeEventListener("abort", abortHandler);
       reject(new Error("Claude Code 本地 Agent 调用超时。"));
-    }, 180_000);
+    }, options.timeoutMs || 180_000);
     const abortHandler = () => {
       if (settled) {
         return;
