@@ -291,6 +291,11 @@ select:focus {
   backdrop-filter: blur(10px);
 }
 
+.reader-toolbar > div:first-child {
+  min-width: 0;
+  flex: 1 1 280px;
+}
+
 .reader-toolbar h2 {
   font-size: 24px;
 }
@@ -298,13 +303,25 @@ select:focus {
 .toolbar-actions {
   display: grid;
   gap: 10px;
-  width: min(420px, 45vw);
+  flex: 0 1 640px;
+  width: min(640px, 64vw);
+  min-width: 360px;
 }
 
 .toolbar-buttons {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   justify-content: flex-end;
+}
+
+.toolbar-buttons .secondary-button {
+  flex: 0 0 auto;
+  min-width: 0;
+  padding-inline: 11px;
+  font-size: 13px;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .empty-state {
@@ -894,14 +911,17 @@ pre.artifact-viewer-caption {
 
   .toolbar-actions {
     width: 100%;
+    min-width: 0;
   }
 
   .toolbar-buttons {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
     justify-content: stretch;
   }
 
   .toolbar-buttons .secondary-button {
-    flex: 1;
+    width: 100%;
   }
 
   .analysis-grid {

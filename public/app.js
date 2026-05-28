@@ -1977,8 +1977,8 @@ function updateAutoButtons() {
   els.autoAnalyzeButton.disabled = !state.paper || busy;
   els.resumeAnalyzeButton.disabled = !state.paper || busy || missingCount === 0;
   els.resumeAnalyzeButton.textContent = missingCount
-    ? `补跑失败/未完成 ${missingCount}`
-    : "补跑失败/未完成";
+    ? `补跑未完成 ${missingCount}`
+    : "补跑未完成";
   els.rerunAnalyzeButton.disabled = !state.paper || busy;
   els.stopAutoButton.classList.toggle("hidden", !state.autoAnalyze.running);
   els.stopAutoButton.disabled = !state.autoAnalyze.running || state.autoAnalyze.stopRequested;
