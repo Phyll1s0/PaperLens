@@ -45,6 +45,12 @@ const TMP_DIR = path.join(CACHE_DIR, "tmp");
 const MAX_UPLOAD_BYTES = 120 * 1024 * 1024;
 const JSON_BACKUP_RETENTION = readIntegerEnv("PAPERLENS_JSON_BACKUP_RETENTION", 8, 0, 50);
 const JSON_BACKUP_MIN_INTERVAL_MS = readIntegerEnv("PAPERLENS_JSON_BACKUP_MIN_INTERVAL_SECONDS", 300, 0, 86_400) * 1000;
+const MAX_ANALYSIS_JOB_PARAGRAPHS = readIntegerEnv("PAPERLENS_MAX_ANALYSIS_JOB_PARAGRAPHS", 420, 0, 5000);
+const MAX_ANALYSIS_JOB_CHARS = readIntegerEnv("PAPERLENS_MAX_ANALYSIS_JOB_CHARS", 360_000, 0, 5_000_000);
+const MAX_AI_SEGMENTATION_PAGES = readIntegerEnv("PAPERLENS_MAX_AI_SEGMENTATION_PAGES", 80, 0, 1000);
+const MAX_OCR_JOB_PAGES = readIntegerEnv("PAPERLENS_MAX_OCR_JOB_PAGES", 120, 0, 1000);
+const MAX_VISUAL_REBUILD_PAPERS = readIntegerEnv("PAPERLENS_MAX_VISUAL_REBUILD_PAPERS", 80, 0, 5000);
+const MAX_VISUAL_REBUILD_PAGES = readIntegerEnv("PAPERLENS_MAX_VISUAL_REBUILD_PAGES", 1200, 0, 20_000);
 const OCR_LANGUAGE = process.env.PAPERLENS_OCR_LANGUAGE || process.env.PAPERLENS_OCR_LANG || "eng";
 const OCR_TIMEOUT_MS = readIntegerEnv("PAPERLENS_OCR_TIMEOUT_SECONDS", 1800, 60, 7200) * 1000;
 const ARTIFACT_CROP_VERSION = 10;
@@ -262,7 +268,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     console.error(error);
-    return json(res, { error: error.message || "Internal server error" }, error.statusCode || 500);
+    const payload = { error: error.message || "Internal server error" };
+    if (error.resourceLimit) {
+      payload.resourceLimit = error.resourceLimit;
+    }
+    return json(res, payload, error.statusCode || 500);
   }
 });
 
@@ -392,6 +402,12 @@ async function handleArtifactCropSvg(req, res, paperId, artifactId) {
 
 async function handleRebuildVisualArtifacts(res, paperId) {
   const paper = await loadPaper(paperId);
+  enforcePageResourceLimit({
+    label: "单篇视觉重建",
+    pageCount: getPaperPageCount(paper),
+    limit: MAX_VISUAL_REBUILD_PAGES,
+    envName: "PAPERLENS_MAX_VISUAL_REBUILD_PAGES",
+  });
   const result = rebuildPaperVisualArtifacts(paper, { force: true });
   if (!result.changed) {
     const status = result.reason === "missing-extraction-pages" ? 400 : 200;
@@ -427,12 +443,19 @@ async function handleRebuildAllVisualArtifacts(res) {
     rebuilt: 0,
     skipped: 0,
     failed: 0,
+    resourceLimited: 0,
     pages: 0,
+    scannedPages: 0,
     artifacts: 0,
     pixelRefined: 0,
     lowConfidence: 0,
+    resourceLimits: getResourceLimitsStatus().visualRebuild,
   };
   const results = [];
+  const budget = {
+    papers: 0,
+    pages: 0,
+  };
 
   for (const file of files) {
     if (!file.endsWith(".json") || file === "jobs.json" || file === "secrets.json") {
@@ -447,6 +470,23 @@ async function handleRebuildAllVisualArtifacts(res) {
 
       summary.papers += 1;
       const paper = await loadPaper(raw.id);
+      const pageCount = getPaperPageCount(paper);
+      const resourceBlock = getVisualRebuildResourceBlock(budget, pageCount);
+      if (resourceBlock) {
+        summary.skipped += 1;
+        summary.resourceLimited += 1;
+        results.push({
+          id: raw.id,
+          title: raw.title || raw.filename || raw.id,
+          status: "skipped",
+          reason: "resource-limit",
+          message: resourceBlock.message,
+        });
+        continue;
+      }
+      budget.papers += 1;
+      budget.pages += pageCount;
+      summary.scannedPages = budget.pages;
       const result = rebuildPaperVisualArtifacts(paper, { force: true });
       if (!result.changed) {
         summary.skipped += 1;
@@ -502,12 +542,18 @@ async function handleSegmentPaper(req, res, paperId) {
   const payload = await readJson(req);
   const paper = await loadPaper(paperId);
   const pages = Array.isArray(paper.extractionPages) ? paper.extractionPages : [];
-  const settings = await secureSettingsForJob(payload.settings || {});
   const signal = getResponseAbortSignal(res);
 
   if (!pages.length) {
     return json(res, { error: "这篇论文缺少原始页面文本，无法重新 AI 分段。请重新上传 PDF。" }, 400);
   }
+  enforcePageResourceLimit({
+    label: "AI 分段",
+    pageCount: pages.length,
+    limit: MAX_AI_SEGMENTATION_PAGES,
+    envName: "PAPERLENS_MAX_AI_SEGMENTATION_PAGES",
+  });
+  const settings = await secureSettingsForJob(payload.settings || {});
 
   const segmented = await segmentPaperWithAi(paper, settings, { signal });
   await savePaper(segmented);
@@ -793,6 +839,7 @@ async function handleCreateAnalysisJob(req, res, paperId) {
 
     return rerunAll || forceSelected || needsAnalysisNow;
   });
+  const resourceEstimate = buildAnalysisResourceEstimate(targets);
 
   if (!targets.length) {
     if (cacheHits > 0 || cacheWarmups > 0 || segmentationAuditChanged) {
@@ -805,6 +852,7 @@ async function handleCreateAnalysisJob(req, res, paperId) {
       message: cacheHits > 0 ? `已从缓存恢复 ${cacheHits} 段，没有待分析段落。` : "没有待分析段落。",
     });
   }
+  enforceAnalysisResourceLimits(resourceEstimate);
 
   for (const paragraph of targets) {
     if (rerunAll || forceSelected) {
@@ -821,6 +869,7 @@ async function handleCreateAnalysisJob(req, res, paperId) {
     settings,
     rerunAll,
     cacheHits,
+    resourceEstimate,
   });
   jobStore.jobs.set(job.id, job);
   await persistJobs();
@@ -866,6 +915,12 @@ async function handleCreateOcrJob(res, paperId) {
       message: "这篇 PDF 已有可阅读文本，不需要 OCR。",
     });
   }
+  enforcePageResourceLimit({
+    label: "OCR",
+    pageCount: getPaperPageCount(paper),
+    limit: MAX_OCR_JOB_PAGES,
+    envName: "PAPERLENS_MAX_OCR_JOB_PAGES",
+  });
 
   const job = createOcrJob({ paper });
   paper.status = "needs_ocr";
@@ -941,6 +996,7 @@ async function handleRetryFailedJob(res, jobId) {
   if (!failedItems.length) {
     return json(res, { job: serializeJob(job), message: "没有失败项需要重跑。" });
   }
+  enforceAnalysisResourceLimits(buildAnalysisRetryResourceEstimate(failedItems));
 
   for (const item of failedItems) {
     item.status = "queued";
@@ -1607,6 +1663,7 @@ function normalizeLoadedJob(job) {
     retryFailedOnly: Boolean(job.retryFailedOnly),
     cacheHits: Number.isFinite(Number(job.cacheHits)) ? Number(job.cacheHits) : 0,
     adaptiveBatchSize: Number.isFinite(Number(job.adaptiveBatchSize)) ? Number(job.adaptiveBatchSize) : null,
+    resourceEstimate: normalizeJobResourceEstimate(job.resourceEstimate),
     settings: job.settings || {},
     items: normalizedItems,
     total: normalizedItems.length,
@@ -1703,7 +1760,7 @@ function recoverInterruptedJobs() {
   }
 }
 
-function createAnalysisJob({ paper, paragraphIds, settings, rerunAll, cacheHits = 0 }) {
+function createAnalysisJob({ paper, paragraphIds, settings, rerunAll, cacheHits = 0, resourceEstimate = null }) {
   const now = new Date().toISOString();
   return {
     id: `job_${Date.now()}_${randomUUID().slice(0, 8)}`,
@@ -1716,6 +1773,7 @@ function createAnalysisJob({ paper, paragraphIds, settings, rerunAll, cacheHits 
     retryFailedOnly: false,
     cacheHits: Number(cacheHits || 0),
     adaptiveBatchSize: null,
+    resourceEstimate: resourceEstimate || null,
     settings,
     items: paragraphIds.map((paragraphId) => ({
       paragraphId,
@@ -1809,6 +1867,7 @@ function serializeJob(job) {
     retryFailedOnly: Boolean(job.retryFailedOnly),
     cacheHits: Number(job.cacheHits || 0),
     adaptiveBatchSize: Number(job.adaptiveBatchSize || 0),
+    resourceEstimate: job.resourceEstimate || null,
     total: job.total,
     completed: job.completed,
     failed: job.failed,
@@ -1851,6 +1910,7 @@ function serializeJobSummary(job) {
     status: job.status,
     retryFailedOnly: Boolean(job.retryFailedOnly),
     cacheHits: Number(job.cacheHits || 0),
+    resourceEstimate: job.resourceEstimate || null,
     total: job.total,
     completed: job.completed,
     failed: job.failed,
@@ -2520,6 +2580,131 @@ function estimateAnalysisSeconds(paragraphCount, batchSize, concurrency, expecte
   const batchCount = Math.ceil(paragraphCount / Math.max(1, Number(batchSize || 1)));
   return Math.max(1, Math.ceil(batchCount / Math.max(1, Number(concurrency || 1)))) *
     Math.max(1, Number(expectedBatchSeconds || 45));
+}
+
+function buildAnalysisResourceEstimate(paragraphs = []) {
+  const pageNumbers = new Set();
+  let chars = 0;
+  for (const paragraph of paragraphs) {
+    chars += String(paragraph?.sourceText || "").length;
+    const pageStart = normalizePositivePageNumber(paragraph?.pageNumber, 0);
+    const pageEnd = normalizePositivePageNumber(paragraph?.pageEndNumber || paragraph?.pageNumber, pageStart);
+    for (let page = pageStart; page <= pageEnd && page > 0; page += 1) {
+      pageNumbers.add(page);
+    }
+  }
+
+  return {
+    paragraphs: paragraphs.length,
+    chars,
+    approxTokens: approximateTokenCount(chars),
+    pages: pageNumbers.size,
+  };
+}
+
+function buildAnalysisRetryResourceEstimate(items = []) {
+  return {
+    paragraphs: items.length,
+    chars: 0,
+    approxTokens: 0,
+    pages: 0,
+    source: "retry-failed",
+  };
+}
+
+function normalizeJobResourceEstimate(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  return {
+    paragraphs: Number(value.paragraphs || 0),
+    chars: Number(value.chars || 0),
+    approxTokens: Number(value.approxTokens || 0),
+    pages: Number(value.pages || 0),
+    source: value.source ? String(value.source) : "",
+  };
+}
+
+function enforceAnalysisResourceLimits(estimate) {
+  if (isResourceLimitExceeded(estimate.paragraphs, MAX_ANALYSIS_JOB_PARAGRAPHS)) {
+    throw createResourceLimitError(
+      `这次分析包含 ${estimate.paragraphs} 段，超过上限 ${MAX_ANALYSIS_JOB_PARAGRAPHS} 段。请先隐藏噪声段落、分批补跑，或设置 PAPERLENS_MAX_ANALYSIS_JOB_PARAGRAPHS 调高。`,
+      "analysis.paragraphs",
+      estimate.paragraphs,
+      MAX_ANALYSIS_JOB_PARAGRAPHS,
+      "PAPERLENS_MAX_ANALYSIS_JOB_PARAGRAPHS",
+    );
+  }
+
+  if (isResourceLimitExceeded(estimate.chars, MAX_ANALYSIS_JOB_CHARS)) {
+    throw createResourceLimitError(
+      `这次分析约 ${formatInteger(estimate.chars)} 字符，超过上限 ${formatInteger(MAX_ANALYSIS_JOB_CHARS)} 字符。请分批补跑，或设置 PAPERLENS_MAX_ANALYSIS_JOB_CHARS 调高。`,
+      "analysis.chars",
+      estimate.chars,
+      MAX_ANALYSIS_JOB_CHARS,
+      "PAPERLENS_MAX_ANALYSIS_JOB_CHARS",
+    );
+  }
+}
+
+function enforcePageResourceLimit({ label, pageCount, limit, envName }) {
+  if (!isResourceLimitExceeded(pageCount, limit)) {
+    return;
+  }
+
+  throw createResourceLimitError(
+    `${label}需要处理 ${pageCount} 页，超过上限 ${limit} 页。请拆分 PDF、改为单篇/分批处理，或设置 ${envName} 调高。`,
+    `${label}.pages`,
+    pageCount,
+    limit,
+    envName,
+  );
+}
+
+function getVisualRebuildResourceBlock(budget, nextPageCount) {
+  if (isResourceLimitExceeded(budget.papers + 1, MAX_VISUAL_REBUILD_PAPERS)) {
+    return {
+      type: "visualRebuild.papers",
+      message: `批量视觉重建最多处理 ${MAX_VISUAL_REBUILD_PAPERS} 篇论文；剩余论文已跳过。`,
+    };
+  }
+
+  if (isResourceLimitExceeded(budget.pages + nextPageCount, MAX_VISUAL_REBUILD_PAGES)) {
+    return {
+      type: "visualRebuild.pages",
+      message: `批量视觉重建最多处理 ${MAX_VISUAL_REBUILD_PAGES} 页；剩余论文已跳过。`,
+    };
+  }
+
+  return null;
+}
+
+function getPaperPageCount(paper) {
+  return Number(paper?.pageCount || paper?.pageImages?.length || paper?.extractionPages?.length || 0);
+}
+
+function createResourceLimitError(message, type, value, limit, envName) {
+  const error = badRequest(message);
+  error.resourceLimit = {
+    type,
+    value,
+    limit,
+    envName,
+  };
+  return error;
+}
+
+function isResourceLimitExceeded(value, limit) {
+  return Number(limit || 0) > 0 && Number(value || 0) > Number(limit);
+}
+
+function approximateTokenCount(chars) {
+  return Math.ceil(Number(chars || 0) / 3.5);
+}
+
+function formatInteger(value) {
+  return new Intl.NumberFormat("en-US").format(Number(value || 0));
 }
 
 function getAnalysisProfileLabel(profile) {
@@ -6014,6 +6199,7 @@ async function buildHealthPayload(req = null) {
     queue: queueStatus,
     security: buildAuthStatus(req),
     persistence: buildPersistenceStatus(),
+    resourceLimits: getResourceLimitsStatus(),
     ...versionStatus,
   };
 }
@@ -6028,6 +6214,26 @@ function buildPersistenceStatus() {
     backupMinIntervalSeconds: Math.round(JSON_BACKUP_MIN_INTERVAL_MS / 1000),
     recovery: "newest-valid-backup",
     secretsBackedUp: Boolean(SECRET_ENCRYPTION_KEY && JSON_BACKUP_RETENTION > 0),
+  };
+}
+
+function getResourceLimitsStatus() {
+  return {
+    analysis: {
+      maxParagraphs: MAX_ANALYSIS_JOB_PARAGRAPHS,
+      maxChars: MAX_ANALYSIS_JOB_CHARS,
+      maxApproxTokens: approximateTokenCount(MAX_ANALYSIS_JOB_CHARS),
+    },
+    segmentation: {
+      maxPages: MAX_AI_SEGMENTATION_PAGES,
+    },
+    ocr: {
+      maxPages: MAX_OCR_JOB_PAGES,
+    },
+    visualRebuild: {
+      maxPapers: MAX_VISUAL_REBUILD_PAPERS,
+      maxPages: MAX_VISUAL_REBUILD_PAGES,
+    },
   };
 }
 
@@ -9626,7 +9832,8 @@ function formatVisualRebuildAllMessage(summary = {}) {
     `页面 ${summary.pages || 0}`,
     `图表/公式/代码 ${summary.artifacts || 0} 个`,
     `失败 ${summary.failed || 0}`,
-  ].join(" · ");
+    summary.resourceLimited ? `资源保护跳过 ${summary.resourceLimited}` : "",
+  ].filter(Boolean).join(" · ");
 }
 
 function inferStoredPageSize(paper, page) {

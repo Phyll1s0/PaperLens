@@ -7,7 +7,7 @@
 - [x] 公网部署风险还没有兜住：已支持 `PAPERLENS_ACCESS_TOKEN` 访问令牌保护 API/导出/assets，并支持服务端 API Key 加密存储和公网风险提示。
 - [x] OpenAI-compatible Provider 的代理链路不够稳定：已为普通模型请求接入 PaperLens 代理传输，支持 HTTP/HTTPS proxy、SOCKS5、NO_PROXY 和诊断显示。
 - [ ] Claude Code + Kimi Code Key 仍依赖本机环境：需要 `claude` CLI、隔离配置、代理和预算状态都正确，别人复现成本偏高。
-- [ ] 长任务缺少硬性资源保护：大 PDF、批量重建视觉结构、批量补跑会消耗 CPU、磁盘和模型预算，需要更明确的限流与取消策略。
+- [x] 长任务缺少硬性资源保护：已为分析任务、AI 分段、OCR、视觉重建加入可配置硬上限和结构化超限错误。
 - [x] 现在主要依赖 JSON 文件存储：已加入原子写入、最近备份、备份保留和损坏后从最近有效备份恢复。
 - [ ] 视觉结构仍是启发式识别：复杂双栏、多图组合、跨页图、公式/代码混排时仍可能裁剪过大或误分类。
 - [x] AI 分段缺少人工编辑闭环：已支持在 UI 中合并、拆分、隐藏/恢复噪声段落、改章节，并只把受影响段落标记为待补跑。
@@ -33,6 +33,7 @@
 
 ## Done
 
+- [x] 长任务资源保护：新增 `PAPERLENS_MAX_ANALYSIS_JOB_PARAGRAPHS`、`PAPERLENS_MAX_ANALYSIS_JOB_CHARS`、`PAPERLENS_MAX_AI_SEGMENTATION_PAGES`、`PAPERLENS_MAX_OCR_JOB_PAGES`、`PAPERLENS_MAX_VISUAL_REBUILD_*`；health 和前端状态显示当前上限。
 - [x] JSON 持久化加固：论文、Job、加密 Secrets 走原子写入；论文/Job 保存后生成最近备份，读取损坏时自动从最新有效备份恢复；health 暴露 persistence 状态。
 - [x] 分段编辑闭环：段落卡片支持隐藏/恢复、合并下段、用 `||` 拆分、改章节；后端保存人工覆盖，重建章节上下文和图表引用，只清空变动段落的旧分析。
 - [x] Provider 代理传输升级：OpenAI-compatible 请求不再依赖普通 `fetch` 的代理能力，后端可通过 HTTP CONNECT 或 SOCKS5 tunnel 发起模型请求，诊断页显示传输模式和代理来源。

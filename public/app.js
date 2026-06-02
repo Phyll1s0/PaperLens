@@ -1352,6 +1352,10 @@ function getServiceStatusDetails(payload = {}) {
       label: "访问",
       value: formatServiceSecurity(payload.security),
     },
+    {
+      label: "保护",
+      value: formatServiceResourceLimits(payload.resourceLimits),
+    },
   ];
 
   if (queue.activeJob) {
@@ -1394,6 +1398,25 @@ function formatServiceQueue(queue = {}) {
   }
 
   return `空闲 · ${Number(queue.savedJobs || 0)} 个历史任务`;
+}
+
+function formatServiceResourceLimits(resourceLimits = {}) {
+  const analysis = resourceLimits.analysis || {};
+  const ocr = resourceLimits.ocr || {};
+  const visual = resourceLimits.visualRebuild || {};
+  const analysisLimit = analysis.maxParagraphs || analysis.maxChars
+    ? `分析 ${formatLimitValue(analysis.maxParagraphs, "段")}/${formatLimitValue(analysis.maxChars, "字")}`
+    : "分析不限";
+  const ocrLimit = ocr.maxPages ? `OCR ${ocr.maxPages}页` : "OCR不限";
+  const visualLimit = visual.maxPapers || visual.maxPages
+    ? `视觉 ${formatLimitValue(visual.maxPapers, "篇")}/${formatLimitValue(visual.maxPages, "页")}`
+    : "视觉不限";
+  return `${analysisLimit} · ${ocrLimit} · ${visualLimit}`;
+}
+
+function formatLimitValue(value, unit) {
+  const number = Number(value || 0);
+  return number > 0 ? `${number}${unit}` : `不限${unit}`;
 }
 
 function formatActiveServiceJob(job = {}) {
