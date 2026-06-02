@@ -254,9 +254,7 @@ async function handleUpload(req, res) {
   });
 
   if (!getReadingParagraphs(paper).length) {
-    return json(res, {
-      error: "没有从 PDF 中提取到可阅读文本。这个 PDF 可能是扫描版，暂时需要先 OCR 后再上传。",
-    }, 422);
+    markPaperNeedsOcr(paper);
   }
 
   await savePaper(paper);
@@ -669,6 +667,7 @@ async function listPapers(searchParams = new URLSearchParams()) {
         readingProgress: summary.readingProgress,
         exportHistory: summary.exportHistory,
         latestExport: summary.latestExport,
+        ocr: summary.ocr,
         matchSnippet: summary.matchSnippet,
         matchedParagraphCount: summary.matchedParagraphCount,
         updatedAt: paper.updatedAt,
@@ -717,6 +716,7 @@ function summarizePaperForLibrary(paper, query = "") {
     readingProgress,
     exportHistory,
     latestExport,
+    ocr: normalizePaperOcrStatus(paper),
     searchMatched: !query || haystack.includes(query),
     matchedParagraphCount: matchedParagraphs.length,
     matchSnippet: query ? buildLibraryMatchSnippet(paper, matchedParagraphs[0], query) : "",
@@ -2829,6 +2829,54 @@ function buildPaperRecord({ id, filename, pdfPath, extraction }) {
 
   attachParagraphArtifactLinks(paper);
   return paper;
+}
+
+function markPaperNeedsOcr(paper) {
+  paper.status = "needs_ocr";
+  paper.segmentationMode = "ocr-required";
+  paper.ocr = buildPaperOcrStatus(paper, {
+    status: "required",
+    needed: true,
+    reason: "no-readable-text",
+  });
+  paper.updatedAt = new Date().toISOString();
+  return paper;
+}
+
+function buildPaperOcrStatus(paper, patch = {}) {
+  const extractionPages = Array.isArray(paper.extractionPages) ? paper.extractionPages : [];
+  const textCharacters = extractionPages.reduce((total, page) =>
+    total + String(page.text || "").replace(/\s+/g, "").length, 0);
+  const pageImages = Array.isArray(paper.pageImages) ? paper.pageImages : [];
+  const readingParagraphs = getReadingParagraphs(paper);
+  return {
+    needed: Boolean(patch.needed),
+    status: patch.status || "not_required",
+    reason: patch.reason || "",
+    detectedAt: patch.detectedAt || new Date().toISOString(),
+    pageCount: Number(paper.pageCount || extractionPages.length || 0),
+    pageImageCount: pageImages.filter((page) => page.imagePath).length,
+    textCharacters,
+    readableParagraphCount: readingParagraphs.length,
+    recommendation: "请先用 OCRmyPDF/Tesseract 生成可搜索 PDF，再重新上传 OCR 后的 PDF。",
+  };
+}
+
+function normalizePaperOcrStatus(paper) {
+  if (paper?.ocr?.needed || paper?.status === "needs_ocr") {
+    return {
+      ...(paper.ocr || {}),
+      ...buildPaperOcrStatus(paper, {
+        needed: true,
+        status: paper.ocr?.status || "required",
+        reason: paper.ocr?.reason || "no-readable-text",
+        detectedAt: paper.ocr?.detectedAt || new Date().toISOString(),
+      }),
+      needed: true,
+    };
+  }
+
+  return paper?.ocr || null;
 }
 
 function buildPaperMarkdownExport(paper, baseUrl = "") {

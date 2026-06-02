@@ -613,6 +613,46 @@ select:focus {
   gap: 16px;
 }
 
+.ocr-notice {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid rgba(180, 83, 42, 0.24);
+  border-radius: 8px;
+  background: #fffaf4;
+  color: #332923;
+}
+
+.ocr-notice h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.ocr-notice p,
+.ocr-steps {
+  margin: 0;
+  color: #6a5144;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.ocr-steps {
+  padding-left: 18px;
+}
+
+.ocr-command {
+  margin: 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  border: 1px solid rgba(180, 83, 42, 0.18);
+  border-radius: 8px;
+  background: #fff;
+  color: #2d2926;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .section-divider {
   position: sticky;
   top: 86px;

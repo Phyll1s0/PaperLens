@@ -725,10 +725,16 @@ async function uploadPdf() {
     state.paper = paper;
     state.query = "";
     els.searchInput.value = "";
-    setStatus("解析完成");
+    setStatus(isOcrRequiredPaper(paper)
+      ? "检测到扫描版 PDF：需要先 OCR，再进行分段和讲解。"
+      : "解析完成",
+      isOcrRequiredPaper(paper));
     renderPaper();
     loadRecentPapers();
     setBusy(false);
+    if (isOcrRequiredPaper(paper)) {
+      return;
+    }
     await runPostUploadPipeline();
   } catch (error) {
     setStatus(error.message, true);
@@ -739,6 +745,11 @@ async function uploadPdf() {
 
 async function runPostUploadPipeline() {
   if (!state.paper) {
+    return;
+  }
+
+  if (isOcrRequiredPaper(state.paper)) {
+    setStatus("这篇 PDF 需要 OCR 后才能进行 AI 分段和讲解。", true);
     return;
   }
 
@@ -764,6 +775,11 @@ async function runPostUploadPipeline() {
 
 async function segmentPaperWithAi(options = {}) {
   if (!state.paper) {
+    return false;
+  }
+
+  if (isOcrRequiredPaper(state.paper)) {
+    setStatus("扫描版 PDF 需要先 OCR，无法直接 AI 分段。", true);
     return false;
   }
 
@@ -857,7 +873,8 @@ function renderRecentPapers(papers) {
     const progress = Number(paper.readingProgress?.percent || 0);
     const exportLabel = paper.latestExport ? ` · ${paper.latestExport.format}` : "";
     const matchLabel = paper.matchedParagraphCount ? ` · 命中 ${paper.matchedParagraphCount}` : "";
-    meta.textContent = `${paper.pageCount} 页 · ${paper.paragraphCount} 段 · ${progress}%${exportLabel}${matchLabel}`;
+    const ocrLabel = paper.ocr?.needed ? " · 需要 OCR" : "";
+    meta.textContent = `${paper.pageCount} 页 · ${paper.paragraphCount} 段 · ${progress}%${ocrLabel}${exportLabel}${matchLabel}`;
 
     button.append(title, meta);
     if (paper.tags?.length) {
@@ -1186,6 +1203,11 @@ async function startAutoAnalyze(options = {}) {
     return;
   }
 
+  if (isOcrRequiredPaper(state.paper)) {
+    setStatus("扫描版 PDF 需要先 OCR，无法直接翻译讲解。", true);
+    return;
+  }
+
   if (!ensureModelSettings()) {
     return;
   }
@@ -1198,6 +1220,11 @@ async function startAutoAnalyze(options = {}) {
 
 async function resumeMissingAnalysis() {
   if (!state.paper || state.autoAnalyze.running || state.pipelineBusy) {
+    return;
+  }
+
+  if (isOcrRequiredPaper(state.paper)) {
+    setStatus("扫描版 PDF 需要先 OCR，无法补跑分析。", true);
     return;
   }
 
@@ -1244,6 +1271,11 @@ function downloadPaperDocx() {
 
 async function rerunFullPipeline() {
   if (!state.paper || state.autoAnalyze.running || state.pipelineBusy) {
+    return;
+  }
+
+  if (isOcrRequiredPaper(state.paper)) {
+    setStatus("扫描版 PDF 需要先 OCR，无法重分段和全跑。", true);
     return;
   }
 
@@ -1715,6 +1747,7 @@ function renderPaper() {
   els.paperTitle.textContent = paper.title || paper.filename;
   els.paperMeta.textContent = `${paper.pageCount} 页`;
   const readingParagraphs = getReadingParagraphs(paper);
+  const ocrRequired = isOcrRequiredPaper(paper);
   const analyzedCount = readingParagraphs.filter((paragraph) => !needsAnalysis(paragraph)).length;
   const segmentLabels = {
     ai: "AI 分段",
@@ -1726,14 +1759,90 @@ function renderPaper() {
   const exportLabel = paper.exportHistory?.length
     ? ` · 最近导出 ${formatExportHistoryLabel(paper.exportHistory[0])}`
     : "";
-  els.paperStats.textContent = `${readingParagraphs.length} 个段落 · 已讲解 ${analyzedCount} · ${progress}% · ${segmentLabel}${exportLabel}`;
+  els.paperStats.textContent = ocrRequired
+    ? `${paper.pageCount || 0} 页 · 需要 OCR · 已生成 ${paper.ocr?.pageImageCount || paper.pageImages?.length || 0} 张页图`
+    : `${readingParagraphs.length} 个段落 · 已讲解 ${analyzedCount} · ${progress}% · ${segmentLabel}${exportLabel}`;
   els.paperLibraryControls.classList.remove("hidden");
   els.favoriteButton.textContent = paper.favorite ? "★" : "☆";
   els.favoriteButton.setAttribute("aria-pressed", paper.favorite ? "true" : "false");
   els.tagInput.value = (paper.tags || []).join(", ");
-  renderOutline(paper);
-  renderParagraphs(paper);
+  if (ocrRequired) {
+    renderScannedPaper(paper);
+  } else {
+    renderOutline(paper);
+    renderParagraphs(paper);
+  }
   updateAutoButtons();
+}
+
+function isOcrRequiredPaper(paper) {
+  return Boolean(paper?.ocr?.needed || paper?.status === "needs_ocr" || paper?.segmentationMode === "ocr-required");
+}
+
+function renderScannedPaper(paper) {
+  els.outline.replaceChildren();
+  const fragment = document.createDocumentFragment();
+  fragment.append(renderOcrRequiredNotice(paper));
+
+  const pageImages = Array.isArray(paper.pageImages) ? paper.pageImages : [];
+  if (pageImages.length) {
+    for (const pageImage of pageImages.slice(0, 12)) {
+      fragment.append(renderPagePreview(pageImage, []));
+    }
+  } else {
+    const empty = document.createElement("section");
+    empty.className = "ocr-notice";
+    const title = document.createElement("h3");
+    title.textContent = "没有可显示的页面图";
+    const body = document.createElement("p");
+    body.textContent = "当前 PDF 没有可提取文本，也没有生成页面截图。请用 OCR 工具生成可搜索 PDF 后重新上传。";
+    empty.append(title, body);
+    fragment.append(empty);
+  }
+
+  els.paragraphList.replaceChildren(fragment);
+}
+
+function renderOcrRequiredNotice(paper) {
+  const notice = document.createElement("section");
+  notice.className = "ocr-notice";
+
+  const title = document.createElement("h3");
+  title.textContent = "这篇 PDF 需要 OCR";
+
+  const summary = document.createElement("p");
+  const ocr = paper.ocr || {};
+  summary.textContent = [
+    `已检测到 ${ocr.pageCount || paper.pageCount || 0} 页`,
+    `可阅读段落 ${ocr.readableParagraphCount || 0} 个`,
+    `可提取字符 ${ocr.textCharacters || 0} 个`,
+    `页图 ${ocr.pageImageCount || paper.pageImages?.length || 0} 张`,
+  ].join(" · ");
+
+  const steps = document.createElement("ol");
+  steps.className = "ocr-steps";
+  for (const step of [
+    "安装 OCRmyPDF 和 Tesseract。",
+    "用 OCRmyPDF 生成可搜索 PDF。",
+    "把生成后的 OCR PDF 重新上传到 PaperLens。",
+  ]) {
+    const item = document.createElement("li");
+    item.textContent = step;
+    steps.append(item);
+  }
+
+  const commands = document.createElement("pre");
+  commands.className = "ocr-command";
+  commands.textContent = [
+    "brew install ocrmypdf tesseract tesseract-lang",
+    "ocrmypdf --skip-text --deskew --rotate-pages input.pdf output.ocr.pdf",
+  ].join("\n");
+
+  const note = document.createElement("p");
+  note.textContent = "Docker 或 Linux 环境可安装 ocrmypdf、tesseract-ocr 和对应语言包。中文论文通常还需要 tesseract-ocr-chi-sim 或 chi_tra。";
+
+  notice.append(title, summary, steps, commands, note);
+  return notice;
 }
 
 function renderOutline(paper) {
@@ -3332,17 +3441,18 @@ function updateAutoStatus() {
 
 function updateAutoButtons() {
   const busy = state.autoAnalyze.running || state.pipelineBusy || state.maintenanceBusy;
+  const ocrRequired = isOcrRequiredPaper(state.paper);
   const missingCount = state.paper ? getMissingAnalysisCount(state.paper) : 0;
   els.qualityProfileButton.disabled = busy;
   els.fastProfileButton.disabled = busy;
-  els.autoAnalyzeButton.disabled = !state.paper || busy;
-  els.resumeAnalyzeButton.disabled = !state.paper || busy || missingCount === 0;
+  els.autoAnalyzeButton.disabled = !state.paper || busy || ocrRequired;
+  els.resumeAnalyzeButton.disabled = !state.paper || busy || ocrRequired || missingCount === 0;
   els.resumeAnalyzeButton.textContent = missingCount
     ? `补跑未完成 ${missingCount}`
     : "补跑未完成";
   els.downloadNotesButton.disabled = !state.paper;
   els.downloadDocxButton.disabled = !state.paper;
-  els.rerunAnalyzeButton.disabled = !state.paper || busy;
+  els.rerunAnalyzeButton.disabled = !state.paper || busy || ocrRequired;
   els.rebuildVisualButton.disabled = !state.paper || busy;
   els.rebuildVisualButton.textContent = state.maintenanceBusy ? "重建中" : "重建图表";
   els.rebuildAllVisualButton.disabled = busy;
