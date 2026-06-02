@@ -36,6 +36,7 @@ const els = {
   modelStatusText: document.querySelector("#modelStatusText"),
   modelDiagnosticsText: document.querySelector("#modelDiagnosticsText"),
   providerHintText: document.querySelector("#providerHintText"),
+  providerGuide: document.querySelector("#providerGuide"),
   pdfInput: document.querySelector("#pdfInput"),
   aiSegmentInput: document.querySelector("#aiSegmentInput"),
   autoAnalyzeInput: document.querySelector("#autoAnalyzeInput"),
@@ -67,31 +68,37 @@ const els = {
 
 const PROVIDERS = {
   deepseek: {
+    label: "DeepSeek",
     baseUrl: "https://api.deepseek.com",
     model: "deepseek-v4-flash",
     hint: "DeepSeek OpenAI-compatible API。可改用 deepseek-v4-pro 获得更强模型。",
   },
   "claude-kimi-agent": {
+    label: "Claude Code + Kimi Code Key",
     baseUrl: "local:claude-kimi",
     model: "kimi-for-coding",
     hint: "通过本机 Claude Code CLI 调用页面输入的 Kimi Code Key，并隔离 Claude 用户级 settings，避免被本机 OpenSSI 等配置覆盖。",
   },
   "claude-local": {
+    label: "Claude Code 本机配置",
     baseUrl: "local:claude-config",
     model: "sonnet",
     hint: "通过本机 Claude Code 已登录/已配置的账号或 key 调用，不使用页面 API Key，适合使用 OpenSSI 等本机配置。",
   },
   "kimi-code": {
+    label: "Kimi Code",
     baseUrl: "https://api.kimi.com/coding/v1",
     model: "kimi-for-coding",
     hint: "Kimi Code Key 可认证，但官方限制普通 Chat Completion 只面向 Coding Agent；本应用建议使用 Kimi 开放平台 Key。",
   },
   "kimi-platform": {
+    label: "Kimi 开放平台",
     baseUrl: "https://api.moonshot.cn/v1",
     model: "kimi-k2.6",
     hint: "Kimi 开放平台 Key 适合普通 OpenAI-compatible 应用调用。",
   },
   openai: {
+    label: "OpenAI",
     baseUrl: "https://api.openai.com/v1",
     model: "gpt-4.1-mini",
     hint: "OpenAI-compatible 普通 Chat Completion。",
@@ -305,6 +312,7 @@ function updateModelDiagnostics(remoteDiagnostics) {
   const settings = getSettings();
   const endpoint = getChatEndpoint(settings.baseUrl);
   const savedKey = settings.apiKey ? null : getStoredKeyInfo();
+  const isClaudeProvider = settings.baseUrl === "local:claude-kimi" || settings.baseUrl === "local:claude-config";
   const keyPrefix = settings.apiKey.startsWith("sk-kimi-")
     ? "sk-kimi"
     : settings.apiKey.startsWith("sk-")
@@ -322,6 +330,7 @@ function updateModelDiagnostics(remoteDiagnostics) {
     keyFormatOk: settings.provider !== "claude-kimi-agent" || keyPrefix === "sk-kimi",
     proxyPresent: Boolean(settings.proxyUrl),
     proxySource: settings.proxyUrl ? "page" : "none",
+    proxyAppliedToAgent: isClaudeProvider,
   };
 
   const lines = [
@@ -347,6 +356,266 @@ function updateModelDiagnostics(remoteDiagnostics) {
   }
 
   els.modelDiagnosticsText.textContent = lines.join(" · ");
+  renderProviderGuide(diagnostics);
+}
+
+function renderProviderGuide(diagnostics) {
+  if (!els.providerGuide) {
+    return;
+  }
+
+  const settings = getSettings();
+  const guide = getProviderGuide(settings, diagnostics);
+  const fragment = document.createDocumentFragment();
+
+  const header = document.createElement("div");
+  header.className = "provider-guide-header";
+  const title = document.createElement("strong");
+  title.textContent = guide.title;
+  const summary = document.createElement("span");
+  summary.textContent = guide.summary;
+  header.append(title, summary);
+  fragment.append(header);
+
+  const chips = document.createElement("div");
+  chips.className = "provider-guide-chips";
+  for (const chip of guide.chips) {
+    const item = document.createElement("span");
+    item.className = `provider-guide-chip ${chip.status}`;
+    item.textContent = chip.label;
+    chips.append(item);
+  }
+  fragment.append(chips);
+
+  const list = document.createElement("ul");
+  list.className = "provider-guide-list";
+  for (const item of guide.items) {
+    const row = document.createElement("li");
+    row.className = item.status;
+    const marker = document.createElement("span");
+    marker.className = "provider-guide-marker";
+    marker.textContent = item.status === "ok" ? "✓" : item.status === "warn" ? "!" : "•";
+    const text = document.createElement("span");
+    text.textContent = item.text;
+    row.append(marker, text);
+    list.append(row);
+  }
+  fragment.append(list);
+
+  els.providerGuide.replaceChildren(fragment);
+}
+
+function getProviderGuide(settings, diagnostics) {
+  const provider = settings.provider || "custom";
+  const preset = PROVIDERS[provider];
+  const providerLabel = preset?.label || "自定义 Provider";
+  const isClaudeProvider = settings.baseUrl === "local:claude-kimi" || settings.baseUrl === "local:claude-config";
+  const keyRequired = settings.baseUrl !== "local:claude-config";
+  const keyOk = !keyRequired || (Boolean(diagnostics.keyPresent) && diagnostics.keyFormatOk !== false);
+  const keyStatus = getKeyGuideStatus(settings, diagnostics, keyRequired);
+  const cliStatus = getClaudeCliGuideStatus(settings, diagnostics);
+  const proxyStatus = getProxyGuideStatus(settings, diagnostics);
+  const runtimeLabel = diagnostics.runtime?.isDocker ? "Docker" : "本机";
+  const chips = [
+    { label: providerLabel, status: "neutral" },
+    { label: keyStatus.chip, status: keyStatus.status },
+    { label: proxyStatus.chip, status: proxyStatus.status },
+    { label: runtimeLabel, status: diagnostics.runtime?.isDocker ? "warn" : "neutral" },
+  ];
+
+  if (isClaudeProvider) {
+    chips.splice(2, 0, { label: cliStatus.chip, status: cliStatus.status });
+  }
+
+  const items = [
+    { status: "ok", text: `Endpoint：${diagnostics.endpoint || getChatEndpoint(settings.baseUrl)}` },
+    { status: keyStatus.status, text: keyStatus.text },
+    { status: proxyStatus.status, text: proxyStatus.text },
+  ];
+
+  if (isClaudeProvider) {
+    items.splice(2, 0, { status: cliStatus.status, text: cliStatus.text });
+  }
+
+  items.push(...getProviderSpecificGuideItems(settings, diagnostics, { keyOk, isClaudeProvider }));
+
+  return {
+    title: "配置向导",
+    summary: getProviderGuideSummary(settings, diagnostics),
+    chips,
+    items,
+  };
+}
+
+function getKeyGuideStatus(settings, diagnostics, keyRequired) {
+  if (!keyRequired) {
+    return {
+      status: "ok",
+      chip: "页面 Key 不需要",
+      text: "Claude Code 本机配置会使用本机已登录或已配置的认证，页面 API Key 会被忽略。",
+    };
+  }
+
+  if (!diagnostics.keyPresent) {
+    return {
+      status: "warn",
+      chip: "Key 缺失",
+      text: "请粘贴完整 API Key；不要使用控制台列表里脱敏后的 sk-ki... 形式。",
+    };
+  }
+
+  if (!diagnostics.keyFormatOk) {
+    return {
+      status: "warn",
+      chip: "Key 格式异常",
+      text: "当前 Provider 需要完整 Kimi Code Key，格式应以 sk-kimi- 开头。",
+    };
+  }
+
+  return {
+    status: "ok",
+    chip: diagnostics.keySaved ? "Key 已安全保存" : "Key 已填写",
+    text: diagnostics.keySaved
+      ? `已使用后端本地保存的 ${diagnostics.keyPrefix} Key，前端不会继续保存明文。`
+      : `已检测到 ${diagnostics.keyPrefix} Key，长度 ${diagnostics.keyLength}。`,
+  };
+}
+
+function getClaudeCliGuideStatus(settings, diagnostics) {
+  if (settings.baseUrl !== "local:claude-kimi" && settings.baseUrl !== "local:claude-config") {
+    return { status: "neutral", chip: "无需 Claude CLI", text: "" };
+  }
+
+  if (diagnostics.claudeAvailable) {
+    const source = diagnostics.claudeCommandSource === "env"
+      ? "PAPERLENS_CLAUDE_CLI"
+      : "PATH";
+    if (diagnostics.claudeCommandSource === "env" && diagnostics.claudeVerified === false) {
+      return {
+        status: "warn",
+        chip: "Claude CLI 已配置",
+        text: `后端会尝试调用 ${diagnostics.claudeCommand}，来源：${source}；该命令不是绝对路径，需要运行时验证。`,
+      };
+    }
+
+    return {
+      status: "ok",
+      chip: "Claude CLI 已找到",
+      text: `后端会调用 ${diagnostics.claudeCommand}，来源：${source}。`,
+    };
+  }
+
+  return {
+    status: "warn",
+    chip: "Claude CLI 缺失",
+    text: diagnostics.runtime?.isDocker
+      ? "容器里没有找到 claude CLI；请重建包含 Claude Code 的镜像，或在容器环境设置 PAPERLENS_CLAUDE_CLI。"
+      : "本机没有找到 claude CLI；请先确认终端能运行 claude --version，或设置 PAPERLENS_CLAUDE_CLI 指向可执行文件。",
+  };
+}
+
+function getProxyGuideStatus(settings, diagnostics) {
+  if (diagnostics.proxyPresent) {
+    const sourceLabels = {
+      page: "页面",
+      env: ".env",
+      environment: "环境变量",
+    };
+    const source = sourceLabels[diagnostics.proxySource] || diagnostics.proxySource || "配置";
+    const applies = diagnostics.proxyAppliedToAgent
+      ? "Claude Code Provider 会把它注入 CLI 环境。"
+      : "普通 OpenAI-compatible 请求目前主要依赖运行环境对 Node fetch 代理的支持。";
+    return {
+      status: diagnostics.proxyAppliedToAgent ? "ok" : "warn",
+      chip: `Proxy ${source}`,
+      text: `已检测到代理来源：${source}。${applies}`,
+    };
+  }
+
+  return {
+    status: "neutral",
+    chip: "Proxy 未填",
+    text: diagnostics.runtime?.isDocker
+      ? "如果容器需要访问宿主机代理，Proxy URL 通常写 http://host.docker.internal:端口，而不是 127.0.0.1。"
+      : "如果模型服务需要代理，在 Proxy URL 填你的本机代理地址，例如 http://127.0.0.1:7897。",
+  };
+}
+
+function getProviderGuideSummary(settings, diagnostics) {
+  if (settings.provider === "claude-kimi-agent") {
+    return "页面 Kimi Code Key 会注入到本机 Claude Code CLI，适合 Kimi Code Key 不能直接 Chat Completion 的情况。";
+  }
+
+  if (settings.provider === "claude-local") {
+    return "不读取页面 Key，完全依赖运行 PaperLens 的那台机器上的 Claude Code 配置。";
+  }
+
+  if (settings.provider === "kimi-code") {
+    return "只用于验证 Kimi Code endpoint；若提示访问受限，切到 Claude Code + Kimi Code Key。";
+  }
+
+  if (settings.provider === "kimi-platform") {
+    return "适合普通网页应用调用，和 Kimi Code 控制台生成的 Key 不是同一种入口。";
+  }
+
+  if (settings.provider === "deepseek") {
+    return "OpenAI-compatible 普通接口，适合批量翻译讲解和较高吞吐。";
+  }
+
+  return diagnostics.endpoint || "使用自定义 Base URL 和模型名。";
+}
+
+function getProviderSpecificGuideItems(settings, diagnostics, context) {
+  const items = [];
+
+  if (settings.provider === "claude-kimi-agent") {
+    items.push({
+      status: diagnostics.runtime?.isDocker ? "warn" : "ok",
+      text: diagnostics.runtime?.isDocker
+        ? "当前在 Docker 内运行；页面 Key 能传给容器内 CLI，但不会读取宿主机 ~/.claude。"
+        : "当前在本机进程运行；会使用页面输入的 Kimi Code Key，并隔离用户级 Claude settings。",
+    });
+    items.push({
+      status: "neutral",
+      text: "如果出现 Budget has been exceeded，说明已走到 Claude Code/Kimi 认证链路，下一步应检查 CLI 实际使用的账户、Key 和预算来源。",
+    });
+  } else if (settings.provider === "claude-local") {
+    items.push({
+      status: diagnostics.runtime?.isDocker ? "warn" : "ok",
+      text: diagnostics.runtime?.isDocker
+        ? "Docker 内的 Claude Code 本机配置和宿主机不同；需要把认证放进容器环境或改用页面 Key Provider。"
+        : "页面不会覆盖本机 Claude Code 配置；如果本机配置是 OpenSSI，它会继续走那套认证。",
+    });
+  } else if (settings.provider === "kimi-code") {
+    items.push({
+      status: "warn",
+      text: "Kimi Code Key 常见现象是认证成功但普通 Chat Completion 被拒绝；论文阅读建议优先用 Kimi 开放平台或 Claude Code + Kimi Code Key。",
+    });
+  } else if (settings.provider === "kimi-platform") {
+    items.push({
+      status: settings.baseUrl.includes("moonshot.cn") ? "ok" : "warn",
+      text: "Kimi 开放平台应使用 https://api.moonshot.cn/v1；不要混用 Kimi Code Console 的 endpoint。",
+    });
+  } else if (settings.provider === "deepseek") {
+    items.push({
+      status: settings.baseUrl.includes("deepseek.com") ? "ok" : "warn",
+      text: "DeepSeek 推荐 Base URL 为 https://api.deepseek.com，模型可用 deepseek-v4-flash 或 deepseek-v4-pro。",
+    });
+  } else if (settings.provider === "custom") {
+    items.push({
+      status: settings.baseUrl ? "ok" : "warn",
+      text: "自定义 Provider 需要填写完整 Base URL；如果不是 /chat/completions 结尾，PaperLens 会自动拼接。",
+    });
+  }
+
+  if (!context.keyOk) {
+    items.push({
+      status: "warn",
+      text: "测试连接会先验证 Key 并把 Key 安全转存到后端本地引用；后续长任务使用引用，不把明文留在前端。",
+    });
+  }
+
+  return items;
 }
 
 function getChatEndpoint(baseUrl) {

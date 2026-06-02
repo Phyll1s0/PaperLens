@@ -7090,18 +7090,45 @@ function buildCommandPath() {
 }
 
 function resolveClaudeCommand(commandPath) {
+  return getClaudeCommandDiagnostics(commandPath).command;
+}
+
+function getClaudeCommandDiagnostics(commandPath) {
   if (process.env.PAPERLENS_CLAUDE_CLI) {
-    return process.env.PAPERLENS_CLAUDE_CLI;
+    const command = process.env.PAPERLENS_CLAUDE_CLI;
+    const verified = path.isAbsolute(command) ? existsSync(command) : false;
+    return {
+      command,
+      source: "env",
+      available: !path.isAbsolute(command) || verified,
+      verified,
+    };
   }
 
   for (const directory of commandPath.split(path.delimiter)) {
     const candidate = path.join(directory, "claude");
     if (existsSync(candidate)) {
-      return candidate;
+      return {
+        command: candidate,
+        source: "path",
+        available: true,
+        verified: true,
+      };
     }
   }
 
-  return "claude";
+  return {
+    command: "claude",
+    source: "missing",
+    available: false,
+    verified: false,
+  };
+}
+
+function isRunningInDocker() {
+  return existsSync("/.dockerenv") ||
+    process.env.PAPERLENS_RUNTIME === "docker" ||
+    process.env.container === "docker";
 }
 
 function buildClaudeEnv(settings, options, commandPath) {
@@ -7367,6 +7394,10 @@ function getSettingsDiagnostics(settings = {}) {
   const keyLength = apiKey ? apiKey.length : savedKey?.keyLength || 0;
   const isClaudeProvider = baseUrl === "local:claude-kimi" || baseUrl === "local:claude-config";
   const commandPath = isClaudeProvider ? buildCommandPath() : "";
+  const claudeCommand = isClaudeProvider
+    ? getClaudeCommandDiagnostics(commandPath)
+    : { command: "", source: "none", available: false };
+  const proxyPresent = hasProxyEnv(proxyUrl);
 
   return {
     provider,
@@ -7382,9 +7413,18 @@ function getSettingsDiagnostics(settings = {}) {
     keyPrefix,
     keyLength,
     keyFormatOk: baseUrl !== "local:claude-kimi" || keyPrefix === "sk-kimi",
-    claudeCommand: isClaudeProvider ? resolveClaudeCommand(commandPath) : "",
-    proxyPresent: isClaudeProvider ? hasProxyEnv(proxyUrl) : false,
-    proxySource: isClaudeProvider ? getProxySource(proxyUrl) : "none",
+    claudeCommand: claudeCommand.command,
+    claudeCommandSource: claudeCommand.source,
+    claudeAvailable: claudeCommand.available,
+    claudeVerified: claudeCommand.verified,
+    proxyPresent,
+    proxySource: getProxySource(proxyUrl),
+    proxyAppliedToAgent: isClaudeProvider,
+    runtime: {
+      isDocker: isRunningInDocker(),
+      host: HOST,
+      port: PORT,
+    },
   };
 }
 
