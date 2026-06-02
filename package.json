@@ -4,8 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "dev": "node scripts/dev.mjs",
     "start": "node server.js",
     "health": "node scripts/healthcheck.mjs",
+    "docker:up": "docker compose up -d --build",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f paperlens",
     "service:start": "sh scripts/paperlens-service.sh start",
     "service:stop": "sh scripts/paperlens-service.sh stop",
     "service:status": "sh scripts/paperlens-service.sh status",

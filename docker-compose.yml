@@ -11,6 +11,12 @@ services:
       PAPERLENS_PDF_ENGINE: poppler
       PAPERLENS_PROXY_URL: ${PAPERLENS_PROXY_URL:-}
       PAPERLENS_CLAUDE_CLI: ${PAPERLENS_CLAUDE_CLI:-}
+      PAPERLENS_ANALYSIS_TARGET_MINUTES: ${PAPERLENS_ANALYSIS_TARGET_MINUTES:-20}
+      PAPERLENS_ANALYSIS_BATCH_SIZE: ${PAPERLENS_ANALYSIS_BATCH_SIZE:-12}
+      PAPERLENS_ANALYSIS_CONCURRENCY: ${PAPERLENS_ANALYSIS_CONCURRENCY:-3}
+      PAPERLENS_AGENT_ANALYSIS_BATCH_SIZE: ${PAPERLENS_AGENT_ANALYSIS_BATCH_SIZE:-8}
+      PAPERLENS_AGENT_ANALYSIS_CONCURRENCY: ${PAPERLENS_AGENT_ANALYSIS_CONCURRENCY:-2}
+      PAPERLENS_ANALYSIS_FAILED_RETRY_BATCH_SIZE: ${PAPERLENS_ANALYSIS_FAILED_RETRY_BATCH_SIZE:-2}
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       ALL_PROXY: ${ALL_PROXY:-}
@@ -20,12 +26,18 @@ services:
       all_proxy: ${ALL_PROXY:-}
       no_proxy: ${NO_PROXY:-}
     ports:
-      - "3000:3000"
+      - "${PAPERLENS_PORT:-3000}:3000"
     volumes:
       - paperlens_uploads:/app/uploads
       - paperlens_data:/app/data
       - paperlens_assets:/app/paper-assets
       - paperlens_cache:/app/.cache
+    healthcheck:
+      test: ["CMD", "node", "scripts/healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
 
 volumes:
   paperlens_uploads:
