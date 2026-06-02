@@ -1962,7 +1962,7 @@ function createRichTextFragment(text) {
 
   for (const segment of segments) {
     if (!segment.math) {
-      fragment.append(document.createTextNode(segment.text));
+      fragment.append(createMarkdownInlineFragment(segment.text));
       continue;
     }
 
@@ -1972,6 +1972,118 @@ function createRichTextFragment(text) {
   return fragment;
 }
 
+function createMarkdownInlineFragment(text) {
+  const fragment = document.createDocumentFragment();
+  let index = 0;
+
+  while (index < text.length) {
+    const marker = findNextMarkdownMarker(text, index);
+    if (!marker) {
+      fragment.append(document.createTextNode(text.slice(index)));
+      break;
+    }
+
+    if (marker.start > index) {
+      fragment.append(document.createTextNode(text.slice(index, marker.start)));
+    }
+
+    const close = findMarkdownClose(text, marker);
+    if (close === -1) {
+      fragment.append(document.createTextNode(text.slice(marker.start, marker.start + marker.open.length)));
+      index = marker.start + marker.open.length;
+      continue;
+    }
+
+    const content = text.slice(marker.start + marker.open.length, close);
+    const element = document.createElement(marker.tag);
+    element.className = marker.className;
+    if (marker.tag === "code") {
+      element.textContent = content;
+    } else {
+      element.append(createMarkdownInlineFragment(content));
+    }
+    fragment.append(element);
+    index = close + marker.close.length;
+  }
+
+  return fragment;
+}
+
+function findNextMarkdownMarker(text, fromIndex) {
+  const markers = [
+    { open: "`", close: "`", tag: "code", className: "markdown-code" },
+    { open: "**", close: "**", tag: "strong", className: "markdown-strong" },
+    { open: "__", close: "__", tag: "strong", className: "markdown-strong" },
+    { open: "*", close: "*", tag: "em", className: "markdown-em" },
+    { open: "_", close: "_", tag: "em", className: "markdown-em" },
+  ];
+  let best = null;
+
+  for (const marker of markers) {
+    let start = text.indexOf(marker.open, fromIndex);
+    while (start !== -1 && !isLikelyMarkdownOpen(text, start, marker)) {
+      start = text.indexOf(marker.open, start + marker.open.length);
+    }
+
+    if (start === -1) {
+      continue;
+    }
+
+    if (!best || start < best.start || (start === best.start && marker.open.length > best.open.length)) {
+      best = { ...marker, start };
+    }
+  }
+
+  return best;
+}
+
+function isLikelyMarkdownOpen(text, start, marker) {
+  if (isEscapedAt(text, start)) {
+    return false;
+  }
+
+  const previous = text[start - 1] || "";
+  const next = text[start + marker.open.length] || "";
+  if (!next || /\s/.test(next)) {
+    return false;
+  }
+
+  if ((marker.open === "*" || marker.open === "_") && text[start + 1] === marker.open) {
+    return false;
+  }
+
+  if (marker.open.includes("_") && previous && /[A-Za-z0-9]/.test(previous)) {
+    return false;
+  }
+
+  return true;
+}
+
+function findMarkdownClose(text, marker) {
+  let close = text.indexOf(marker.close, marker.start + marker.open.length);
+  while (close !== -1) {
+    if (!isEscapedAt(text, close) && isLikelyMarkdownClose(text, close, marker)) {
+      return close;
+    }
+    close = text.indexOf(marker.close, close + marker.close.length);
+  }
+  return -1;
+}
+
+function isLikelyMarkdownClose(text, close, marker) {
+  const previous = text[close - 1] || "";
+  const next = text[close + marker.close.length] || "";
+  if (!previous || /\s/.test(previous)) {
+    return false;
+  }
+
+  if (marker.close.includes("_") && next && /[A-Za-z0-9]/.test(next)) {
+    return false;
+  }
+
+  return true;
+}
+
 function splitMathSegments(text) {
   const segments = [];
   let index = 0;
@@ -1979,25 +2091,33 @@ function splitMathSegments(text) {
   while (index < text.length) {
     const next = findNextMathDelimiter(text, index);
     if (!next) {
-      segments.push({ math: false, text: text.slice(index) });
+      pushTextSegment(segments, text.slice(index));
       break;
     }
 
     if (next.start > index) {
-      segments.push({ math: false, text: text.slice(index, next.start) });
+      pushTextSegment(segments, text.slice(index, next.start));
     }
 
     const contentStart = next.start + next.open.length;
-    const close = text.indexOf(next.close, contentStart);
+    const close = findClosingMathDelimiter(text, next, contentStart);
     if (close === -1) {
-      segments.push({ math: false, text: text.slice(next.start) });
-      break;
+      pushTextSegment(segments, text.slice(next.start, contentStart));
+      index = contentStart;
+      continue;
+    }
+
+    const source = text.slice(contentStart, close).trim();
+    if (!isRenderableMathSource(source, next.display)) {
+      pushTextSegment(segments, text.slice(next.start, close + next.close.length));
+      index = close + next.close.length;
+      continue;
     }
 
     segments.push({
       math: true,
       display: next.display,
-      text: text.slice(contentStart, close).trim(),
+      text: source,
     });
     index = close + next.close.length;
   }
@@ -2005,8 +2125,22 @@ function splitMathSegments(text) {
   return segments;
 }
 
+function pushTextSegment(segments, text) {
+  if (!text) {
+    return;
+  }
+
+  const previous = segments.at(-1);
+  if (previous && !previous.math) {
+    previous.text += text;
+  } else {
+    segments.push({ math: false, text });
+  }
+}
+
 function hasMathDelimiters(text) {
-  return /\$\$|\$[^$\s]|\\\(|\\\[/.test(String(text || ""));
+  const source = String(text || "");
+  return /\$\$|\\\(|\\\[|\\begin\{[^}]+}/.test(source) || /(^|[^\\])\$[^$\s\d]/.test(source);
 }
 
 function findNextMathDelimiter(text, fromIndex) {
@@ -2019,12 +2153,12 @@ function findNextMathDelimiter(text, fromIndex) {
   let best = null;
 
   for (const delimiter of delimiters) {
-    const start = text.indexOf(delimiter.open, fromIndex);
-    if (start === -1) {
-      continue;
+    let start = findNextDelimiterOpen(text, delimiter, fromIndex);
+    while (start !== -1 && delimiter.open === "$" && !isLikelyInlineDollar(text, start)) {
+      start = findNextDelimiterOpen(text, delimiter, start + delimiter.open.length);
     }
 
-    if (delimiter.open === "$" && !isLikelyInlineDollar(text, start)) {
+    if (start === -1) {
       continue;
     }
 
@@ -2034,6 +2168,14 @@ function findNextMathDelimiter(text, fromIndex) {
   }
 
   return best;
+}
+
+function findNextDelimiterOpen(text, delimiter, fromIndex) {
+  let start = text.indexOf(delimiter.open, fromIndex);
+  while (start !== -1 && isEscapedAt(text, start)) {
+    start = text.indexOf(delimiter.open, start + delimiter.open.length);
+  }
+  return start;
 }
 
 function isLikelyInlineDollar(text, index) {
@@ -2047,14 +2189,78 @@ function isLikelyInlineDollar(text, index) {
     return false;
   }
 
-  return !previous || !/[A-Za-z0-9]/.test(previous);
+  if (previous && /[A-Za-z0-9\\]/.test(previous)) {
+    return false;
+  }
+
+  return true;
+}
+
+function findClosingMathDelimiter(text, delimiter, fromIndex) {
+  let index = text.indexOf(delimiter.close, fromIndex);
+  while (index !== -1) {
+    if (isEscapedAt(text, index)) {
+      index = text.indexOf(delimiter.close, index + delimiter.close.length);
+      continue;
+    }
+
+    if (delimiter.open === "$" && !isLikelyClosingInlineDollar(text, index)) {
+      index = text.indexOf(delimiter.close, index + delimiter.close.length);
+      continue;
+    }
+
+    return index;
+  }
+
+  return -1;
+}
+
+function isLikelyClosingInlineDollar(text, index) {
+  const previous = text[index - 1] || "";
+  const next = text[index + 1] || "";
+  if (!previous || /\s/.test(previous)) {
+    return false;
+  }
+
+  return !next || !/[A-Za-z0-9]/.test(next);
+}
+
+function isEscapedAt(text, index) {
+  let slashCount = 0;
+  for (let cursor = index - 1; cursor >= 0 && text[cursor] === "\\"; cursor -= 1) {
+    slashCount += 1;
+  }
+  return slashCount % 2 === 1;
+}
+
+function isRenderableMathSource(source, display = false) {
+  const clean = String(source || "").trim();
+  if (!clean || clean.length > 1800) {
+    return false;
+  }
+
+  if (display) {
+    return true;
+  }
+
+  if (/^\d+(?:[.,]\d+)?$/.test(clean)) {
+    return false;
+  }
+
+  return /\\[A-Za-z]+|[_^{}=<>≤≥≠≈∑∏∫√∞→←↔±×÷∂λμσγαβθΩΔ]|\b(?:argmin|argmax|softmax|log|exp|min|max|sum|prod)\b/i.test(clean) ||
+    /^[A-Za-z][A-Za-z0-9]*(?:[_^][A-Za-z0-9{}]+)+$/.test(clean);
 }
 
 function renderMathSegment(source, display = false) {
   const wrapper = document.createElement("span");
   wrapper.className = display ? "math-block" : "math-inline";
   wrapper.title = source;
-  renderLatexInto(wrapper, source);
+  try {
+    renderLatexInto(wrapper, source);
+  } catch {
+    wrapper.textContent = source;
+    wrapper.classList.add("math-raw");
+  }
   return wrapper;
 }
 
@@ -2065,8 +2271,14 @@ function renderLatexInto(container, source) {
 
 function normalizeLatexSource(source) {
   return String(source || "")
+    .replace(/\\begin\{[^}]+}/g, " ")
+    .replace(/\\end\{[^}]+}/g, " ")
     .replace(/\\left/g, "")
     .replace(/\\right/g, "")
+    .replace(/\\\\/g, " ")
+    .replace(/\\qquad/g, "  ")
+    .replace(/\\quad/g, " ")
+    .replace(/\\:/g, " ")
     .replace(/\\,/g, " ")
     .replace(/\\;/g, " ")
     .replace(/\\!/g, "");
@@ -2171,6 +2383,23 @@ function renderLatexCommand(command, stream) {
     return token;
   }
 
+  if (command === "overline" || command === "underline") {
+    const token = document.createElement("span");
+    token.className = `math-token math-${command}`;
+    renderLatexInto(token, readLatexArgument(stream));
+    return token;
+  }
+
+  if (LATEX_ACCENTS[command]) {
+    const token = document.createElement("span");
+    token.className = "math-token math-accent";
+    token.dataset.accent = LATEX_ACCENTS[command];
+    const body = document.createElement("span");
+    renderLatexInto(body, readLatexArgument(stream));
+    token.append(body);
+    return token;
+  }
+
   return mathToken(LATEX_COMMANDS[command] || `\\${command}`);
 }
 
@@ -2216,9 +2445,18 @@ function mapLatexSymbol(char) {
   const symbols = {
     "*": "·",
     "-": "−",
+    "|": "|",
   };
   return symbols[char] || "";
 }
+
+const LATEX_ACCENTS = {
+  bar: "¯",
+  dot: "·",
+  hat: "^",
+  tilde: "~",
+  vec: "→",
+};
 
 const LATEX_COMMANDS = {
   alpha: "α",
@@ -2265,27 +2503,58 @@ const LATEX_COMMANDS = {
   approx: "≈",
   sim: "∼",
   times: "×",
+  div: "÷",
   cdot: "·",
+  cdots: "⋯",
+  ldots: "…",
+  dots: "…",
   pm: "±",
+  mp: "∓",
   to: "→",
   rightarrow: "→",
   leftarrow: "←",
+  leftrightarrow: "↔",
+  Rightarrow: "⇒",
+  Leftarrow: "⇐",
+  Leftrightarrow: "⇔",
   infty: "∞",
   sum: "∑",
   prod: "∏",
   int: "∫",
   partial: "∂",
   nabla: "∇",
+  propto: "∝",
   forall: "∀",
   exists: "∃",
   in: "∈",
   notin: "∉",
   subset: "⊂",
   subseteq: "⊆",
+  supset: "⊃",
+  supseteq: "⊇",
   cup: "∪",
   cap: "∩",
+  setminus: "∖",
+  emptyset: "∅",
+  varnothing: "∅",
+  land: "∧",
+  lor: "∨",
+  wedge: "∧",
+  vee: "∨",
+  equiv: "≡",
+  cong: "≅",
+  simeq: "≃",
+  circ: "∘",
+  degree: "°",
+  lbrace: "{",
+  rbrace: "}",
+  langle: "⟨",
+  rangle: "⟩",
   log: "log",
   exp: "exp",
+  sin: "sin",
+  cos: "cos",
+  tan: "tan",
   min: "min",
   max: "max",
   argmin: "argmin",

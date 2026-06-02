@@ -915,6 +915,29 @@ pre.artifact-viewer-caption {
   white-space: pre-wrap;
 }
 
+.markdown-code {
+  display: inline-block;
+  max-width: 100%;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(31, 41, 55, 0.08);
+  color: #1f2937;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.92em;
+  line-height: 1.35;
+  vertical-align: baseline;
+}
+
+.markdown-strong {
+  font-weight: 750;
+  color: #1e2d2a;
+}
+
+.markdown-em {
+  color: #42504c;
+  font-style: italic;
+}
+
 .math-inline,
 .math-block {
   font-family: "Times New Roman", Times, ui-serif, Georgia, serif;
@@ -994,6 +1017,42 @@ pre.artifact-viewer-caption {
 .math-root > span:last-child {
   padding: 0 2px;
   border-top: 1px solid currentColor;
+}
+
+.math-raw {
+  display: inline;
+  padding: 1px 5px;
+  border: 1px solid rgba(180, 83, 42, 0.22);
+  background: rgba(180, 83, 42, 0.08);
+  color: #6b3a1f;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.92em;
+  white-space: pre-wrap;
+}
+
+.math-accent {
+  position: relative;
+  padding-top: 0.32em;
+}
+
+.math-accent::before {
+  position: absolute;
+  top: -0.1em;
+  left: 50%;
+  font-size: 0.74em;
+  line-height: 1;
+  transform: translateX(-50%);
+  content: attr(data-accent);
+}
+
+.math-overline {
+  padding-top: 1px;
+  border-top: 1px solid currentColor;
+}
+
+.math-underline {
+  padding-bottom: 1px;
+  border-bottom: 1px solid currentColor;
 }
 
 .analysis-notice {
