@@ -11,6 +11,7 @@ const state = {
   pipelineBusy: false,
   jobHistory: [],
   exportQa: null,
+  modelDiagnosticReport: null,
   progressTimer: null,
   lastProgressParagraphId: "",
   autoAnalyze: {
@@ -65,6 +66,10 @@ const els = {
   providerHintText: document.querySelector("#providerHintText"),
   providerGuide: document.querySelector("#providerGuide"),
   serviceStatusText: document.querySelector("#serviceStatusText"),
+  diagnosticButton: document.querySelector("#diagnosticButton"),
+  diagnosticReport: document.querySelector("#diagnosticReport"),
+  diagnosticReportText: document.querySelector("#diagnosticReportText"),
+  copyDiagnosticButton: document.querySelector("#copyDiagnosticButton"),
   pdfInput: document.querySelector("#pdfInput"),
   aiSegmentInput: document.querySelector("#aiSegmentInput"),
   autoAnalyzeInput: document.querySelector("#autoAnalyzeInput"),
@@ -169,6 +174,8 @@ function bindEvents() {
   });
   els.uploadButton.addEventListener("click", uploadPdf);
   els.pingButton.addEventListener("click", pingModel);
+  els.diagnosticButton.addEventListener("click", generateModelDiagnosticReport);
+  els.copyDiagnosticButton.addEventListener("click", copyModelDiagnosticReport);
   els.autoAnalyzeButton.addEventListener("click", () => startAutoAnalyze());
   els.resumeAnalyzeButton.addEventListener("click", resumeMissingAnalysis);
   els.downloadNotesButton.addEventListener("click", downloadPaperNotes);
@@ -243,6 +250,7 @@ function bindEvents() {
       }
       saveSettings();
       updateModelDiagnostics();
+      hideModelDiagnosticReport();
     });
   }
 
@@ -1527,6 +1535,72 @@ async function pingModel() {
   } finally {
     els.pingButton.disabled = false;
   }
+}
+
+async function generateModelDiagnosticReport() {
+  els.diagnosticButton.disabled = true;
+  els.diagnosticButton.textContent = "生成中";
+  setModelStatus("正在生成诊断包");
+
+  try {
+    const response = await apiFetch("/api/model/diagnostics", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ settings: getSettings() }),
+    }, "生成诊断包");
+    const result = await readResponse(response);
+    state.modelDiagnosticReport = result.report || null;
+    if (result.diagnostics) {
+      updateModelDiagnostics(result.diagnostics);
+    }
+    renderModelDiagnosticReport();
+    setModelStatus("诊断包已生成，可复制给自己或他人排障。");
+  } catch (error) {
+    hideModelDiagnosticReport();
+    setModelStatus(error.message, true);
+  } finally {
+    els.diagnosticButton.disabled = false;
+    els.diagnosticButton.textContent = "诊断包";
+  }
+}
+
+function renderModelDiagnosticReport() {
+  if (!state.modelDiagnosticReport) {
+    hideModelDiagnosticReport();
+    return;
+  }
+
+  els.diagnosticReportText.textContent = JSON.stringify(state.modelDiagnosticReport, null, 2);
+  els.diagnosticReport.classList.remove("hidden");
+}
+
+function hideModelDiagnosticReport() {
+  state.modelDiagnosticReport = null;
+  els.diagnosticReport.classList.add("hidden");
+  els.diagnosticReportText.textContent = "";
+}
+
+async function copyModelDiagnosticReport() {
+  const text = els.diagnosticReportText.textContent || "";
+  if (!text) {
+    return;
+  }
+
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "readonly");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.append(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
+  }
+
+  setModelStatus("诊断包已复制。");
 }
 
 async function analyzeParagraph(paragraphId, options = {}) {

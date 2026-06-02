@@ -65,10 +65,20 @@
             Proxy URL
             <input id="proxyUrlInput" type="url" autocomplete="off" placeholder="可选，例如 http://127.0.0.1:7897">
           </label>
-          <button id="pingButton" class="secondary-button full-width" type="button">测试连接</button>
+          <div class="model-action-row">
+            <button id="pingButton" class="secondary-button" type="button">测试连接</button>
+            <button id="diagnosticButton" class="secondary-button" type="button" title="生成脱敏 Provider/Claude/Kimi 诊断包">诊断包</button>
+          </div>
           <p id="modelStatusText" class="status-text">尚未测试</p>
           <p id="modelDiagnosticsText" class="diagnostics-text"></p>
           <p id="providerHintText" class="diagnostics-text"></p>
+          <div id="diagnosticReport" class="diagnostic-report hidden" aria-live="polite">
+            <div class="diagnostic-report-header">
+              <strong>Provider 诊断包</strong>
+              <button id="copyDiagnosticButton" class="text-button" type="button">复制</button>
+            </div>
+            <pre id="diagnosticReportText"></pre>
+          </div>
           <div id="providerGuide" class="provider-guide" aria-live="polite"></div>
         </section>
 

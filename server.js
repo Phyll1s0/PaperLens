@@ -263,6 +263,10 @@ const server = http.createServer(async (req, res) => {
       return await handleModelPing(req, res);
     }
 
+    if (req.method === "POST" && url.pathname === "/api/model/diagnostics") {
+      return await handleModelDiagnostics(req, res);
+    }
+
     if (req.method === "POST" && url.pathname === "/api/chat") {
       return await handleChat(req, res);
     }
@@ -3813,6 +3817,16 @@ async function handleModelPing(req, res) {
       diagnostics,
     }, error.statusCode || 500);
   }
+}
+
+async function handleModelDiagnostics(req, res) {
+  const payload = await readJson(req);
+  const report = buildModelDiagnosticReport(payload.settings || {});
+  return json(res, {
+    ok: true,
+    report,
+    diagnostics: report.diagnostics,
+  });
 }
 
 async function handleChat(req, res) {
@@ -9676,6 +9690,200 @@ function getSettingsDiagnostics(settings = {}) {
       port: PORT,
     },
   };
+}
+
+function buildModelDiagnosticReport(settings = {}) {
+  const provider = String(settings.provider || "").trim() || "custom";
+  const rawBaseUrl = String(settings.baseUrl || "https://api.openai.com/v1").trim();
+  const baseUrl = resolveBaseUrlForProvider(provider, rawBaseUrl);
+  const model = normalizeModelName(String(settings.model || "").trim());
+  const apiKey = normalizeApiKey(String(settings.apiKey || ""));
+  const apiKeyRef = String(settings.apiKeyRef || "").trim();
+  const savedKey = apiKeyRef ? secretStore.keys.get(apiKeyRef) : null;
+  const diagnostics = getSettingsDiagnostics(settings);
+  const isClaudeProvider = baseUrl === "local:claude-kimi" || baseUrl === "local:claude-config";
+  const commandPath = isClaudeProvider ? buildCommandPath() : process.env.PATH || "";
+  const keyRefMatches = savedKey
+    ? savedKey.provider === provider && savedKey.baseUrl === baseUrl
+    : false;
+  const report = {
+    generatedAt: new Date().toISOString(),
+    paperLens: {
+      version: PACKAGE_VERSION,
+      serviceSchemaVersion: SERVICE_SCHEMA_VERSION,
+      serviceStartedAt: new Date(SERVICE_STARTED_AT_MS).toISOString(),
+    },
+    runtime: {
+      isDocker: isRunningInDocker(),
+      platform: process.platform,
+      arch: process.arch,
+      nodeVersion: process.version,
+      host: HOST,
+      port: PORT,
+      cwd: redactLocalPath(__dirname),
+    },
+    provider: {
+      provider,
+      rawBaseUrl: rawBaseUrl ? redactUrl(rawBaseUrl) : "",
+      resolvedBaseUrl: redactUrl(baseUrl),
+      endpoint: diagnostics.endpoint,
+      model,
+      analysisProfile: normalizeAnalysisProfile(settings.analysisProfile),
+    },
+    key: {
+      present: Boolean(apiKey || savedKey),
+      saved: Boolean(savedKey && !apiKey),
+      source: apiKey ? "page" : savedKey ? "server-ref" : "missing",
+      refPresent: Boolean(apiKeyRef),
+      refMatchesProvider: apiKeyRef ? keyRefMatches : null,
+      prefix: apiKey ? getApiKeyPrefix(apiKey) : savedKey?.keyPrefix || "missing",
+      length: apiKey ? apiKey.length : savedKey?.keyLength || 0,
+      formatOk: diagnostics.keyFormatOk,
+      expectedPrefix: baseUrl === "local:claude-kimi" ? "sk-kimi" : "provider-specific",
+    },
+    claude: buildClaudeDiagnosticBlock(settings, diagnostics, commandPath, isClaudeProvider),
+    proxy: buildProxyDiagnosticBlock(settings, diagnostics),
+    budget: {
+      cliMaxBudgetUsd: Number(settings.agentBudgetUsd || 500),
+      note: isClaudeProvider
+        ? "Claude Code CLI 会收到 --max-budget-usd；如果错误仍提示旧预算，通常是 CLI 读取了其他认证/配置或供应商账户预算。"
+        : "普通 OpenAI-compatible Provider 不使用 Claude Code CLI 的 --max-budget-usd。",
+    },
+    diagnostics,
+  };
+  report.recommendations = buildModelDiagnosticRecommendations(report);
+  return report;
+}
+
+function buildClaudeDiagnosticBlock(settings, diagnostics, commandPath, isClaudeProvider) {
+  const provider = String(settings.provider || "").trim();
+  return {
+    required: isClaudeProvider,
+    command: redactLocalPath(diagnostics.claudeCommand || ""),
+    source: diagnostics.claudeCommandSource || "none",
+    available: Boolean(diagnostics.claudeAvailable),
+    verified: Boolean(diagnostics.claudeVerified),
+    pathProbe: summarizeCommandPath(commandPath),
+    invocation: isClaudeProvider ? {
+      model: diagnostics.model || settings.model || "",
+      usePageKimiKey: provider === "claude-kimi-agent",
+      settingsIsolation: provider === "claude-kimi-agent" ? "project-only" : "user-config-allowed",
+      flags: provider === "claude-kimi-agent"
+        ? ["--bare", "--setting-sources project", "--no-session-persistence", "--tools \"\"", "--output-format json"]
+        : ["--no-session-persistence", "--tools \"\"", "--output-format json"],
+      envInjected: provider === "claude-kimi-agent"
+        ? ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ENABLE_TOOL_SEARCH", "proxy vars if configured"]
+        : ["ENABLE_TOOL_SEARCH", "proxy vars if configured"],
+    } : null,
+  };
+}
+
+function buildProxyDiagnosticBlock(settings, diagnostics) {
+  return {
+    present: Boolean(diagnostics.proxyPresent),
+    source: diagnostics.proxySource || "none",
+    appliedToRequest: Boolean(diagnostics.proxyAppliedToAgent),
+    transport: diagnostics.proxyTransport || {},
+    pageProxyPresent: Boolean(String(settings.proxyUrl || "").trim()),
+    environment: {
+      PAPERLENS_PROXY_URL: Boolean(process.env.PAPERLENS_PROXY_URL),
+      HTTP_PROXY: Boolean(process.env.HTTP_PROXY || process.env.http_proxy),
+      HTTPS_PROXY: Boolean(process.env.HTTPS_PROXY || process.env.https_proxy),
+      ALL_PROXY: Boolean(process.env.ALL_PROXY || process.env.all_proxy),
+      NO_PROXY: Boolean(process.env.NO_PROXY || process.env.no_proxy),
+    },
+  };
+}
+
+function buildModelDiagnosticRecommendations(report) {
+  const items = [];
+  const provider = report.provider.provider;
+  const isClaudeProvider = report.claude.required;
+
+  if (isClaudeProvider && !report.claude.available) {
+    items.push("安装 Claude Code CLI，或设置 PAPERLENS_CLAUDE_CLI 为 claude 可执行文件的绝对路径。");
+  }
+
+  if (provider === "claude-kimi-agent" && !report.key.present) {
+    items.push("Claude Code + Kimi Code Key 需要页面输入完整 Kimi Code Key；控制台列表里的脱敏 sk-ki... 不能使用。");
+  }
+
+  if (provider === "claude-kimi-agent" && report.key.present && !report.key.formatOk) {
+    items.push("当前 Key 格式不像 Kimi Code Key，应以 sk-kimi- 开头。");
+  }
+
+  if (report.key.refPresent && report.key.refMatchesProvider === false) {
+    items.push("本地保存的 Key 引用与当前 Provider/Base URL 不匹配，请重新输入 API Key。");
+  }
+
+  if (report.runtime.isDocker && provider === "claude-local") {
+    items.push("当前在 Docker 中运行，Claude Code 本机配置不会自动读取宿主机 ~/.claude；请在容器内配置认证或改用页面 Key Provider。");
+  }
+
+  if (report.runtime.isDocker && !report.proxy.present) {
+    items.push("如果容器需要走宿主机代理，Proxy URL 通常写 http://host.docker.internal:端口，而不是 127.0.0.1。");
+  }
+
+  if (report.proxy.present && !report.proxy.appliedToRequest && !report.proxy.transport?.noProxyBypassed) {
+    items.push("已检测到代理但当前请求没有应用代理；检查代理协议是否为 http/https/socks5。");
+  }
+
+  if (isClaudeProvider && Number(report.budget.cliMaxBudgetUsd || 0) <= 50) {
+    items.push("Claude Code CLI 预算上限偏低；如果长任务提示 Budget has been exceeded，可以提高 Agent Budget USD 后重试。");
+  }
+
+  if (provider === "kimi-code") {
+    items.push("Kimi Code Key 常见情况是认证成功但普通 Chat Completion 受限；论文阅读建议改用 Kimi 开放平台或 Claude Code + Kimi Code Key。");
+  }
+
+  if (!items.length) {
+    items.push("表面配置正常；下一步点击“测试连接”，若失败，把这个诊断包和错误信息一起查看。");
+  }
+
+  return items;
+}
+
+function summarizeCommandPath(commandPath = "") {
+  return String(commandPath || "")
+    .split(path.delimiter)
+    .filter(Boolean)
+    .map(redactLocalPath)
+    .slice(0, 24);
+}
+
+function redactLocalPath(value = "") {
+  const text = String(value || "");
+  const home = process.env.HOME || "";
+  if (home && text.startsWith(home)) {
+    return `~${text.slice(home.length)}`;
+  }
+
+  return text;
+}
+
+function redactUrl(value = "") {
+  const text = String(value || "");
+  if (!text || text.startsWith("local:")) {
+    return text;
+  }
+
+  try {
+    const url = new URL(text);
+    if (url.username) {
+      url.username = "***";
+    }
+    if (url.password) {
+      url.password = "***";
+    }
+    for (const key of [...url.searchParams.keys()]) {
+      if (/key|token|secret|password/i.test(key)) {
+        url.searchParams.set(key, "***");
+      }
+    }
+    return url.toString();
+  } catch {
+    return text.replace(/(api[_-]?key|token|secret|password)=([^&\s]+)/ig, "$1=***");
+  }
 }
 
 function getProxyTransportDiagnostics(proxyUrl, endpoint, isClaudeProvider) {

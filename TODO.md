@@ -6,7 +6,7 @@
 - [x] 扫描版 PDF 目前仍偏“提示型”：已支持本机 OCR Job，调用 OCRmyPDF/Tesseract 后自动回填可搜索 PDF、重新提取文本和页面结构。
 - [x] 公网部署风险还没有兜住：已支持 `PAPERLENS_ACCESS_TOKEN` 访问令牌保护 API/导出/assets，并支持服务端 API Key 加密存储和公网风险提示。
 - [x] OpenAI-compatible Provider 的代理链路不够稳定：已为普通模型请求接入 PaperLens 代理传输，支持 HTTP/HTTPS proxy、SOCKS5、NO_PROXY 和诊断显示。
-- [ ] Claude Code + Kimi Code Key 仍依赖本机环境：需要 `claude` CLI、隔离配置、代理和预算状态都正确，别人复现成本偏高。
+- [x] Claude Code + Kimi Code Key 仍依赖本机环境：已提供脱敏 Provider 诊断包，汇总 `claude` CLI、隔离配置、代理、预算和 Docker/本机环境，方便别人复现与排障。
 - [x] 长任务缺少硬性资源保护：已为分析任务、AI 分段、OCR、视觉重建加入可配置硬上限和结构化超限错误。
 - [x] 现在主要依赖 JSON 文件存储：已加入原子写入、最近备份、备份保留和损坏后从最近有效备份恢复。
 - [ ] 视觉结构仍是启发式识别：复杂双栏、多图组合、跨页图、公式/代码混排时仍可能裁剪过大或误分类。
@@ -24,7 +24,7 @@
 
 - [ ] OCR 质量升级：自动检测 PDF 语言、页倾斜/低清晰度、OCR 后文本密度，并允许用户选择 OCR 语言后重跑。
 - [ ] 视觉裁剪编辑器：允许用户点击页面手动框选/调整图片、公式、代码块，并重建相关段落引用。
-- [ ] Claude/Kimi 诊断包：一键生成 CLI 路径、代理、环境变量、预算来源、模型名称和失败日志，方便定位“为什么网页可用但 CLI 不可用”。
+- [x] Claude/Kimi 诊断包：一键生成 CLI 路径、代理、环境变量、预算来源、模型名称和修复建议，方便定位“为什么网页可用但 CLI 不可用”。
 - [ ] 长任务预算保护：每篇论文显示预计 token、预计时长、预计费用/额度，并支持任务级最大预算。
 - [ ] SQLite 持久化迁移：把论文、段落、Job、导出历史迁移到 SQLite，提供迁移脚本和回滚方案。
 - [x] 导出 QA：导出前检查缺失图片、坏链接、未完成段落、LaTeX 渲染风险，并提供页面检查面板。
@@ -33,6 +33,7 @@
 
 ## Done
 
+- [x] Claude/Kimi 脱敏诊断包：新增 `/api/model/diagnostics` 和前端“诊断包”按钮，可复制 Provider、Key 摘要、Claude CLI、代理、预算、Docker/本机环境和建议，不返回明文 API Key。
 - [x] 导出 QA 检查：新增 `/api/papers/:id/export-qa`，前端提供“导出检查”按钮和结果面板，覆盖未完成段落、坏图表引用、裁剪/资源缺失、低置信图和 LaTeX 风险。
 - [x] 长任务资源保护：新增 `PAPERLENS_MAX_ANALYSIS_JOB_PARAGRAPHS`、`PAPERLENS_MAX_ANALYSIS_JOB_CHARS`、`PAPERLENS_MAX_AI_SEGMENTATION_PAGES`、`PAPERLENS_MAX_OCR_JOB_PAGES`、`PAPERLENS_MAX_VISUAL_REBUILD_*`；health 和前端状态显示当前上限。
 - [x] JSON 持久化加固：论文、Job、加密 Secrets 走原子写入；论文/Job 保存后生成最近备份，读取损坏时自动从最新有效备份恢复；health 暴露 persistence 状态。
