@@ -69,6 +69,11 @@
             <input id="autoAnalyzeInput" type="checkbox" checked>
             上传后自动翻译讲解
           </label>
+          <div class="analysis-profile-control" role="group" aria-label="分析模式">
+            <button id="qualityProfileButton" class="analysis-profile-button" type="button" data-profile="quality" aria-pressed="true">精读</button>
+            <button id="fastProfileButton" class="analysis-profile-button" type="button" data-profile="fast" aria-pressed="false">快速</button>
+          </div>
+          <div id="analysisDashboard" class="analysis-dashboard" aria-live="polite"></div>
           <button id="uploadButton" class="primary-button" type="button">上传并解析</button>
           <p id="statusText" class="status-text">等待上传</p>
         </section>

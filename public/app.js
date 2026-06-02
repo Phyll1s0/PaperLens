@@ -3,6 +3,7 @@ const state = {
   query: "",
   libraryQuery: "",
   favoriteOnly: false,
+  analysisProfile: "quality",
   busyParagraphId: null,
   pipelineBusy: false,
   jobHistory: [],
@@ -18,6 +19,7 @@ const state = {
     total: 0,
     currentId: null,
     currentBatchSize: 0,
+    strategy: null,
     startedAt: 0,
     timer: null,
     pollInFlight: false,
@@ -40,6 +42,9 @@ const els = {
   pdfInput: document.querySelector("#pdfInput"),
   aiSegmentInput: document.querySelector("#aiSegmentInput"),
   autoAnalyzeInput: document.querySelector("#autoAnalyzeInput"),
+  qualityProfileButton: document.querySelector("#qualityProfileButton"),
+  fastProfileButton: document.querySelector("#fastProfileButton"),
+  analysisDashboard: document.querySelector("#analysisDashboard"),
   uploadButton: document.querySelector("#uploadButton"),
   statusText: document.querySelector("#statusText"),
   librarySearchInput: document.querySelector("#librarySearchInput"),
@@ -109,6 +114,16 @@ const API_TIMEOUT_MS = 240_000;
 const API_KEY_REF_STORAGE_KEY = "paper-reader-api-key-ref";
 const API_KEY_INFO_STORAGE_KEY = "paper-reader-api-key-info";
 const LEGACY_API_KEY_STORAGE_KEY = "paper-reader-api-key";
+const ANALYSIS_PROFILE_LABELS = {
+  quality: "精读",
+  fast: "快速",
+};
+const CLIENT_ANALYSIS_DEFAULTS = {
+  general: { batchSize: 12, concurrency: 3, maxBatchSize: 24, expectedBatchSeconds: 45, failedRetryBatchSize: 3 },
+  deepseek: { batchSize: 12, concurrency: 3, maxBatchSize: 24, expectedBatchSeconds: 34, failedRetryBatchSize: 3 },
+  "kimi-direct": { batchSize: 12, concurrency: 3, maxBatchSize: 20, expectedBatchSeconds: 42, failedRetryBatchSize: 2 },
+  "claude-agent": { batchSize: 8, concurrency: 2, maxBatchSize: 20, expectedBatchSeconds: 75, failedRetryBatchSize: 2 },
+};
 
 loadSettings();
 bindEvents();
@@ -142,6 +157,8 @@ function bindEvents() {
     state.favoriteOnly = els.favoriteOnlyInput.checked;
     loadRecentPapers();
   });
+  els.qualityProfileButton.addEventListener("click", () => setAnalysisProfile("quality"));
+  els.fastProfileButton.addEventListener("click", () => setAnalysisProfile("fast"));
   els.favoriteButton.addEventListener("click", () => {
     if (state.paper) {
       updatePaperMetadata({ favorite: !state.paper.favorite });
@@ -197,6 +214,7 @@ function loadSettings() {
   els.apiKeyInput.value = legacyApiKey;
   els.agentBudgetInput.value = sessionStorage.getItem("paper-reader-agent-budget") || "500";
   els.proxyUrlInput.value = sessionStorage.getItem("paper-reader-proxy-url") || "";
+  state.analysisProfile = normalizeAnalysisProfile(sessionStorage.getItem("paper-reader-analysis-profile") || "quality");
   els.aiSegmentInput.checked = sessionStorage.getItem("paper-reader-ai-segment") !== "false";
   els.autoAnalyzeInput.checked = sessionStorage.getItem("paper-reader-auto-analyze") !== "false";
   applyProvider(provider);
@@ -206,6 +224,8 @@ function loadSettings() {
     els.modelInput.value = sessionStorage.getItem("paper-reader-model") || els.modelInput.value;
   }
   updateApiKeyPlaceholder();
+  updateAnalysisProfileButtons();
+  renderAnalysisDashboard();
 }
 
 function saveSettings() {
@@ -215,6 +235,7 @@ function saveSettings() {
   sessionStorage.removeItem(LEGACY_API_KEY_STORAGE_KEY);
   sessionStorage.setItem("paper-reader-agent-budget", els.agentBudgetInput.value.trim());
   sessionStorage.setItem("paper-reader-proxy-url", els.proxyUrlInput.value.trim());
+  sessionStorage.setItem("paper-reader-analysis-profile", state.analysisProfile);
   sessionStorage.setItem("paper-reader-ai-segment", String(els.aiSegmentInput.checked));
   sessionStorage.setItem("paper-reader-auto-analyze", String(els.autoAnalyzeInput.checked));
   updateApiKeyPlaceholder();
@@ -230,6 +251,7 @@ function getSettings() {
     apiKeyRef: apiKey ? "" : sessionStorage.getItem(API_KEY_REF_STORAGE_KEY) || "",
     agentBudgetUsd: Number(els.agentBudgetInput.value || 500),
     proxyUrl: els.proxyUrlInput.value.trim(),
+    analysisProfile: state.analysisProfile,
   };
 }
 
@@ -255,6 +277,10 @@ function applySecuredSettings(settings) {
   if (settings.model) {
     els.modelInput.value = settings.model;
   }
+  if (settings.analysisProfile) {
+    state.analysisProfile = normalizeAnalysisProfile(settings.analysisProfile);
+    updateAnalysisProfileButtons();
+  }
 
   if (settings.apiKeyRef) {
     sessionStorage.setItem(API_KEY_REF_STORAGE_KEY, settings.apiKeyRef);
@@ -268,6 +294,7 @@ function applySecuredSettings(settings) {
 
   saveSettings();
   updateModelDiagnostics();
+  renderAnalysisDashboard();
 }
 
 function clearSavedApiKeyRef() {
@@ -306,6 +333,23 @@ function normalizeModelNameInput(value) {
   ]);
 
   return aliases.get(compact) || model;
+}
+
+function normalizeAnalysisProfile(value) {
+  return value === "fast" ? "fast" : "quality";
+}
+
+function setAnalysisProfile(profile) {
+  state.analysisProfile = normalizeAnalysisProfile(profile);
+  saveSettings();
+  updateAnalysisProfileButtons();
+  renderAnalysisDashboard();
+}
+
+function updateAnalysisProfileButtons() {
+  const profile = normalizeAnalysisProfile(state.analysisProfile);
+  els.qualityProfileButton.setAttribute("aria-pressed", profile === "quality" ? "true" : "false");
+  els.fastProfileButton.setAttribute("aria-pressed", profile === "fast" ? "true" : "false");
 }
 
 function updateModelDiagnostics(remoteDiagnostics) {
@@ -765,6 +809,7 @@ async function openPaper(paperId) {
   try {
     const response = await apiFetch(`/api/papers/${encodeURIComponent(paperId)}`, {}, "载入论文");
     state.paper = await readResponse(response);
+    resetAnalysisJobState();
     state.query = "";
     state.lastProgressParagraphId = state.paper.readingProgress?.paragraphId || "";
     els.searchInput.value = "";
@@ -1164,6 +1209,7 @@ function applyAnalysisJob(job) {
   state.autoAnalyze.total = Number(job.total || 0);
   state.autoAnalyze.currentId = job.currentParagraphId || "";
   state.autoAnalyze.currentBatchSize = Number(job.currentBatchSize || 0);
+  state.autoAnalyze.strategy = job.strategy || null;
   state.autoAnalyze.startedAt = Date.parse(job.startedAt || job.createdAt) || Date.now();
   state.autoAnalyze.lastProgressKey = getJobProgressKey(job);
 
@@ -1174,6 +1220,26 @@ function applyAnalysisJob(job) {
   if (!running) {
     clearAutoTimer();
   }
+}
+
+function resetAnalysisJobState() {
+  clearAutoTimer();
+  Object.assign(state.autoAnalyze, {
+    running: false,
+    stopRequested: false,
+    jobId: null,
+    completed: 0,
+    failed: 0,
+    cacheHits: 0,
+    total: 0,
+    currentId: null,
+    currentBatchSize: 0,
+    strategy: null,
+    startedAt: 0,
+    pollInFlight: false,
+    lastProgressKey: "",
+    networkFailures: 0,
+  });
 }
 
 function isActiveAnalysisJob(job) {
@@ -1348,10 +1414,10 @@ async function syncActiveAnalysisJob() {
       beginAnalysisJob(result.job);
       await pollAnalysisJob({ forceRefresh: true });
     } else if (state.autoAnalyze.running) {
-      clearAutoTimer();
-      state.autoAnalyze.running = false;
-      state.autoAnalyze.stopRequested = false;
-      state.autoAnalyze.jobId = null;
+      resetAnalysisJobState();
+      updateAutoButtons();
+    } else if (!state.autoAnalyze.running && state.autoAnalyze.jobId) {
+      resetAnalysisJobState();
       updateAutoButtons();
     }
   } catch (error) {
@@ -2901,6 +2967,195 @@ function paragraphText(text) {
   return p;
 }
 
+function renderAnalysisDashboard() {
+  if (!els.analysisDashboard) {
+    return;
+  }
+
+  const strategy = getVisibleAnalysisStrategy();
+  const hasPaper = Boolean(state.paper);
+  const activeOrKnownJob = Boolean(state.autoAnalyze.jobId && state.autoAnalyze.total);
+  const targetCount = activeOrKnownJob
+    ? Math.max(0, state.autoAnalyze.total - state.autoAnalyze.completed - state.autoAnalyze.failed)
+    : hasPaper ? getMissingAnalysisCount(state.paper) : 0;
+  const totalCount = activeOrKnownJob
+    ? state.autoAnalyze.total
+    : hasPaper ? getReadingParagraphs(state.paper).length : 0;
+  const doneCount = activeOrKnownJob
+    ? state.autoAnalyze.completed + state.autoAnalyze.failed
+    : hasPaper ? totalCount - targetCount : 0;
+  const cacheLabel = activeOrKnownJob
+    ? `${state.autoAnalyze.cacheHits || 0}`
+    : "待统计";
+  const estimateSeconds = activeOrKnownJob && strategy.estimatedRemainingSeconds != null
+    ? Number(strategy.estimatedRemainingSeconds)
+    : estimateAnalysisSeconds(targetCount, strategy);
+  const progressLabel = activeOrKnownJob
+    ? `${doneCount}/${state.autoAnalyze.total}`
+    : hasPaper ? `${targetCount} 待处理` : "未载入";
+  const profile = normalizeAnalysisProfile(strategy.profile || state.analysisProfile);
+  const fragment = document.createDocumentFragment();
+
+  const header = document.createElement("div");
+  header.className = "analysis-dashboard-header";
+  const title = document.createElement("strong");
+  title.textContent = "速度与质量";
+  const summary = document.createElement("span");
+  summary.textContent = getAnalysisDashboardSummary(profile, strategy, targetCount, estimateSeconds);
+  header.append(title, summary);
+  fragment.append(header);
+
+  const grid = document.createElement("div");
+  grid.className = "analysis-dashboard-grid";
+  for (const item of [
+    { label: "模式", value: ANALYSIS_PROFILE_LABELS[profile] || "精读" },
+    { label: "预计", value: targetCount ? formatDuration(estimateSeconds) : "0s" },
+    { label: "批次", value: `${strategy.effectiveBatchSize || strategy.batchSize || 1}` },
+    { label: "并发", value: `${strategy.concurrency || 1}` },
+    { label: "缓存", value: cacheLabel },
+    { label: "失败补跑", value: `${strategy.failedRetryBatchSize || 1}/批` },
+    { label: "进度", value: progressLabel },
+    { label: "策略", value: strategy.label || strategy.name || "默认" },
+  ]) {
+    const metric = document.createElement("div");
+    metric.className = "analysis-dashboard-metric";
+    const label = document.createElement("span");
+    label.textContent = item.label;
+    const value = document.createElement("strong");
+    value.textContent = item.value;
+    metric.append(label, value);
+    grid.append(metric);
+  }
+  fragment.append(grid);
+
+  els.analysisDashboard.replaceChildren(fragment);
+}
+
+function getVisibleAnalysisStrategy() {
+  if (state.autoAnalyze.strategy) {
+    return normalizeStrategySnapshot(state.autoAnalyze.strategy);
+  }
+
+  return getClientAnalysisStrategy(getSettings(), state.paper);
+}
+
+function normalizeStrategySnapshot(strategy = {}) {
+  return {
+    name: strategy.name || "openai-compatible",
+    label: strategy.label || strategy.name || "默认",
+    profile: normalizeAnalysisProfile(strategy.profile || state.analysisProfile),
+    batchSize: Number(strategy.batchSize || strategy.effectiveBatchSize || 1),
+    effectiveBatchSize: Number(strategy.effectiveBatchSize || strategy.batchSize || 1),
+    concurrency: Number(strategy.concurrency || 1),
+    failedRetryBatchSize: Number(strategy.failedRetryBatchSize || 1),
+    expectedBatchSeconds: Number(strategy.expectedBatchSeconds || 45),
+    estimatedRemainingSeconds: Number.isFinite(Number(strategy.estimatedRemainingSeconds))
+      ? Number(strategy.estimatedRemainingSeconds)
+      : null,
+  };
+}
+
+function getClientAnalysisStrategy(settings, paper) {
+  const provider = String(settings.provider || "").toLowerCase();
+  const baseUrl = String(settings.baseUrl || "").toLowerCase();
+  const model = String(settings.model || "").toLowerCase();
+  const agentLike = provider.startsWith("claude") || baseUrl.startsWith("local:claude");
+  const deepseekLike = provider.includes("deepseek") || baseUrl.includes("deepseek") || model.includes("deepseek");
+  const kimiDirectLike = provider.includes("kimi") || baseUrl.includes("moonshot") || baseUrl.includes("api.kimi.com");
+  const profile = normalizeAnalysisProfile(settings.analysisProfile);
+  const base = agentLike
+    ? CLIENT_ANALYSIS_DEFAULTS["claude-agent"]
+    : deepseekLike
+      ? CLIENT_ANALYSIS_DEFAULTS.deepseek
+      : kimiDirectLike
+        ? CLIENT_ANALYSIS_DEFAULTS["kimi-direct"]
+        : CLIENT_ANALYSIS_DEFAULTS.general;
+  const strategy = {
+    ...base,
+    name: agentLike ? "claude-agent" : deepseekLike ? "deepseek" : kimiDirectLike ? "kimi-direct" : "openai-compatible",
+    profile,
+    targetMinutes: profile === "fast" ? 12 : 20,
+  };
+
+  applyAnalysisProfileToClientStrategy(strategy);
+  const remaining = paper ? getMissingAnalysisCount(paper) : 0;
+  strategy.effectiveBatchSize = getClientEffectiveBatchSize(strategy, remaining);
+  strategy.label = getAnalysisStrategyLabel(strategy);
+  return strategy;
+}
+
+function applyAnalysisProfileToClientStrategy(strategy) {
+  if (strategy.profile !== "fast") {
+    return;
+  }
+
+  strategy.batchSize = Math.min(strategy.maxBatchSize, Math.max(strategy.batchSize + 2, Math.ceil(strategy.batchSize * 1.35)));
+  strategy.concurrency = Math.min(strategy.name === "claude-agent" ? 3 : 5, strategy.concurrency + 1);
+  strategy.expectedBatchSeconds = Math.max(24, Math.round(strategy.expectedBatchSeconds * 0.82));
+  strategy.failedRetryBatchSize = Math.min(8, strategy.failedRetryBatchSize + 1);
+}
+
+function getClientEffectiveBatchSize(strategy, remaining) {
+  if (!remaining || remaining <= strategy.batchSize) {
+    return strategy.batchSize;
+  }
+
+  const targetBatchCount = Math.max(1, Math.floor((strategy.targetMinutes * 60) / strategy.expectedBatchSeconds));
+  const neededForTarget = Math.ceil(remaining / targetBatchCount);
+  return Math.trunc(clampNumber(Math.max(strategy.batchSize, neededForTarget), 1, strategy.maxBatchSize));
+}
+
+function estimateAnalysisSeconds(remaining, strategy) {
+  if (!remaining) {
+    return 0;
+  }
+
+  const batchSize = Math.max(1, Number(strategy.effectiveBatchSize || strategy.batchSize || 1));
+  const concurrency = Math.max(1, Number(strategy.concurrency || 1));
+  const batchCount = Math.ceil(remaining / batchSize);
+  return Math.max(1, Math.ceil(batchCount / concurrency)) * Number(strategy.expectedBatchSeconds || 45);
+}
+
+function getAnalysisDashboardSummary(profile, strategy, targetCount, estimateSeconds) {
+  if (!targetCount) {
+    return state.paper ? "当前没有待分析段落" : "载入论文后显示预计耗时和队列策略";
+  }
+
+  const profileLabel = profile === "fast" ? "吞吐优先" : "质量优先";
+  return `${profileLabel} · ${targetCount} 段 · 约 ${formatDuration(estimateSeconds)} · ${strategy.concurrency || 1} 并发`;
+}
+
+function getAnalysisStrategyLabel(strategy = {}) {
+  const providerLabel = {
+    "claude-agent": "Claude Agent",
+    deepseek: "DeepSeek",
+    "kimi-direct": "Kimi Direct",
+    "openai-compatible": "OpenAI兼容",
+  }[strategy.name] || strategy.name || "默认";
+  return `${providerLabel}/${ANALYSIS_PROFILE_LABELS[normalizeAnalysisProfile(strategy.profile)]}`;
+}
+
+function formatDuration(seconds) {
+  const value = Math.max(0, Math.round(Number(seconds || 0)));
+  if (value < 60) {
+    return `${value}s`;
+  }
+
+  const minutes = Math.floor(value / 60);
+  const rest = value % 60;
+  if (minutes < 60) {
+    return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const minuteRest = minutes % 60;
+  return minuteRest ? `${hours}h ${minuteRest}m` : `${hours}h`;
+}
+
+function clampNumber(value, min, max) {
+  return Math.min(max, Math.max(min, Number(value)));
+}
+
 function updateAutoStatus() {
   if (!state.autoAnalyze.running) {
     return;
@@ -2922,6 +3177,8 @@ function updateAutoStatus() {
 function updateAutoButtons() {
   const busy = state.autoAnalyze.running || state.pipelineBusy;
   const missingCount = state.paper ? getMissingAnalysisCount(state.paper) : 0;
+  els.qualityProfileButton.disabled = busy;
+  els.fastProfileButton.disabled = busy;
   els.autoAnalyzeButton.disabled = !state.paper || busy;
   els.resumeAnalyzeButton.disabled = !state.paper || busy || missingCount === 0;
   els.resumeAnalyzeButton.textContent = missingCount
@@ -2932,6 +3189,7 @@ function updateAutoButtons() {
   els.rerunAnalyzeButton.disabled = !state.paper || busy;
   els.stopAutoButton.classList.toggle("hidden", !state.autoAnalyze.running);
   els.stopAutoButton.disabled = !state.autoAnalyze.running || state.autoAnalyze.stopRequested;
+  renderAnalysisDashboard();
   renderJobHistory();
 }
 

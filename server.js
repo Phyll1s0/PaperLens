@@ -494,7 +494,7 @@ async function handleRetryFailedJob(res, jobId) {
   job.status = "queued";
   job.cancelRequested = false;
   job.retryFailedOnly = true;
-  job.adaptiveBatchSize = ANALYSIS_FAILED_RETRY_BATCH_SIZE;
+  job.adaptiveBatchSize = getAnalysisProviderStrategy(job.settings, { ...job, retryFailedOnly: true }).failedRetryBatchSize;
   job.retryFailedAt = new Date().toISOString();
   job.currentParagraphId = "";
   job.error = "";
@@ -1050,6 +1050,7 @@ function serializeJob(job) {
     retryFailedOnly: Boolean(job.retryFailedOnly),
     cacheHits: Number(job.cacheHits || 0),
     adaptiveBatchSize: Number(job.adaptiveBatchSize || 0),
+    strategy: getAnalysisStrategySnapshot(job.settings, job),
     total: job.total,
     completed: job.completed,
     failed: job.failed,
@@ -1080,6 +1081,7 @@ function serializeJobSummary(job) {
     status: job.status,
     retryFailedOnly: Boolean(job.retryFailedOnly),
     cacheHits: Number(job.cacheHits || 0),
+    strategy: getAnalysisStrategySnapshot(job.settings, job),
     total: job.total,
     completed: job.completed,
     failed: job.failed,
@@ -1381,7 +1383,7 @@ function getAnalysisBatchSize(settings = {}, job = null) {
     return configured;
   }
 
-  const targetBatchCount = Math.max(1, Math.floor((ANALYSIS_TARGET_MINUTES * 60) / strategy.expectedBatchSeconds));
+  const targetBatchCount = Math.max(1, Math.floor((strategy.targetMinutes * 60) / strategy.expectedBatchSeconds));
   const neededForTarget = Math.ceil(remaining / targetBatchCount);
   return Math.trunc(clampNumber(Math.max(configured, neededForTarget), 1, strategy.maxBatchSize));
 }
@@ -1390,17 +1392,21 @@ function getAnalysisProviderStrategy(settings = {}, job = null) {
   const provider = String(settings.provider || "").toLowerCase();
   const baseUrl = String(settings.baseUrl || "").toLowerCase();
   const model = String(settings.model || "").toLowerCase();
+  const profile = normalizeAnalysisProfile(settings.analysisProfile);
   const agentLike = provider.startsWith("claude") || baseUrl.startsWith("local:claude");
   const deepseekLike = provider.includes("deepseek") || baseUrl.includes("deepseek") || model.includes("deepseek");
   const kimiDirectLike = provider.includes("kimi") || baseUrl.includes("moonshot") || baseUrl.includes("api.kimi.com");
 
   const strategy = {
     name: "openai-compatible",
+    profile,
+    label: `OpenAI-compatible/${getAnalysisProfileLabel(profile)}`,
     agentLike,
     batchSize: ANALYSIS_BATCH_SIZE,
     concurrency: ANALYSIS_CONCURRENCY,
     maxBatchSize: 24,
     expectedBatchSeconds: 45,
+    targetMinutes: ANALYSIS_TARGET_MINUTES,
     failedRetryBatchSize: Math.max(1, Math.min(ANALYSIS_FAILED_RETRY_BATCH_SIZE + 1, 6)),
     timeoutBaseMs: 70_000,
     timeoutPerParagraphMs: 8_000,
@@ -1409,6 +1415,7 @@ function getAnalysisProviderStrategy(settings = {}, job = null) {
 
   if (deepseekLike) {
     strategy.name = "deepseek";
+    strategy.label = `DeepSeek/${getAnalysisProfileLabel(profile)}`;
     strategy.maxBatchSize = 24;
     strategy.expectedBatchSeconds = 34;
     strategy.failedRetryBatchSize = Math.max(1, Math.min(ANALYSIS_FAILED_RETRY_BATCH_SIZE + 1, 6));
@@ -1418,6 +1425,7 @@ function getAnalysisProviderStrategy(settings = {}, job = null) {
 
   if (kimiDirectLike && !agentLike) {
     strategy.name = "kimi-direct";
+    strategy.label = `Kimi Direct/${getAnalysisProfileLabel(profile)}`;
     strategy.maxBatchSize = 20;
     strategy.expectedBatchSeconds = 42;
     strategy.failedRetryBatchSize = ANALYSIS_FAILED_RETRY_BATCH_SIZE;
@@ -1425,6 +1433,7 @@ function getAnalysisProviderStrategy(settings = {}, job = null) {
 
   if (agentLike) {
     strategy.name = "claude-agent";
+    strategy.label = `Claude Agent/${getAnalysisProfileLabel(profile)}`;
     strategy.batchSize = CLAUDE_AGENT_ANALYSIS_BATCH_SIZE;
     strategy.concurrency = CLAUDE_AGENT_ANALYSIS_CONCURRENCY;
     strategy.maxBatchSize = 20;
@@ -1435,11 +1444,64 @@ function getAnalysisProviderStrategy(settings = {}, job = null) {
     strategy.timeoutMaxMs = 360_000;
   }
 
+  applyAnalysisProfileToStrategy(strategy);
   if (job?.retryFailedOnly) {
     strategy.concurrency = Math.min(strategy.concurrency, 2);
   }
-
   return strategy;
+}
+
+function applyAnalysisProfileToStrategy(strategy) {
+  if (strategy.profile !== "fast") {
+    return strategy;
+  }
+
+  strategy.batchSize = Math.min(strategy.maxBatchSize, Math.max(strategy.batchSize + 2, Math.ceil(strategy.batchSize * 1.35)));
+  strategy.concurrency = Math.min(strategy.name === "claude-agent" ? 3 : 5, strategy.concurrency + 1);
+  strategy.expectedBatchSeconds = Math.max(24, Math.round(strategy.expectedBatchSeconds * 0.82));
+  strategy.targetMinutes = Math.max(8, Math.min(ANALYSIS_TARGET_MINUTES, 12));
+  strategy.failedRetryBatchSize = Math.min(8, strategy.failedRetryBatchSize + 1);
+  strategy.timeoutPerParagraphMs = Math.max(5_000, Math.round(strategy.timeoutPerParagraphMs * 0.82));
+  return strategy;
+}
+
+function getAnalysisStrategySnapshot(settings = {}, job = null) {
+  const strategy = getAnalysisProviderStrategy(settings, job);
+  const effectiveBatchSize = getAnalysisBatchSize(settings, job);
+  const remaining = job?.items
+    ? job.items.filter((item) => item.status === "queued" || item.status === "running").length
+    : 0;
+  const total = job?.items ? job.items.length : 0;
+  return {
+    name: strategy.name,
+    label: strategy.label,
+    profile: strategy.profile,
+    targetMinutes: strategy.targetMinutes,
+    batchSize: strategy.batchSize,
+    effectiveBatchSize,
+    concurrency: strategy.concurrency,
+    maxBatchSize: strategy.maxBatchSize,
+    failedRetryBatchSize: strategy.failedRetryBatchSize,
+    expectedBatchSeconds: strategy.expectedBatchSeconds,
+    remaining,
+    total,
+    estimatedRemainingSeconds: estimateAnalysisSeconds(remaining, effectiveBatchSize, strategy.concurrency, strategy.expectedBatchSeconds),
+    estimatedTotalSeconds: estimateAnalysisSeconds(total, effectiveBatchSize, strategy.concurrency, strategy.expectedBatchSeconds),
+  };
+}
+
+function estimateAnalysisSeconds(paragraphCount, batchSize, concurrency, expectedBatchSeconds) {
+  if (!paragraphCount) {
+    return 0;
+  }
+
+  const batchCount = Math.ceil(paragraphCount / Math.max(1, Number(batchSize || 1)));
+  return Math.max(1, Math.ceil(batchCount / Math.max(1, Number(concurrency || 1)))) *
+    Math.max(1, Number(expectedBatchSeconds || 45));
+}
+
+function getAnalysisProfileLabel(profile) {
+  return profile === "fast" ? "快速" : "精读";
 }
 
 async function runAnalysisJobBatch(job, items, signal, options = {}) {
@@ -1526,8 +1588,9 @@ async function runAnalysisJobBatch(job, items, signal, options = {}) {
     if (affectedItems.length > 1) {
       const chunks = splitJobItemsForBatchRetry(affectedItems, options.splitDepth || 0);
       const nextBatchSize = chunks[0]?.length || 1;
+      const retryBatchSize = getAnalysisProviderStrategy(job.settings, { ...job, retryFailedOnly: true }).failedRetryBatchSize;
       job.adaptiveBatchSize = job.retryFailedOnly
-        ? Math.min(ANALYSIS_FAILED_RETRY_BATCH_SIZE, nextBatchSize)
+        ? Math.min(retryBatchSize, nextBatchSize)
         : Math.max(1, Math.min(Number(job.adaptiveBatchSize || nextBatchSize), nextBatchSize));
       for (const item of affectedItems) {
         item.status = "queued";
@@ -1944,7 +2007,7 @@ async function handleAnalyze(req, res) {
 }
 
 async function analyzeParagraphInPaper(paper, paragraph, settings, options = {}) {
-  const content = await callModel(settings, buildParagraphAnalysisMessages(paper, paragraph), {
+  const content = await callModel(settings, buildParagraphAnalysisMessages(paper, paragraph, settings), {
     signal: options.signal,
   });
   const parsed = parseModelJson(content);
@@ -1960,7 +2023,7 @@ async function analyzeParagraphInPaper(paper, paragraph, settings, options = {})
 }
 
 async function analyzeParagraphBatchInPaper(paper, paragraphs, settings, options = {}) {
-  const content = await callModel(settings, buildParagraphBatchAnalysisMessages(paper, paragraphs), {
+  const content = await callModel(settings, buildParagraphBatchAnalysisMessages(paper, paragraphs, settings), {
     signal: options.signal,
     maxTokens: Math.min(18000, Math.max(3600, 1800 + paragraphs.length * 1600)),
     timeoutMs: getBatchAnalysisTimeoutMs(paragraphs.length, settings),
@@ -2022,9 +2085,18 @@ function parseBatchAnalysisResult(content) {
     .map(([paragraphId, value]) => ({ paragraphId, ...value }));
 }
 
-function buildParagraphAnalysisMessages(paper, paragraph) {
+function getAnalysisProfileInstruction(settings = {}) {
+  if (normalizeAnalysisProfile(settings.analysisProfile) === "fast") {
+    return "快速模式：translation 仍需忠实完整翻译当前原文，保留必要英文术语和 LaTeX；explanation 用 2-3 句中文，约 120-240 个汉字，覆盖含义、作用和关键难点，不能只写一句泛泛总结。";
+  }
+
+  return "精读模式：translation 忠实完整翻译当前原文，保留必要英文术语和 LaTeX；explanation 需要 3-5 句中文，约 180-360 个汉字。";
+}
+
+function buildParagraphAnalysisMessages(paper, paragraph, settings = {}) {
   const section = (paper.sections || []).find((item) => item.id === paragraph.sectionId);
   const analysisContext = buildParagraphAnalysisContext(paper, paragraph);
+  const profileInstruction = getAnalysisProfileInstruction(settings);
   return [
     {
       role: "system",
@@ -2045,6 +2117,8 @@ function buildParagraphAnalysisMessages(paper, paragraph) {
         "原文:",
         paragraph.sourceText,
         "",
+        profileInstruction,
+        "",
         "输出 JSON 格式:",
         "{",
         '  "translation": "忠实中文翻译，保留必要英文术语",',
@@ -2056,8 +2130,9 @@ function buildParagraphAnalysisMessages(paper, paragraph) {
   ];
 }
 
-function buildParagraphBatchAnalysisMessages(paper, paragraphs) {
+function buildParagraphBatchAnalysisMessages(paper, paragraphs, settings = {}) {
   const globalContext = buildPaperProfileContext(paper) || "无。";
+  const profileInstruction = getAnalysisProfileInstruction(settings);
   return [
     {
       role: "system",
@@ -2068,7 +2143,7 @@ function buildParagraphBatchAnalysisMessages(paper, paragraphs) {
       role: "user",
       content: [
         "请批量精读下面这些论文段落。",
-        "质量优先：translation 忠实完整翻译当前原文，保留必要英文术语和 LaTeX；explanation 需要 3-5 句中文，约 180-360 个汉字。",
+        profileInstruction,
         "explanation 至少覆盖：这段在说什么、它在论文论证中的作用、关键概念/假设/公式/图表关系、读者容易误解或需要注意的点。简单过渡段可以略短，但不能只写一句泛泛总结。",
         "不要把上下文翻译进结果；上下文只用于消解术语、承接关系和引用。",
         "每个输入 paragraph 必须返回一个同名 paragraphId，不要漏项，不要增加不存在的段落。",
@@ -7317,6 +7392,7 @@ function normalizeSettings(settings = {}) {
   const model = normalizeModelName(String(settings.model || "").trim());
   const baseUrl = resolveBaseUrlForProvider(provider, String(settings.baseUrl || "https://api.openai.com/v1").trim());
   const agentBudgetUsd = Number(settings.agentBudgetUsd || 500);
+  const analysisProfile = normalizeAnalysisProfile(settings.analysisProfile);
   const normalizedApiKey = normalizeApiKey(apiKey);
   const proxyUrl = normalizeProxyUrl(String(settings.proxyUrl || ""));
 
@@ -7332,7 +7408,11 @@ function normalizeSettings(settings = {}) {
     throw badRequest("Model name is required.");
   }
 
-  return { provider, apiKey: normalizedApiKey, apiKeyRef, model, baseUrl, agentBudgetUsd, proxyUrl };
+  return { provider, apiKey: normalizedApiKey, apiKeyRef, model, baseUrl, agentBudgetUsd, proxyUrl, analysisProfile };
+}
+
+function normalizeAnalysisProfile(profile) {
+  return profile === "fast" ? "fast" : "quality";
 }
 
 function badRequest(message) {
