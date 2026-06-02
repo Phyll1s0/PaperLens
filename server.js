@@ -26,8 +26,8 @@ const WORKSPACE_CACHE_KEY = createHash("sha1").update(__dirname).digest("hex").s
 const SWIFT_MODULE_CACHE_DIR = path.join(CACHE_DIR, `swift-module-cache-${WORKSPACE_CACHE_KEY}`);
 const TMP_DIR = path.join(CACHE_DIR, "tmp");
 const MAX_UPLOAD_BYTES = 120 * 1024 * 1024;
-const ARTIFACT_CROP_VERSION = 8;
-const VISUAL_STRUCTURE_VERSION = 2;
+const ARTIFACT_CROP_VERSION = 10;
+const VISUAL_STRUCTURE_VERSION = 4;
 const JOB_ITEM_MAX_ATTEMPTS = 2;
 const JOB_POLL_LIMIT = 20;
 const ANALYSIS_BATCH_SIZE = readIntegerEnv("PAPERLENS_ANALYSIS_BATCH_SIZE", 12, 1, 24);
@@ -3224,6 +3224,7 @@ function inferPageVisualRegions(page) {
       if (!crop) {
         return;
       }
+      const cropQuality = buildCropQuality(crop, visualType);
 
       regions.push({
         id: `visual_${page.pageNumber}_${index}`,
@@ -3238,6 +3239,7 @@ function inferPageVisualRegions(page) {
         pageWidth: crop.pageWidth,
         pageHeight: crop.pageHeight,
         pixelRefined: Boolean(crop.pixelRefined),
+        cropQuality,
       });
       return;
     }
@@ -3248,6 +3250,7 @@ function inferPageVisualRegions(page) {
       if (!crop) {
         return;
       }
+      const cropQuality = buildCropQuality(crop, visualType);
 
       regions.push({
         id: `visual_${page.pageNumber}_${index}`,
@@ -3262,6 +3265,7 @@ function inferPageVisualRegions(page) {
         pageWidth: crop.pageWidth,
         pageHeight: crop.pageHeight,
         pixelRefined: Boolean(crop.pixelRefined),
+        cropQuality,
       });
     }
   });
@@ -3526,7 +3530,8 @@ function isBlockCoveredByVisualStructure(block, page) {
     }
 
     const overlapRatio = boxOverlapRatio(box, region);
-    if (overlapRatio < 0.62) {
+    const lowConfidenceOversized = region.cropQuality?.oversized && region.cropQuality?.confidence === "low";
+    if (overlapRatio < (lowConfidenceOversized ? 0.72 : 0.58)) {
       return false;
     }
 
@@ -3538,8 +3543,46 @@ function isBlockCoveredByVisualStructure(block, page) {
       return isCodeContinuationBlock(block.text || "", block);
     }
 
-    return isLikelyVisualCandidateBlock(block, region.visualType === "table");
+    if (isLikelyVisualCandidateBlock(block, region.visualType === "table")) {
+      return true;
+    }
+
+    if (overlapRatio < 0.72) {
+      return false;
+    }
+
+    return isLikelyEmbeddedVisualTextBlock(block.text || "", block, region);
   });
+}
+
+function isLikelyEmbeddedVisualTextBlock(text, block = {}, region = {}) {
+  const clean = normalizeArtifactText(text);
+  if (!clean || isLikelyCaptionText(clean)) {
+    return false;
+  }
+
+  const lineCount = Number(block.lineCount || 1);
+  const averageLineLength = clean.length / Math.max(1, lineCount);
+  const sentenceCount = (clean.match(/[.!?。！？]/g) || []).length;
+  if (clean.length > 320 || sentenceCount >= 2 || averageLineLength > 82) {
+    return false;
+  }
+
+  if (/^\([a-z]\)\s*/i.test(clean)) {
+    return true;
+  }
+
+  if (region.visualType === "table") {
+    const numberTokens = (clean.match(/\b\d+(?:[.,]\d+)*%?\b/g) || []).length;
+    const tableTokens = /\b(dataset|granularity|method|model|metric|mae|mse|rmse|accuracy|precision|recall|total|average|avg|horizon|baseline|ours)\b|#/i.test(clean);
+    return numberTokens >= 2 || (tableTokens && lineCount <= 5 && averageLineLength <= 72);
+  }
+
+  const diagramTokens = (clean.match(/\b(?:input|output|query|chunk|task|agent|model|token|layer|encoder|decoder|prompt|summary|code|step|final|manager|worker|score|loss)\b/gi) || []).length;
+  const operatorTokens = (clean.match(/[→←↔=+\-*/]|=>|::/g) || []).length;
+  const shortLabel = clean.length <= 90 && lineCount <= 3 && sentenceCount === 0;
+  return (shortLabel && (diagramTokens >= 1 || operatorTokens >= 1)) ||
+    (lineCount >= 2 && averageLineLength <= 46 && diagramTokens >= 2 && sentenceCount <= 1);
 }
 
 function isLikelyNonReadingParagraphText(text, context = {}) {
@@ -3692,6 +3735,7 @@ function buildCaptionArtifactFields(page, captionBlock, blockIndex = -1) {
     visualRegionId: visualRegion?.id || "",
     visualSource: visualRegion?.source || "",
     cropVersion: ARTIFACT_CROP_VERSION,
+    cropQuality: visualRegion?.cropQuality || buildCropQuality(crop, visualType),
     imagePath: page.imagePath || null,
     imageWidth: page.imageWidth || null,
     imageHeight: page.imageHeight || null,
@@ -3713,6 +3757,7 @@ function buildBlockArtifactFields(page, block, type, blockIndex = -1) {
     visualRegionId: visualRegion?.id || "",
     visualSource: visualRegion?.source || "",
     cropVersion: ARTIFACT_CROP_VERSION,
+    cropQuality: visualRegion?.cropQuality || buildCropQuality(crop, type === "figure-text" ? "figure" : type),
     imagePath: page.imagePath || null,
     imageWidth: page.imageWidth || null,
     imageHeight: page.imageHeight || null,
@@ -3748,6 +3793,68 @@ function visualRegionToCrop(region) {
     ...crop,
     pixelRefined: Boolean(region.pixelRefined),
   };
+}
+
+function buildCropQuality(crop, visualType = "") {
+  if (!crop || !Number(crop.pageWidth) || !Number(crop.pageHeight)) {
+    return {
+      version: 1,
+      areaRatio: 0,
+      widthRatio: 0,
+      heightRatio: 0,
+      oversized: false,
+      confidence: "unknown",
+    };
+  }
+
+  const pageArea = Math.max(1, Number(crop.pageWidth) * Number(crop.pageHeight));
+  const areaRatio = Number(crop.width || 0) * Number(crop.height || 0) / pageArea;
+  const widthRatio = Number(crop.width || 0) / Math.max(1, Number(crop.pageWidth || 0));
+  const heightRatio = Number(crop.height || 0) / Math.max(1, Number(crop.pageHeight || 0));
+  const oversized = isOversizedVisualCrop(areaRatio, widthRatio, heightRatio, visualType);
+  return {
+    version: 1,
+    areaRatio: roundMetric(areaRatio),
+    widthRatio: roundMetric(widthRatio),
+    heightRatio: roundMetric(heightRatio),
+    oversized,
+    confidence: getCropConfidence(areaRatio, widthRatio, heightRatio, visualType, Boolean(crop.pixelRefined)),
+  };
+}
+
+function isOversizedVisualCrop(areaRatio, widthRatio, heightRatio, visualType = "") {
+  if (visualType === "table") {
+    return areaRatio > 0.38 || heightRatio > 0.62;
+  }
+  if (visualType === "formula") {
+    return areaRatio > 0.12 || heightRatio > 0.18;
+  }
+  if (visualType === "code") {
+    return areaRatio > 0.2 || heightRatio > 0.36;
+  }
+  return areaRatio > 0.28 ||
+    (widthRatio > 0.62 && heightRatio > 0.46) ||
+    (widthRatio > 0.9 && heightRatio > 0.34);
+}
+
+function getCropConfidence(areaRatio, widthRatio, heightRatio, visualType = "", pixelRefined = false) {
+  if (isOversizedVisualCrop(areaRatio, widthRatio, heightRatio, visualType)) {
+    return pixelRefined ? "medium" : "low";
+  }
+
+  if (pixelRefined) {
+    return "high";
+  }
+
+  if (visualType === "formula" || visualType === "code") {
+    return "medium";
+  }
+
+  return widthRatio > 0.02 && heightRatio > 0.02 ? "medium" : "low";
+}
+
+function roundMetric(value) {
+  return Math.round(Number(value || 0) * 1000) / 1000;
 }
 
 function extractArtifactLabel(text) {
@@ -7142,7 +7249,7 @@ function upgradePaperArtifacts(paper) {
     ? hasExtractableArtifacts
     : artifacts.some((artifact) =>
       ["caption", "formula", "code", "figure-text"].includes(artifact.type) &&
-        (artifact.cropVersion !== ARTIFACT_CROP_VERSION || !artifact.crop));
+        (artifact.cropVersion !== ARTIFACT_CROP_VERSION || !artifact.crop || !artifact.cropQuality));
   if ((!needsUpgrade && !needsVisualStructure) || !Array.isArray(paper.extractionPages) || !paper.extractionPages.length) {
     return false;
   }
