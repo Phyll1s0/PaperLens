@@ -9,6 +9,9 @@ import { inflateSync } from "node:zlib";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const PACKAGE_VERSION = readPackageVersion();
+const SERVICE_SCHEMA_VERSION = 1;
+const SERVICE_STARTED_AT_MS = Date.now();
 
 loadDotEnv(path.join(__dirname, ".env"));
 
@@ -22,6 +25,11 @@ const ASSET_DIR = path.join(__dirname, "paper-assets");
 const CACHE_DIR = path.join(__dirname, ".cache");
 const JOBS_PATH = path.join(DATA_DIR, "jobs.json");
 const SECRETS_PATH = path.join(DATA_DIR, "secrets.json");
+const SERVICE_STATIC_ASSET_PATHS = [
+  path.join(PUBLIC_DIR, "index.html"),
+  path.join(PUBLIC_DIR, "app.js"),
+  path.join(PUBLIC_DIR, "styles.css"),
+];
 const WORKSPACE_CACHE_KEY = createHash("sha1").update(__dirname).digest("hex").slice(0, 12);
 const SWIFT_MODULE_CACHE_DIR = path.join(CACHE_DIR, `swift-module-cache-${WORKSPACE_CACHE_KEY}`);
 const TMP_DIR = path.join(CACHE_DIR, "tmp");
@@ -97,12 +105,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && url.pathname === "/api/health") {
-      return json(res, {
-        ok: true,
-        name: "PaperLens",
-        pdfEngine: PDF_ENGINE,
-        uptimeSeconds: Math.round(process.uptime()),
-      });
+      return json(res, await buildHealthPayload());
     }
 
     if (req.method === "GET" && url.pathname.startsWith("/public/")) {
@@ -4994,6 +4997,48 @@ function readIntegerEnv(name, defaultValue, min, max) {
   return Math.trunc(clampNumber(value, min, max));
 }
 
+async function buildHealthPayload() {
+  const versionStatus = await getServiceVersionStatus();
+  return {
+    ok: true,
+    name: "PaperLens",
+    version: PACKAGE_VERSION,
+    serviceSchemaVersion: SERVICE_SCHEMA_VERSION,
+    pdfEngine: PDF_ENGINE,
+    uptimeSeconds: Math.round(process.uptime()),
+    startedAt: new Date(SERVICE_STARTED_AT_MS).toISOString(),
+    ...versionStatus,
+  };
+}
+
+async function getServiceVersionStatus() {
+  const serverSourceMtimeMs = await getFileMtimeMs(__filename);
+  const staticAssetMtimeMs = await getMaxFileMtimeMs(SERVICE_STATIC_ASSET_PATHS);
+  const needsRestart = serverSourceMtimeMs > SERVICE_STARTED_AT_MS + 1000;
+  return {
+    serverSourceMtimeMs,
+    staticAssetMtimeMs,
+    serviceBuildId: `${PACKAGE_VERSION}:${Math.round(serverSourceMtimeMs)}`,
+    needsRestart,
+    restartReason: needsRestart
+      ? "server.js 已在服务启动后更新，请重启 PaperLens 后端。"
+      : "",
+  };
+}
+
+async function getFileMtimeMs(filePath) {
+  try {
+    return (await stat(filePath)).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+async function getMaxFileMtimeMs(filePaths) {
+  const mtimes = await Promise.all(filePaths.map((filePath) => getFileMtimeMs(filePath)));
+  return Math.max(0, ...mtimes);
+}
+
 function classifyPageArtifact(block) {
   const text = normalizeArtifactText(block?.text || "");
   if (!text) {
@@ -7407,6 +7452,15 @@ function loadDotEnv(filePath) {
     }
 
     process.env[key] = rawValue.replace(/^["']|["']$/g, "");
+  }
+}
+
+function readPackageVersion() {
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(__dirname, "package.json"), "utf8"));
+    return String(pkg.version || "0.0.0");
+  } catch {
+    return "0.0.0";
   }
 }
 

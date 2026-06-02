@@ -40,6 +40,7 @@ const els = {
   modelDiagnosticsText: document.querySelector("#modelDiagnosticsText"),
   providerHintText: document.querySelector("#providerHintText"),
   providerGuide: document.querySelector("#providerGuide"),
+  serviceStatusText: document.querySelector("#serviceStatusText"),
   pdfInput: document.querySelector("#pdfInput"),
   aiSegmentInput: document.querySelector("#aiSegmentInput"),
   autoAnalyzeInput: document.querySelector("#autoAnalyzeInput"),
@@ -114,6 +115,9 @@ const PROVIDERS = {
 };
 
 const API_TIMEOUT_MS = 240_000;
+const CLIENT_LOADED_AT_MS = Date.now();
+const REQUIRED_SERVICE_SCHEMA_VERSION = 1;
+const SERVICE_VERSION_CHECK_INTERVAL_MS = 60_000;
 const API_KEY_REF_STORAGE_KEY = "paper-reader-api-key-ref";
 const API_KEY_INFO_STORAGE_KEY = "paper-reader-api-key-info";
 const LEGACY_API_KEY_STORAGE_KEY = "paper-reader-api-key";
@@ -133,6 +137,8 @@ bindEvents();
 loadRecentPapers();
 updateModelDiagnostics();
 updateAutoButtons();
+checkServiceVersion();
+window.setInterval(checkServiceVersion, SERVICE_VERSION_CHECK_INTERVAL_MS);
 
 function bindEvents() {
   els.uploadButton.addEventListener("click", uploadPdf);
@@ -193,6 +199,9 @@ function bindEvents() {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && state.paper) {
       syncActiveAnalysisJob();
+    }
+    if (document.visibilityState === "visible") {
+      checkServiceVersion();
     }
   });
 
@@ -1050,6 +1059,79 @@ function debounce(fn, delay = 250) {
     window.clearTimeout(timer);
     timer = window.setTimeout(() => fn(...args), delay);
   };
+}
+
+async function checkServiceVersion() {
+  if (!els.serviceStatusText) {
+    return;
+  }
+
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 6000);
+  try {
+    const response = await fetch("/api/health", {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    const payload = await response.json().catch(() => ({}));
+    renderServiceStatus(getServiceStatus(payload, response.ok));
+  } catch {
+    renderServiceStatus({
+      level: "error",
+      text: "无法连接 PaperLens 服务。若页面还能显示旧内容，请确认后端进程仍在运行。",
+    });
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+function getServiceStatus(payload, responseOk) {
+  if (!responseOk || !payload?.ok) {
+    return {
+      level: "error",
+      text: "PaperLens 服务健康检查失败，请查看终端日志或重启服务。",
+    };
+  }
+
+  if (!payload.serviceSchemaVersion) {
+    return {
+      level: "warn",
+      text: "后端仍是旧进程：当前页面已更新，但服务未返回版本信息。请重启 PaperLens 服务后刷新页面。",
+    };
+  }
+
+  if (Number(payload.serviceSchemaVersion) < REQUIRED_SERVICE_SCHEMA_VERSION) {
+    return {
+      level: "warn",
+      text: `后端版本过旧：需要 schema ${REQUIRED_SERVICE_SCHEMA_VERSION}，当前是 ${payload.serviceSchemaVersion}。请重启 PaperLens 服务。`,
+    };
+  }
+
+  if (payload.needsRestart) {
+    return {
+      level: "warn",
+      text: payload.restartReason || "服务源码已更新，但后端仍是旧进程。请重启 PaperLens 服务。",
+    };
+  }
+
+  if (Number(payload.staticAssetMtimeMs || 0) > CLIENT_LOADED_AT_MS + 1000) {
+    return {
+      level: "warn",
+      text: "前端文件已更新。请刷新页面，以免新旧界面脚本混用。",
+    };
+  }
+
+  return {
+    level: "ok",
+    text: `服务已同步 · v${payload.version || "0.0.0"} · 已运行 ${formatDuration(payload.uptimeSeconds || 0)}`,
+  };
+}
+
+function renderServiceStatus(status) {
+  els.serviceStatusText.textContent = status.text || "";
+  els.serviceStatusText.classList.toggle("visible", Boolean(status.text));
+  els.serviceStatusText.classList.toggle("warn", status.level === "warn");
+  els.serviceStatusText.classList.toggle("error", status.level === "error");
 }
 
 async function pingModel() {

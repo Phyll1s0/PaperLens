@@ -100,6 +100,34 @@ textarea:disabled {
   font-size: 13px;
 }
 
+.service-status {
+  display: none;
+  margin: -10px 0 14px;
+  padding: 8px 10px;
+  border: 1px solid #dfe7e2;
+  border-radius: 8px;
+  background: #f8faf7;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.service-status.visible {
+  display: block;
+}
+
+.service-status.warn {
+  border-color: rgba(180, 83, 42, 0.26);
+  background: rgba(180, 83, 42, 0.09);
+  color: #7a3d20;
+}
+
+.service-status.error {
+  border-color: rgba(180, 35, 24, 0.24);
+  background: rgba(180, 35, 24, 0.08);
+  color: var(--danger);
+}
+
 .diagnostics-text {
   overflow-wrap: anywhere;
   line-height: 1.45;

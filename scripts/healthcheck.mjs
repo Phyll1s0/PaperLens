@@ -21,6 +21,12 @@ const request = http.get({
 
     try {
       const payload = JSON.parse(body);
+      if (payload.needsRestart) {
+        console.warn(payload.restartReason || "PaperLens service source changed after startup. Restart the service.");
+      } else if (payload.serviceSchemaVersion === undefined) {
+        console.warn("PaperLens service is running an older health schema. Restart the service after updating code.");
+      }
+
       process.exit(payload.ok ? 0 : 1);
     } catch {
       console.error("Health check response was not JSON.");
