@@ -34,7 +34,10 @@ const ANALYSIS_BATCH_SIZE = readIntegerEnv("PAPERLENS_ANALYSIS_BATCH_SIZE", 12, 
 const CLAUDE_AGENT_ANALYSIS_BATCH_SIZE = readIntegerEnv("PAPERLENS_AGENT_ANALYSIS_BATCH_SIZE", 8, 1, 20);
 const ANALYSIS_CONCURRENCY = readIntegerEnv("PAPERLENS_ANALYSIS_CONCURRENCY", 3, 1, 6);
 const CLAUDE_AGENT_ANALYSIS_CONCURRENCY = readIntegerEnv("PAPERLENS_AGENT_ANALYSIS_CONCURRENCY", 2, 1, 3);
+const ANALYSIS_FAILED_RETRY_BATCH_SIZE = readIntegerEnv("PAPERLENS_ANALYSIS_FAILED_RETRY_BATCH_SIZE", 2, 1, 8);
 const ANALYSIS_TARGET_MINUTES = readIntegerEnv("PAPERLENS_ANALYSIS_TARGET_MINUTES", 20, 5, 240);
+const ANALYSIS_CACHE_VERSION = 1;
+const ANALYSIS_CACHE_MAX_ENTRIES = 800;
 const ANALYSIS_CONTEXT_TEXT_LIMIT = 900;
 const ANALYSIS_CONTEXT_TOTAL_LIMIT = 5200;
 const BATCH_ANALYSIS_CONTEXT_LIMIT = 1100;
@@ -331,20 +334,35 @@ async function handleCreateAnalysisJob(req, res, paperId) {
 
   const readingParagraphs = getReadingParagraphs(paper);
   const requestedSet = requestedIds.length ? new Set(requestedIds) : null;
+  const cacheEnabled = payload.useCache !== false && !forceSelected;
+  let cacheWarmups = 0;
+  let cacheHits = 0;
+  if (cacheEnabled) {
+    cacheWarmups = ensurePaperAnalysisCache(paper);
+  }
   const targets = readingParagraphs.filter((paragraph) => {
     if (requestedSet && !requestedSet.has(paragraph.id)) {
       return false;
     }
 
-    return rerunAll || forceSelected || needsParagraphAnalysis(paragraph);
+    const needsAnalysisNow = needsParagraphAnalysis(paragraph);
+    if (cacheEnabled && (rerunAll || needsAnalysisNow) && hydrateParagraphAnalysisFromCache(paper, paragraph)) {
+      cacheHits += 1;
+      return false;
+    }
+
+    return rerunAll || forceSelected || needsAnalysisNow;
   });
 
   if (!targets.length) {
+    if (cacheHits > 0 || cacheWarmups > 0) {
+      await savePaper(paper);
+    }
     return json(res, {
       job: null,
       paper,
       settings: serializeClientSettings(settings),
-      message: "没有待分析段落。",
+      message: cacheHits > 0 ? `已从缓存恢复 ${cacheHits} 段，没有待分析段落。` : "没有待分析段落。",
     });
   }
 
@@ -362,6 +380,7 @@ async function handleCreateAnalysisJob(req, res, paperId) {
     paragraphIds: targets.map((paragraph) => paragraph.id),
     settings,
     rerunAll,
+    cacheHits,
   });
   jobStore.jobs.set(job.id, job);
   await persistJobs();
@@ -437,6 +456,9 @@ async function handleRetryFailedJob(res, jobId) {
 
   job.status = "queued";
   job.cancelRequested = false;
+  job.retryFailedOnly = true;
+  job.adaptiveBatchSize = ANALYSIS_FAILED_RETRY_BATCH_SIZE;
+  job.retryFailedAt = new Date().toISOString();
   job.currentParagraphId = "";
   job.error = "";
   job.startedAt = "";
@@ -694,6 +716,9 @@ function normalizeLoadedJob(job) {
     status: normalizeLoadedJobStatus(job.status),
     cancelRequested: false,
     rerunAll: Boolean(job.rerunAll),
+    retryFailedOnly: Boolean(job.retryFailedOnly),
+    cacheHits: Number.isFinite(Number(job.cacheHits)) ? Number(job.cacheHits) : 0,
+    adaptiveBatchSize: Number.isFinite(Number(job.adaptiveBatchSize)) ? Number(job.adaptiveBatchSize) : null,
     settings: job.settings || {},
     items: normalizedItems,
     total: normalizedItems.length,
@@ -748,7 +773,7 @@ function recoverInterruptedJobs() {
   }
 }
 
-function createAnalysisJob({ paper, paragraphIds, settings, rerunAll }) {
+function createAnalysisJob({ paper, paragraphIds, settings, rerunAll, cacheHits = 0 }) {
   const now = new Date().toISOString();
   return {
     id: `job_${Date.now()}_${randomUUID().slice(0, 8)}`,
@@ -758,6 +783,9 @@ function createAnalysisJob({ paper, paragraphIds, settings, rerunAll }) {
     status: "queued",
     cancelRequested: false,
     rerunAll: Boolean(rerunAll),
+    retryFailedOnly: false,
+    cacheHits: Number(cacheHits || 0),
+    adaptiveBatchSize: null,
     settings,
     items: paragraphIds.map((paragraphId) => ({
       paragraphId,
@@ -801,6 +829,9 @@ function serializeJob(job) {
     status: job.status,
     cancelRequested: Boolean(job.cancelRequested),
     rerunAll: Boolean(job.rerunAll),
+    retryFailedOnly: Boolean(job.retryFailedOnly),
+    cacheHits: Number(job.cacheHits || 0),
+    adaptiveBatchSize: Number(job.adaptiveBatchSize || 0),
     total: job.total,
     completed: job.completed,
     failed: job.failed,
@@ -829,6 +860,8 @@ function serializeJobSummary(job) {
     paperId: job.paperId,
     paperTitle: job.paperTitle,
     status: job.status,
+    retryFailedOnly: Boolean(job.retryFailedOnly),
+    cacheHits: Number(job.cacheHits || 0),
     total: job.total,
     completed: job.completed,
     failed: job.failed,
@@ -999,8 +1032,9 @@ async function runAnalysisJobItem(job, item, signal) {
     }
 
     await analyzeParagraphInPaper(paper, paragraph, resolveJobSettings(job.settings), { signal });
-    await updatePaperParagraph(job.paperId, item.paragraphId, (target) => {
+    await updatePaperParagraph(job.paperId, item.paragraphId, (target, targetPaper) => {
       copyParagraphAnalysisFields(target, paragraph);
+      rememberParagraphAnalysisInCache(targetPaper, target);
     });
     item.status = "done";
     item.completedAt = new Date().toISOString();
@@ -1045,7 +1079,7 @@ async function runAnalysisJobItem(job, item, signal) {
 }
 
 function getNextAnalysisBatchGroup(job) {
-  const concurrency = getAnalysisConcurrency(job.settings);
+  const concurrency = getAnalysisConcurrency(job.settings, job);
   const reserved = new Set();
   const batches = [];
   for (const item of job.items) {
@@ -1105,24 +1139,23 @@ function getNextAnalysisBatchItems(job, startItem, reserved = new Set()) {
   return items;
 }
 
-function getAnalysisConcurrency(settings = {}) {
-  const provider = String(settings.provider || "");
-  const baseUrl = String(settings.baseUrl || "");
-  if (provider.startsWith("claude") || baseUrl.startsWith("local:claude")) {
-    return CLAUDE_AGENT_ANALYSIS_CONCURRENCY;
-  }
-
-  return ANALYSIS_CONCURRENCY;
+function getAnalysisConcurrency(settings = {}, job = null) {
+  return getAnalysisProviderStrategy(settings, job).concurrency;
 }
 
 function getAnalysisBatchSize(settings = {}, job = null) {
-  const provider = String(settings.provider || "");
-  const baseUrl = String(settings.baseUrl || "");
-  const agentLike = provider.startsWith("claude") || baseUrl.startsWith("local:claude");
-  const configured = agentLike ? CLAUDE_AGENT_ANALYSIS_BATCH_SIZE : ANALYSIS_BATCH_SIZE;
-  const maxBatchSize = agentLike ? 20 : 24;
+  const strategy = getAnalysisProviderStrategy(settings, job);
+  const configured = strategy.batchSize;
   if (!job || !Array.isArray(job.items)) {
     return configured;
+  }
+
+  if (job.retryFailedOnly) {
+    return Math.max(1, Math.min(strategy.failedRetryBatchSize, configured));
+  }
+
+  if (Number.isFinite(Number(job.adaptiveBatchSize)) && Number(job.adaptiveBatchSize) > 0) {
+    return Math.max(1, Math.min(Number(job.adaptiveBatchSize), configured));
   }
 
   const remaining = job.items.filter((item) => item.status === "queued" || item.status === "running").length;
@@ -1130,10 +1163,65 @@ function getAnalysisBatchSize(settings = {}, job = null) {
     return configured;
   }
 
-  const expectedBatchSeconds = agentLike ? 75 : 45;
-  const targetBatchCount = Math.max(1, Math.floor((ANALYSIS_TARGET_MINUTES * 60) / expectedBatchSeconds));
+  const targetBatchCount = Math.max(1, Math.floor((ANALYSIS_TARGET_MINUTES * 60) / strategy.expectedBatchSeconds));
   const neededForTarget = Math.ceil(remaining / targetBatchCount);
-  return Math.trunc(clampNumber(Math.max(configured, neededForTarget), 1, maxBatchSize));
+  return Math.trunc(clampNumber(Math.max(configured, neededForTarget), 1, strategy.maxBatchSize));
+}
+
+function getAnalysisProviderStrategy(settings = {}, job = null) {
+  const provider = String(settings.provider || "").toLowerCase();
+  const baseUrl = String(settings.baseUrl || "").toLowerCase();
+  const model = String(settings.model || "").toLowerCase();
+  const agentLike = provider.startsWith("claude") || baseUrl.startsWith("local:claude");
+  const deepseekLike = provider.includes("deepseek") || baseUrl.includes("deepseek") || model.includes("deepseek");
+  const kimiDirectLike = provider.includes("kimi") || baseUrl.includes("moonshot") || baseUrl.includes("api.kimi.com");
+
+  const strategy = {
+    name: "openai-compatible",
+    agentLike,
+    batchSize: ANALYSIS_BATCH_SIZE,
+    concurrency: ANALYSIS_CONCURRENCY,
+    maxBatchSize: 24,
+    expectedBatchSeconds: 45,
+    failedRetryBatchSize: Math.max(1, Math.min(ANALYSIS_FAILED_RETRY_BATCH_SIZE + 1, 6)),
+    timeoutBaseMs: 70_000,
+    timeoutPerParagraphMs: 8_000,
+    timeoutMaxMs: 210_000,
+  };
+
+  if (deepseekLike) {
+    strategy.name = "deepseek";
+    strategy.maxBatchSize = 24;
+    strategy.expectedBatchSeconds = 34;
+    strategy.failedRetryBatchSize = Math.max(1, Math.min(ANALYSIS_FAILED_RETRY_BATCH_SIZE + 1, 6));
+    strategy.timeoutBaseMs = 65_000;
+    strategy.timeoutPerParagraphMs = 7_000;
+  }
+
+  if (kimiDirectLike && !agentLike) {
+    strategy.name = "kimi-direct";
+    strategy.maxBatchSize = 20;
+    strategy.expectedBatchSeconds = 42;
+    strategy.failedRetryBatchSize = ANALYSIS_FAILED_RETRY_BATCH_SIZE;
+  }
+
+  if (agentLike) {
+    strategy.name = "claude-agent";
+    strategy.batchSize = CLAUDE_AGENT_ANALYSIS_BATCH_SIZE;
+    strategy.concurrency = CLAUDE_AGENT_ANALYSIS_CONCURRENCY;
+    strategy.maxBatchSize = 20;
+    strategy.expectedBatchSeconds = 75;
+    strategy.failedRetryBatchSize = ANALYSIS_FAILED_RETRY_BATCH_SIZE;
+    strategy.timeoutBaseMs = 140_000;
+    strategy.timeoutPerParagraphMs = 18_000;
+    strategy.timeoutMaxMs = 360_000;
+  }
+
+  if (job?.retryFailedOnly) {
+    strategy.concurrency = Math.min(strategy.concurrency, 2);
+  }
+
+  return strategy;
 }
 
 async function runAnalysisJobBatch(job, items, signal, options = {}) {
@@ -1178,10 +1266,11 @@ async function runAnalysisJobBatch(job, items, signal, options = {}) {
 
     const analyzedParagraphs = await analyzeParagraphBatchInPaper(paper, paragraphs, resolveJobSettings(job.settings), { signal });
     const analyzedById = new Map(analyzedParagraphs.map((paragraph) => [paragraph.id, paragraph]));
-    await updatePaperParagraphs(job.paperId, readableItems.map((item) => item.paragraphId), (paragraph) => {
+    await updatePaperParagraphs(job.paperId, readableItems.map((item) => item.paragraphId), (paragraph, targetPaper) => {
       const analyzed = analyzedById.get(paragraph.id);
       if (analyzed) {
         copyParagraphAnalysisFields(paragraph, analyzed);
+        rememberParagraphAnalysisInCache(targetPaper, paragraph);
       }
     });
     const completedAt = new Date().toISOString();
@@ -1218,6 +1307,10 @@ async function runAnalysisJobBatch(job, items, signal, options = {}) {
 
     if (affectedItems.length > 1) {
       const chunks = splitJobItemsForBatchRetry(affectedItems, options.splitDepth || 0);
+      const nextBatchSize = chunks[0]?.length || 1;
+      job.adaptiveBatchSize = job.retryFailedOnly
+        ? Math.min(ANALYSIS_FAILED_RETRY_BATCH_SIZE, nextBatchSize)
+        : Math.max(1, Math.min(Number(job.adaptiveBatchSize || nextBatchSize), nextBatchSize));
       for (const item of affectedItems) {
         item.status = "queued";
         item.error = `批量分析失败，已拆分小批量重试：${error.message || "模型请求失败。"}`;
@@ -1459,6 +1552,137 @@ function resetParagraphAnalysis(paragraph) {
   paragraph.keyTerms = [];
   paragraph.analysisStatus = "pending";
   paragraph.analysisError = "";
+  paragraph.analysisCacheHit = false;
+  paragraph.analysisCachedAt = "";
+}
+
+function ensurePaperAnalysisCache(paper) {
+  if (!paper || typeof paper !== "object") {
+    return 0;
+  }
+
+  normalizePaperAnalysisCache(paper);
+  let added = 0;
+  for (const paragraph of paper.paragraphs || []) {
+    if (rememberParagraphAnalysisInCache(paper, paragraph)) {
+      added += 1;
+    }
+  }
+  trimPaperAnalysisCache(paper);
+  return added;
+}
+
+function normalizePaperAnalysisCache(paper) {
+  const cache = paper.analysisCache && typeof paper.analysisCache === "object" ? paper.analysisCache : {};
+  const entries = cache.entries && typeof cache.entries === "object" && !Array.isArray(cache.entries)
+    ? cache.entries
+    : {};
+  paper.analysisCache = {
+    version: ANALYSIS_CACHE_VERSION,
+    entries,
+    updatedAt: cache.updatedAt || "",
+  };
+  return paper.analysisCache;
+}
+
+function rememberParagraphAnalysisInCache(paper, paragraph) {
+  if (!paper || !paragraph || !hasCompleteParagraphAnalysis(paragraph)) {
+    return false;
+  }
+
+  const key = getParagraphAnalysisCacheKey(paragraph);
+  if (!key) {
+    return false;
+  }
+
+  const cache = normalizePaperAnalysisCache(paper);
+  const existing = cache.entries[key];
+  const translation = String(paragraph.translation || "").trim();
+  const explanation = String(paragraph.explanation || "").trim();
+  const keyTerms = normalizeKeywordList(paragraph.keyTerms).slice(0, 16);
+  const payload = {
+    key,
+    sourceHash: getParagraphSourceHash(paragraph),
+    sectionTitleHint: normalizeSectionTitleHint(paragraph.sectionTitleHint || ""),
+    relatedArtifactIds: Array.isArray(paragraph.relatedArtifactIds) ? paragraph.relatedArtifactIds.slice(0, 12) : [],
+    translation,
+    explanation,
+    keyTerms,
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (existing &&
+    existing.translation === payload.translation &&
+    existing.explanation === payload.explanation &&
+    JSON.stringify(existing.keyTerms || []) === JSON.stringify(payload.keyTerms)) {
+    return false;
+  }
+
+  cache.entries[key] = payload;
+  cache.updatedAt = payload.updatedAt;
+  trimPaperAnalysisCache(paper);
+  return true;
+}
+
+function hydrateParagraphAnalysisFromCache(paper, paragraph) {
+  if (!paper || !paragraph) {
+    return false;
+  }
+
+  const cache = normalizePaperAnalysisCache(paper);
+  const key = getParagraphAnalysisCacheKey(paragraph);
+  const entry = key ? cache.entries[key] : null;
+  if (!entry || !entry.translation || !entry.explanation) {
+    return false;
+  }
+
+  paragraph.translation = entry.translation;
+  paragraph.explanation = entry.explanation;
+  paragraph.keyTerms = normalizeKeywordList(entry.keyTerms).slice(0, 16);
+  paragraph.analysisStatus = "done";
+  paragraph.analysisError = "";
+  paragraph.analysisCacheHit = true;
+  paragraph.analysisCachedAt = entry.updatedAt || new Date().toISOString();
+  paragraph.updatedAt = new Date().toISOString();
+  return true;
+}
+
+function getParagraphAnalysisCacheKey(paragraph) {
+  const sourceText = normalizeParagraph(paragraph?.sourceText || "");
+  if (!sourceText) {
+    return "";
+  }
+
+  const sectionTitle = normalizeSectionTitleHint(paragraph.sectionTitleHint || "");
+  const artifacts = Array.isArray(paragraph.relatedArtifactIds)
+    ? paragraph.relatedArtifactIds.slice(0, 12).join(",")
+    : "";
+  return createHash("sha1")
+    .update([sourceText, sectionTitle, artifacts].join("\n"))
+    .digest("hex")
+    .slice(0, 24);
+}
+
+function getParagraphSourceHash(paragraph) {
+  return createHash("sha1")
+    .update(normalizeParagraph(paragraph?.sourceText || ""))
+    .digest("hex")
+    .slice(0, 16);
+}
+
+function trimPaperAnalysisCache(paper) {
+  const cache = normalizePaperAnalysisCache(paper);
+  const entries = Object.entries(cache.entries);
+  if (entries.length <= ANALYSIS_CACHE_MAX_ENTRIES) {
+    return;
+  }
+
+  entries
+    .sort(([, a], [, b]) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
+    .slice(ANALYSIS_CACHE_MAX_ENTRIES)
+    .forEach(([key]) => {
+      delete cache.entries[key];
+    });
 }
 
 function copyParagraphAnalysisFields(target, source) {
@@ -1467,6 +1691,8 @@ function copyParagraphAnalysisFields(target, source) {
   target.keyTerms = Array.isArray(source.keyTerms) ? source.keyTerms : [];
   target.analysisStatus = source.analysisStatus || "done";
   target.analysisError = source.analysisError || "";
+  target.analysisCacheHit = Boolean(source.analysisCacheHit);
+  target.analysisCachedAt = source.analysisCachedAt || "";
 }
 
 function sleep(ms) {
@@ -1511,6 +1737,7 @@ async function analyzeParagraphInPaper(paper, paragraph, settings, options = {})
   paragraph.analysisStatus = "done";
   paragraph.analysisError = "";
   paragraph.updatedAt = new Date().toISOString();
+  rememberParagraphAnalysisInCache(paper, paragraph);
   return paragraph;
 }
 
@@ -1536,6 +1763,7 @@ async function analyzeParagraphBatchInPaper(paper, paragraphs, settings, options
     paragraph.analysisStatus = "done";
     paragraph.analysisError = "";
     paragraph.updatedAt = new Date().toISOString();
+    rememberParagraphAnalysisInCache(paper, paragraph);
   }
 
   if (missing.length) {
@@ -1546,12 +1774,11 @@ async function analyzeParagraphBatchInPaper(paper, paragraphs, settings, options
 }
 
 function getBatchAnalysisTimeoutMs(batchLength, settings = {}) {
-  const provider = String(settings.provider || "");
-  const baseUrl = String(settings.baseUrl || "");
-  const agentLike = provider.startsWith("claude") || baseUrl.startsWith("local:claude");
-  const baseMs = agentLike ? 140_000 : 70_000;
-  const perParagraphMs = agentLike ? 18_000 : 8_000;
-  return Math.min(agentLike ? 360_000 : 210_000, baseMs + Math.max(0, batchLength - 1) * perParagraphMs);
+  const strategy = getAnalysisProviderStrategy(settings);
+  return Math.min(
+    strategy.timeoutMaxMs,
+    strategy.timeoutBaseMs + Math.max(0, batchLength - 1) * strategy.timeoutPerParagraphMs,
+  );
 }
 
 function parseBatchAnalysisResult(content) {

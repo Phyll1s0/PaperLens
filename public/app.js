@@ -10,6 +10,7 @@ const state = {
     jobId: null,
     completed: 0,
     failed: 0,
+    cacheHits: 0,
     total: 0,
     currentId: null,
     currentBatchSize: 0,
@@ -699,6 +700,7 @@ function applyAnalysisJob(job) {
   state.autoAnalyze.jobId = job.id;
   state.autoAnalyze.completed = Number(job.completed || 0);
   state.autoAnalyze.failed = Number(job.failed || 0);
+  state.autoAnalyze.cacheHits = Number(job.cacheHits || 0);
   state.autoAnalyze.total = Number(job.total || 0);
   state.autoAnalyze.currentId = job.currentParagraphId || "";
   state.autoAnalyze.currentBatchSize = Number(job.currentBatchSize || 0);
@@ -1995,11 +1997,12 @@ function updateAutoStatus() {
   const current = state.paper?.paragraphs.find((paragraph) => paragraph.id === state.autoAnalyze.currentId);
   const currentLabel = current ? `，当前 P${current.order + 1}` : "";
   const batchLabel = state.autoAnalyze.currentBatchSize > 1 ? `，运行中 ${state.autoAnalyze.currentBatchSize} 段` : "";
+  const cacheLabel = state.autoAnalyze.cacheHits > 0 ? ` · 缓存 ${state.autoAnalyze.cacheHits}` : "";
   const stopLabel = state.autoAnalyze.stopRequested ? "，正在停止" : "";
   setStatus([
     `后端分析 ${state.autoAnalyze.completed + state.autoAnalyze.failed}/${state.autoAnalyze.total}`,
     `失败 ${state.autoAnalyze.failed}`,
-    `已用 ${elapsed}s${currentLabel}${batchLabel}${stopLabel}`,
+    `已用 ${elapsed}s${currentLabel}${batchLabel}${stopLabel}${cacheLabel}`,
   ].join(" · "), state.autoAnalyze.failed > 0);
 }
 
