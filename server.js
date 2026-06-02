@@ -28,6 +28,7 @@ const TMP_DIR = path.join(CACHE_DIR, "tmp");
 const MAX_UPLOAD_BYTES = 120 * 1024 * 1024;
 const ARTIFACT_CROP_VERSION = 10;
 const VISUAL_STRUCTURE_VERSION = 4;
+const SEGMENTATION_AUDIT_VERSION = 1;
 const JOB_ITEM_MAX_ATTEMPTS = 2;
 const JOB_POLL_LIMIT = 20;
 const ANALYSIS_BATCH_SIZE = readIntegerEnv("PAPERLENS_ANALYSIS_BATCH_SIZE", 12, 1, 24);
@@ -367,6 +368,7 @@ async function handleCreateAnalysisJob(req, res, paperId) {
     await cancelJob(existing.id);
   }
 
+  const segmentationAuditChanged = auditPaperSegmentationQuality(paper);
   const readingParagraphs = getReadingParagraphs(paper);
   const requestedSet = requestedIds.length ? new Set(requestedIds) : null;
   const cacheEnabled = payload.useCache !== false && !forceSelected;
@@ -390,7 +392,7 @@ async function handleCreateAnalysisJob(req, res, paperId) {
   });
 
   if (!targets.length) {
-    if (cacheHits > 0 || cacheWarmups > 0) {
+    if (cacheHits > 0 || cacheWarmups > 0 || segmentationAuditChanged) {
       await savePaper(paper);
     }
     return json(res, {
@@ -5528,6 +5530,10 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
     throw new Error("AI 分段结果太少，已保留基础分段。");
   }
 
+  const segmentationQualityAudit = {
+    ...validation.summary.qualityAudit,
+    updatedAt: validation.summary.updatedAt,
+  };
   const sections = inferSectionsFromSegmentationPlan(paragraphs, structureMap);
   enrichSectionsWithContext(sections, paragraphs, chunkSummaries);
   const segmented = {
@@ -5538,6 +5544,7 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
     structureMap,
     segmentationPlan: structureMap.segmentationPlan || [],
     segmentationValidation: validation.summary,
+    segmentationQualityAudit,
     segmentationStages: {
       version: 1,
       plan: {
@@ -5550,6 +5557,7 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
         items: items.length,
       },
       validation: validation.summary,
+      qualityAudit: segmentationQualityAudit,
     },
     sections,
     paragraphs,
@@ -5956,6 +5964,7 @@ function buildParagraphsFromSegmentItems(items, structureMap = null) {
 function validateAndRepairSegmentedParagraphs(paragraphs, structureMap = null) {
   const repaired = [];
   const seen = new Set();
+  const repeatedTextIndex = buildRepeatedSegmentationTextIndex(paragraphs || []);
   const stats = {
     version: SEGMENTATION_VALIDATION_VERSION,
     inputParagraphs: Array.isArray(paragraphs) ? paragraphs.length : 0,
@@ -5965,14 +5974,17 @@ function validateAndRepairSegmentedParagraphs(paragraphs, structureMap = null) {
     removedDuplicates: 0,
     mergedFragments: 0,
     sectionAssignments: 0,
+    qualityAudit: createSegmentationAuditStats(Array.isArray(paragraphs) ? paragraphs.length : 0),
     warnings: [],
     updatedAt: new Date().toISOString(),
   };
 
   for (const paragraph of paragraphs || []) {
     const clean = normalizeParagraph(paragraph.sourceText || "");
-    if (!clean || shouldDropParagraphDuringSegmentationValidation(paragraph, structureMap)) {
+    const audit = auditSegmentedParagraphNoise(paragraph, structureMap, repeatedTextIndex);
+    if (!clean || audit.action === "drop" || (!audit.action && shouldDropParagraphDuringSegmentationValidation(paragraph, structureMap))) {
       stats.removedNonReading += 1;
+      recordSegmentationAuditReason(stats.qualityAudit, audit.reasons.length ? audit.reasons : ["heuristic-nonreading"], "removed");
       continue;
     }
 
@@ -6003,6 +6015,13 @@ function validateAndRepairSegmentedParagraphs(paragraphs, structureMap = null) {
       next.segmentationRole = normalizeSegmentationRole(next.segmentationRole || plannedSection.role || "");
     }
 
+    if (audit.action === "skip-analysis") {
+      applySegmentationNoiseMark(next, audit);
+      recordSegmentationAuditReason(stats.qualityAudit, audit.reasons, "marked");
+      repaired.push(next);
+      continue;
+    }
+
     const previous = repaired.at(-1);
     if (shouldMergeDuringSegmentationValidation(previous, next)) {
       mergeParagraphIntoPrevious(previous, next);
@@ -6017,6 +6036,7 @@ function validateAndRepairSegmentedParagraphs(paragraphs, structureMap = null) {
     paragraph.order = index;
   });
   stats.outputParagraphs = repaired.length;
+  stats.qualityAudit.outputParagraphs = repaired.length;
 
   const readingCount = repaired.filter((paragraph) => isReadingParagraph(paragraph)).length;
   if (readingCount < 3) {
@@ -6049,6 +6069,283 @@ function shouldDropParagraphDuringSegmentationValidation(paragraph, structureMap
   }
 
   return kind !== "heading" && text.length < 20 && !isLikelyHeading(text);
+}
+
+function createSegmentationAuditStats(inputParagraphs = 0) {
+  return {
+    version: SEGMENTATION_AUDIT_VERSION,
+    inputParagraphs,
+    outputParagraphs: 0,
+    removedNoise: 0,
+    markedIneligible: 0,
+    reasons: {},
+  };
+}
+
+function recordSegmentationAuditReason(stats, reasons = [], action = "marked") {
+  if (!stats) {
+    return;
+  }
+
+  const normalizedReasons = normalizeSegmentationNoiseReasons(reasons);
+  if (action === "removed") {
+    stats.removedNoise += 1;
+  } else if (action === "marked") {
+    stats.markedIneligible += 1;
+  }
+
+  for (const reason of normalizedReasons.length ? normalizedReasons : ["unknown-noise"]) {
+    stats.reasons[reason] = Number(stats.reasons[reason] || 0) + 1;
+  }
+}
+
+function auditPaperSegmentationQuality(paper) {
+  if (!paper || paper.segmentationMode !== "ai" || !Array.isArray(paper.paragraphs)) {
+    return false;
+  }
+
+  const audit = auditSegmentedParagraphsForNoise(paper.paragraphs, paper.structureMap || null);
+  const current = paper.segmentationQualityAudit || {};
+  const unchanged = areSegmentationAuditSummariesEqual(current, audit.summary) && !audit.changed;
+  if (unchanged) {
+    return false;
+  }
+
+  const updatedSummary = {
+    ...audit.summary,
+    updatedAt: new Date().toISOString(),
+  };
+  paper.segmentationQualityAudit = updatedSummary;
+  paper.segmentationValidation = {
+    ...(paper.segmentationValidation || {}),
+    qualityAudit: updatedSummary,
+  };
+  paper.segmentationStages = {
+    ...(paper.segmentationStages || {}),
+    qualityAudit: updatedSummary,
+  };
+  return true;
+}
+
+function auditSegmentedParagraphsForNoise(paragraphs, structureMap = null) {
+  const repeatedTextIndex = buildRepeatedSegmentationTextIndex(paragraphs || []);
+  const summary = createSegmentationAuditStats(Array.isArray(paragraphs) ? paragraphs.length : 0);
+  summary.outputParagraphs = Array.isArray(paragraphs) ? paragraphs.length : 0;
+  let changed = false;
+
+  for (const paragraph of paragraphs || []) {
+    if (!paragraph || paragraph.kind === "heading") {
+      continue;
+    }
+
+    const audit = auditSegmentedParagraphNoise(paragraph, structureMap, repeatedTextIndex);
+    if (audit.action !== "skip-analysis") {
+      if (paragraph.segmentationNoise) {
+        delete paragraph.segmentationNoise;
+        changed = true;
+      }
+      continue;
+    }
+
+    recordSegmentationAuditReason(summary, audit.reasons, "marked");
+    if (applySegmentationNoiseMark(paragraph, audit)) {
+      changed = true;
+    }
+  }
+
+  return { changed, summary };
+}
+
+function auditSegmentedParagraphNoise(paragraph, structureMap = null, repeatedTextIndex = new Map()) {
+  const raw = normalizeArtifactText(paragraph?.rawSourceText || paragraph?.sourceText || "");
+  const clean = normalizeParagraph(paragraph?.sourceText || raw);
+  const reasons = [];
+  if (!clean) {
+    return { action: "drop", confidence: "high", reasons: ["empty"] };
+  }
+
+  const kind = paragraph.kind === "heading" || isLikelyHeading(clean) ? "heading" : "paragraph";
+  if (kind === "heading") {
+    return { action: "", confidence: "low", reasons: [] };
+  }
+
+  const context = {
+    ...paragraph,
+    sourceText: clean,
+  };
+
+  if (isNonReadingByStructureMap(paragraph, structureMap)) {
+    reasons.push("structure-nonbody-zone");
+  }
+  if (isReferencesSectionTitle(clean) || isReferencesSectionTitle(paragraph.sectionTitleHint)) {
+    reasons.push("references-section");
+  }
+  if (isLikelyCaptionText(raw) || isLikelyCaptionText(clean)) {
+    reasons.push("caption");
+  }
+  if (isLikelyAuthorOrAffiliationText(clean, context)) {
+    reasons.push("author-affiliation");
+  }
+  if (isLikelyPublicationMetadataText(clean)) {
+    reasons.push("publication-metadata");
+  }
+  if (isLikelyStandaloneLinkText(clean) || isLikelyArtifactOnlyLinkText(clean)) {
+    reasons.push("standalone-link");
+  }
+  if (isLikelyBibliographyEntry(clean)) {
+    reasons.push("bibliography-entry");
+  }
+  if (isRepeatedHeaderFooterText(clean, repeatedTextIndex)) {
+    reasons.push("header-footer");
+  }
+  if (isLikelyPageNumberOrRunningHeader(clean)) {
+    reasons.push("header-footer");
+  }
+  if (isLikelyDiagramOnlyText(clean, context)) {
+    reasons.push("visual-text");
+  }
+
+  const normalizedReasons = normalizeSegmentationNoiseReasons(reasons);
+  if (!normalizedReasons.length) {
+    return { action: "", confidence: "low", reasons: [] };
+  }
+
+  const dropReasons = new Set([
+    "structure-nonbody-zone",
+    "references-section",
+    "caption",
+    "author-affiliation",
+    "publication-metadata",
+    "standalone-link",
+    "bibliography-entry",
+  ]);
+  const action = normalizedReasons.some((reason) => dropReasons.has(reason)) ? "drop" : "skip-analysis";
+  const confidence = action === "drop" || normalizedReasons.length >= 2 ? "high" : "medium";
+  return { action, confidence, reasons: normalizedReasons };
+}
+
+function applySegmentationNoiseMark(paragraph, audit) {
+  const nextNoise = {
+    version: SEGMENTATION_AUDIT_VERSION,
+    action: "skip-analysis",
+    confidence: audit.confidence || "medium",
+    reasons: normalizeSegmentationNoiseReasons(audit.reasons),
+  };
+  const previousNoise = paragraph.segmentationNoise || {};
+  const changed = paragraph.analysisEligible !== false ||
+    paragraph.analysisStatus !== "done" ||
+    paragraph.analysisError ||
+    !areObjectsShallowEqual(previousNoise, nextNoise);
+
+  paragraph.analysisEligible = false;
+  paragraph.analysisStatus = "done";
+  paragraph.analysisError = "";
+  paragraph.segmentationNoise = nextNoise;
+  return changed;
+}
+
+function normalizeSegmentationNoiseReasons(reasons = []) {
+  return [...new Set((Array.isArray(reasons) ? reasons : [reasons])
+    .map((reason) => String(reason || "").trim().toLowerCase())
+    .filter(Boolean))]
+    .sort();
+}
+
+function buildRepeatedSegmentationTextIndex(paragraphs = []) {
+  const index = new Map();
+  for (const paragraph of paragraphs) {
+    if (!paragraph || paragraph.kind === "heading") {
+      continue;
+    }
+
+    const clean = normalizeParagraph(paragraph.sourceText || "");
+    const key = normalizeRepeatedSegmentationTextKey(clean);
+    if (!key) {
+      continue;
+    }
+
+    const entry = index.get(key) || {
+      count: 0,
+      pages: new Set(),
+      text: clean,
+    };
+    entry.count += 1;
+    entry.pages.add(normalizePositivePageNumber(paragraph.pageNumber, 0));
+    index.set(key, entry);
+  }
+
+  return index;
+}
+
+function normalizeRepeatedSegmentationTextKey(text) {
+  const clean = normalizeParagraph(text);
+  if (!clean || clean.length < 6 || clean.length > 160 || isLikelyHeading(clean)) {
+    return "";
+  }
+
+  return clean
+    .toLowerCase()
+    .replace(/\b\d+\b/g, "#")
+    .replace(/[^\p{L}\p{N}#]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isRepeatedHeaderFooterText(text, repeatedTextIndex = new Map()) {
+  const key = normalizeRepeatedSegmentationTextKey(text);
+  if (!key) {
+    return false;
+  }
+
+  const entry = repeatedTextIndex.get(key);
+  if (!entry || entry.pages.size < 2) {
+    return false;
+  }
+
+  const clean = normalizeParagraph(text);
+  const sentenceLike = /[.!?。！？][)"'\]]?(\s|$)/.test(clean);
+  return clean.length <= 96 ||
+    isLikelyPublicationMetadataText(clean) ||
+    isLikelyPageNumberOrRunningHeader(clean) ||
+    (!sentenceLike && entry.pages.size >= 3);
+}
+
+function isLikelyPageNumberOrRunningHeader(text) {
+  const clean = normalizeParagraph(text);
+  if (!clean || clean.length > 120) {
+    return false;
+  }
+
+  return /^(?:\d+\s*\/\s*)?\d+$/.test(clean) ||
+    /^page\s+\d+(?:\s+of\s+\d+)?$/i.test(clean) ||
+    /^(?:preprint|draft|submitted|accepted|published|proceedings|conference|workshop)\b/i.test(clean) && !/[.!?。！？]/.test(clean);
+}
+
+function isLikelyArtifactOnlyLinkText(text) {
+  const clean = normalizeParagraph(text);
+  if (!clean || clean.length > 320) {
+    return false;
+  }
+
+  if (/\b(?:figure|fig\.|table|appendix|supplementary|github|code|dataset|artifact|artifact\s+available)\b/i.test(clean) &&
+    /(?:https?:\/\/|www\.|doi\.org|arxiv\.org|github\.com|huggingface\.co)/i.test(clean)) {
+    const words = clean.replace(/(?:https?:\/\/|www\.)\S+/gi, " ").trim().split(/\s+/).filter(Boolean);
+    return words.length <= 22;
+  }
+
+  return false;
+}
+
+function areSegmentationAuditSummariesEqual(existing, next) {
+  const normalize = (summary) => {
+    const { updatedAt, ...rest } = summary || {};
+    return JSON.stringify(rest);
+  };
+  return normalize(existing) === JSON.stringify(next || {});
+}
+
+function areObjectsShallowEqual(a, b) {
+  return JSON.stringify(a || {}) === JSON.stringify(b || {});
 }
 
 function buildSegmentationValidationDedupeKey(paragraph, text) {
@@ -6112,6 +6409,10 @@ function inferSectionsFromSegmentationPlan(paragraphs, structureMap = null) {
   const sections = [];
   const sectionsByKey = new Map();
   for (const paragraph of paragraphs) {
+    if (paragraph.kind !== "heading" && paragraph.analysisEligible === false) {
+      continue;
+    }
+
     const plannedSection = resolveSegmentationPlanSection(paragraph, structureMap);
     const hintedTitle = normalizeSectionTitleHint(
       paragraph.sectionTitleHint || (paragraph.kind === "heading" ? paragraph.sourceText : ""),
