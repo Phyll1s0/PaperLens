@@ -103,7 +103,8 @@ textarea:disabled {
 .service-status {
   display: none;
   margin: -10px 0 14px;
-  padding: 8px 10px;
+  gap: 8px;
+  padding: 10px;
   border: 1px solid #dfe7e2;
   border-radius: 8px;
   background: #f8faf7;
@@ -113,7 +114,12 @@ textarea:disabled {
 }
 
 .service-status.visible {
-  display: block;
+  display: grid;
+}
+
+.service-status.ok {
+  border-color: rgba(15, 118, 110, 0.18);
+  background: rgba(15, 118, 110, 0.06);
 }
 
 .service-status.warn {
@@ -126,6 +132,92 @@ textarea:disabled {
   border-color: rgba(180, 35, 24, 0.24);
   background: rgba(180, 35, 24, 0.08);
   color: var(--danger);
+}
+
+.service-status-header {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  min-width: 0;
+}
+
+.service-status-header strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.service-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: 0 0 auto;
+}
+
+.service-status.warn .service-status-dot {
+  background: var(--warm);
+}
+
+.service-status.error .service-status-dot {
+  background: var(--danger);
+}
+
+.service-status-body {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.service-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.service-status-metric {
+  min-width: 0;
+  padding: 6px 7px;
+  border: 1px solid rgba(216, 222, 217, 0.9);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.service-status-metric span,
+.service-status-metric strong {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.service-status-metric span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.service-status-metric strong {
+  margin-top: 2px;
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.service-status-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.service-status-actions code {
+  max-width: 100%;
+  padding: 3px 6px;
+  border: 1px solid rgba(216, 222, 217, 0.95);
+  border-radius: 5px;
+  background: #ffffff;
+  color: #2f3c38;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+  overflow-wrap: anywhere;
 }
 
 .diagnostics-text {

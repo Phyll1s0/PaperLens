@@ -116,7 +116,7 @@ const PROVIDERS = {
 
 const API_TIMEOUT_MS = 240_000;
 const CLIENT_LOADED_AT_MS = Date.now();
-const REQUIRED_SERVICE_SCHEMA_VERSION = 1;
+const REQUIRED_SERVICE_SCHEMA_VERSION = 2;
 const SERVICE_VERSION_CHECK_INTERVAL_MS = 60_000;
 const API_KEY_REF_STORAGE_KEY = "paper-reader-api-key-ref";
 const API_KEY_INFO_STORAGE_KEY = "paper-reader-api-key-info";
@@ -1095,7 +1095,10 @@ async function checkServiceVersion() {
   } catch {
     renderServiceStatus({
       level: "error",
-      text: "无法连接 PaperLens 服务。若页面还能显示旧内容，请确认后端进程仍在运行。",
+      title: "服务未连接",
+      text: "无法连接 PaperLens 后端。若页面还能显示旧内容，当前只是浏览器里的旧界面。",
+      details: [],
+      actions: ["npm run dev", "npm run service:status"],
     });
   } finally {
     window.clearTimeout(timeout);
@@ -1106,49 +1109,184 @@ function getServiceStatus(payload, responseOk) {
   if (!responseOk || !payload?.ok) {
     return {
       level: "error",
+      title: "健康检查失败",
       text: "PaperLens 服务健康检查失败，请查看终端日志或重启服务。",
+      details: [],
+      actions: ["npm run health", "npm run service:restart"],
     };
   }
+
+  const details = getServiceStatusDetails(payload);
 
   if (!payload.serviceSchemaVersion) {
     return {
       level: "warn",
-      text: "后端仍是旧进程：当前页面已更新，但服务未返回版本信息。请重启 PaperLens 服务后刷新页面。",
+      title: "后端仍是旧进程",
+      text: "当前页面已更新，但服务未返回版本信息。请重启 PaperLens 服务后刷新页面。",
+      details,
+      actions: ["npm run service:restart", "或 Ctrl+C 后重新 npm run dev", "刷新页面"],
     };
   }
 
   if (Number(payload.serviceSchemaVersion) < REQUIRED_SERVICE_SCHEMA_VERSION) {
     return {
       level: "warn",
-      text: `后端版本过旧：需要 schema ${REQUIRED_SERVICE_SCHEMA_VERSION}，当前是 ${payload.serviceSchemaVersion}。请重启 PaperLens 服务。`,
+      title: "后端版本过旧",
+      text: `需要 schema ${REQUIRED_SERVICE_SCHEMA_VERSION}，当前是 ${payload.serviceSchemaVersion}。请重启 PaperLens 服务。`,
+      details,
+      actions: ["npm run service:restart", "或 Ctrl+C 后重新 npm run dev", "刷新页面"],
     };
   }
 
   if (payload.needsRestart) {
     return {
       level: "warn",
+      title: "后端需要重启",
       text: payload.restartReason || "服务源码已更新，但后端仍是旧进程。请重启 PaperLens 服务。",
+      details,
+      actions: ["npm run service:restart", "或 Ctrl+C 后重新 npm run dev", "刷新页面"],
     };
   }
 
   if (Number(payload.staticAssetMtimeMs || 0) > CLIENT_LOADED_AT_MS + 1000) {
     return {
       level: "warn",
+      title: "前端需要刷新",
       text: "前端文件已更新。请刷新页面，以免新旧界面脚本混用。",
+      details,
+      actions: ["刷新页面"],
     };
   }
 
   return {
     level: "ok",
+    title: "服务已同步",
     text: `服务已同步 · v${payload.version || "0.0.0"} · 已运行 ${formatDuration(payload.uptimeSeconds || 0)}`,
+    details,
+    actions: [],
   };
 }
 
+function getServiceStatusDetails(payload = {}) {
+  const runtime = payload.runtime || {};
+  const queue = payload.queue || {};
+  const details = [
+    {
+      label: "后端",
+      value: `v${payload.version || "0.0.0"} · schema ${payload.serviceSchemaVersion ?? "旧"}`,
+    },
+    {
+      label: "运行",
+      value: `${formatDuration(runtime.uptimeSeconds ?? payload.uptimeSeconds ?? 0)} · PID ${runtime.pid || "?"}`,
+    },
+    {
+      label: "地址",
+      value: runtime.host && runtime.port ? `${runtime.host}:${runtime.port}` : "本机服务",
+    },
+    {
+      label: "队列",
+      value: formatServiceQueue(queue),
+    },
+  ];
+
+  if (queue.activeJob) {
+    details.push({
+      label: "当前",
+      value: formatActiveServiceJob(queue.activeJob),
+    });
+  }
+
+  return details;
+}
+
+function formatServiceQueue(queue = {}) {
+  if (!Number.isFinite(Number(queue.savedJobs))) {
+    return "等待后端上报";
+  }
+
+  const running = Number(queue.runningJobs || 0) + Number(queue.cancelingJobs || 0);
+  const queued = Number(queue.queuedJobs || 0);
+  const active = Number(queue.activeJobs || 0);
+  const items = queue.activeItems || {};
+  const itemLabel = Number(items.total || 0)
+    ? ` · ${Number(items.done || 0) + Number(items.error || 0)}/${items.total} 项`
+    : "";
+
+  if (active > 0) {
+    return `${running} 运行 / ${queued} 排队${itemLabel}`;
+  }
+
+  return `空闲 · ${Number(queue.savedJobs || 0)} 个历史任务`;
+}
+
+function formatActiveServiceJob(job = {}) {
+  const done = Number(job.completed || 0) + Number(job.failed || 0);
+  const total = Number(job.total || 0);
+  const title = job.paperTitle ? `${truncateServiceText(job.paperTitle, 18)} · ` : "";
+  return `${title}${getJobStatusText(job.status)} ${done}/${total}`;
+}
+
+function truncateServiceText(text, maxLength) {
+  const value = String(text || "").trim();
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
 function renderServiceStatus(status) {
-  els.serviceStatusText.textContent = status.text || "";
-  els.serviceStatusText.classList.toggle("visible", Boolean(status.text));
+  const visible = Boolean(status.title || status.text);
+  els.serviceStatusText.classList.toggle("visible", visible);
+  els.serviceStatusText.classList.toggle("ok", status.level === "ok");
   els.serviceStatusText.classList.toggle("warn", status.level === "warn");
   els.serviceStatusText.classList.toggle("error", status.level === "error");
+  els.serviceStatusText.replaceChildren();
+
+  if (!visible) {
+    return;
+  }
+
+  const header = document.createElement("div");
+  header.className = "service-status-header";
+  const dot = document.createElement("span");
+  dot.className = "service-status-dot";
+  const title = document.createElement("strong");
+  title.textContent = status.title || "服务状态";
+  header.append(dot, title);
+
+  const body = document.createElement("p");
+  body.className = "service-status-body";
+  body.textContent = status.text || "";
+
+  els.serviceStatusText.append(header, body);
+
+  if (status.details?.length) {
+    const grid = document.createElement("div");
+    grid.className = "service-status-grid";
+    for (const detail of status.details) {
+      const item = document.createElement("div");
+      item.className = "service-status-metric";
+      const label = document.createElement("span");
+      label.textContent = detail.label;
+      const value = document.createElement("strong");
+      value.textContent = detail.value;
+      item.append(label, value);
+      grid.append(item);
+    }
+    els.serviceStatusText.append(grid);
+  }
+
+  if (status.actions?.length) {
+    const actions = document.createElement("div");
+    actions.className = "service-status-actions";
+    for (const action of status.actions) {
+      const code = document.createElement("code");
+      code.textContent = action;
+      actions.append(code);
+    }
+    els.serviceStatusText.append(actions);
+  }
 }
 
 async function pingModel() {

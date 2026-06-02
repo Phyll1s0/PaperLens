@@ -10,7 +10,7 @@ import { inflateSync } from "node:zlib";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PACKAGE_VERSION = readPackageVersion();
-const SERVICE_SCHEMA_VERSION = 1;
+const SERVICE_SCHEMA_VERSION = 2;
 const SERVICE_STARTED_AT_MS = Date.now();
 
 loadDotEnv(path.join(__dirname, ".env"));
@@ -5047,14 +5047,28 @@ function readIntegerEnv(name, defaultValue, min, max) {
 
 async function buildHealthPayload() {
   const versionStatus = await getServiceVersionStatus();
+  const queueStatus = getJobQueueStatus();
+  const uptimeSeconds = Math.round(process.uptime());
+  const startedAt = new Date(SERVICE_STARTED_AT_MS).toISOString();
   return {
     ok: true,
     name: "PaperLens",
     version: PACKAGE_VERSION,
     serviceSchemaVersion: SERVICE_SCHEMA_VERSION,
     pdfEngine: PDF_ENGINE,
-    uptimeSeconds: Math.round(process.uptime()),
-    startedAt: new Date(SERVICE_STARTED_AT_MS).toISOString(),
+    uptimeSeconds,
+    startedAt,
+    runtime: {
+      pid: process.pid,
+      nodeVersion: process.version,
+      host: HOST,
+      port: PORT,
+      rootDir: __dirname,
+      pdfEngine: PDF_ENGINE,
+      startedAt,
+      uptimeSeconds,
+    },
+    queue: queueStatus,
     ...versionStatus,
   };
 }
@@ -5071,7 +5085,66 @@ async function getServiceVersionStatus() {
     restartReason: needsRestart
       ? "server.js 已在服务启动后更新，请重启 PaperLens 后端。"
       : "",
+    source: {
+      serverSourceMtimeMs,
+      staticAssetMtimeMs,
+      serviceBuildId: `${PACKAGE_VERSION}:${Math.round(serverSourceMtimeMs)}`,
+      needsRestart,
+      restartReason: needsRestart
+        ? "server.js 已在服务启动后更新，请重启 PaperLens 后端。"
+        : "",
+    },
   };
+}
+
+function getJobQueueStatus() {
+  const jobs = [...jobStore.jobs.values()];
+  const activeJobs = jobs.filter((job) => isActiveJobStatus(job.status));
+  const queuedJobs = jobs.filter((job) => job.status === "queued");
+  const runningJobs = jobs.filter((job) => job.status === "running");
+  const cancelingJobs = jobs.filter((job) => job.status === "canceling");
+  const activeJob = jobStore.activeJobId
+    ? jobStore.jobs.get(jobStore.activeJobId)
+    : runningJobs[0] || cancelingJobs[0] || queuedJobs[0] || null;
+  const latestJob = jobs
+    .slice()
+    .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)))[0] || null;
+
+  return {
+    schemaVersion: 1,
+    workerScheduled: jobStore.workerScheduled,
+    activeJobId: jobStore.activeJobId || "",
+    activeJob: activeJob ? serializeJobSummary(activeJob) : null,
+    activeJobs: activeJobs.length,
+    queuedJobs: queuedJobs.length,
+    runningJobs: runningJobs.length,
+    cancelingJobs: cancelingJobs.length,
+    savedJobs: jobs.length,
+    activeItems: countJobItems(activeJobs),
+    lastUpdatedAt: latestJob?.updatedAt || latestJob?.createdAt || "",
+  };
+}
+
+function countJobItems(jobs) {
+  const counts = {
+    total: 0,
+    queued: 0,
+    running: 0,
+    done: 0,
+    error: 0,
+    canceled: 0,
+  };
+
+  for (const job of jobs) {
+    for (const item of job.items || []) {
+      counts.total += 1;
+      if (Object.hasOwn(counts, item.status)) {
+        counts[item.status] += 1;
+      }
+    }
+  }
+
+  return counts;
 }
 
 async function getFileMtimeMs(filePath) {
