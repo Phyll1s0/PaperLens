@@ -5,7 +5,7 @@ import tls from "node:tls";
 import { execFile, spawn } from "node:child_process";
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, readFile, readdir, rename, unlink, writeFile, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, unlink, writeFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { inflateSync } from "node:zlib";
@@ -34,6 +34,7 @@ const ASSET_DIR = path.join(__dirname, "paper-assets");
 const CACHE_DIR = path.join(__dirname, ".cache");
 const JOBS_PATH = path.join(DATA_DIR, "jobs.json");
 const SECRETS_PATH = path.join(DATA_DIR, "secrets.json");
+const JOB_WORKER_LOCK_DIR = path.join(CACHE_DIR, "job-worker.lock");
 const SERVICE_STATIC_ASSET_PATHS = [
   path.join(PUBLIC_DIR, "index.html"),
   path.join(PUBLIC_DIR, "app.js"),
@@ -74,6 +75,8 @@ const MAX_BATCH_SPLIT_DEPTH = 4;
 const SEGMENTATION_CONTEXT_TEXT_LIMIT = 1600;
 const SEGMENTATION_STRUCTURE_INPUT_LIMIT = 28_000;
 const CLAUDE_SEGMENTATION_STRUCTURE_INPUT_LIMIT = 14_000;
+const CLAUDE_SEGMENTATION_STRUCTURE_SCAN = /^(1|true|yes|on)$/i
+  .test(String(process.env.PAPERLENS_CLAUDE_SEGMENTATION_STRUCTURE_SCAN || ""));
 const SEGMENTATION_STRUCTURE_PAGE_LIMIT = 1800;
 const SEGMENTATION_STRUCTURE_TIMEOUT_MS = readIntegerEnv("PAPERLENS_SEGMENTATION_STRUCTURE_TIMEOUT_SECONDS", 300, 60, 1800) * 1000;
 const SEGMENTATION_CHUNK_TIMEOUT_MS = readIntegerEnv("PAPERLENS_SEGMENTATION_CHUNK_TIMEOUT_SECONDS", 240, 60, 1200) * 1000;
@@ -117,7 +120,7 @@ const pagePixelCache = new Map();
 
 await loadSecrets();
 await loadJobs();
-recoverInterruptedJobs();
+await recoverInterruptedJobs();
 scheduleJobWorker();
 
 const server = http.createServer(async (req, res) => {
@@ -1499,23 +1502,9 @@ async function loadJobs() {
       continue;
     }
 
-    const normalized = normalizeLoadedJob(job);
+    const normalized = await normalizeLoadedJobForRuntime(job);
     if (!normalized) {
       continue;
-    }
-
-    if (normalized.type === "analysis" || normalized.type === "segmentation") {
-      try {
-        normalized.settings = await secureSettingsForJob(normalized.settings, { migrate: true });
-      } catch (error) {
-        console.warn(`Skipping invalid model settings for job ${normalized.id}: ${error.message}`);
-        normalized.settings = redactJobSettings(normalized.settings || {});
-        if (isActiveJobStatus(normalized.status)) {
-          normalized.status = "error";
-          normalized.error = "历史任务模型配置无法迁移，请重新创建任务。";
-          normalized.completedAt = new Date().toISOString();
-        }
-      }
     }
     jobStore.jobs.set(job.id, normalized);
   }
@@ -1983,9 +1972,17 @@ function normalizeLoadedJobItemStatus(status) {
   return "queued";
 }
 
-function recoverInterruptedJobs() {
+async function recoverInterruptedJobs() {
+  const owner = await readJobWorkerLockOwner();
+  const hasLiveExternalWorker = Boolean(owner?.pid && Number(owner.pid) !== process.pid && isProcessAlive(owner.pid));
+  let changed = false;
+
   for (const job of jobStore.jobs.values()) {
     if (!isActiveJobStatus(job.status)) {
+      continue;
+    }
+
+    if (hasLiveExternalWorker && (job.status === "running" || job.status === "canceling")) {
       continue;
     }
 
@@ -1993,12 +1990,17 @@ function recoverInterruptedJobs() {
     job.currentParagraphId = "";
     job.currentBatchSize = 0;
     job.updatedAt = new Date().toISOString();
+    changed = true;
     for (const item of job.items) {
       if (item.status === "running") {
         item.status = "queued";
         item.error = "";
       }
     }
+  }
+
+  if (changed) {
+    await persistJobs();
   }
 }
 
@@ -2305,9 +2307,15 @@ async function runJobWorker() {
     return;
   }
 
+  const workerLock = await acquireJobWorkerLock();
+  if (!workerLock) {
+    return;
+  }
+
   await syncJobsFromDisk();
   const job = getNextQueuedJob();
   if (!job) {
+    await releaseJobWorkerLock(workerLock);
     return;
   }
 
@@ -2327,9 +2335,67 @@ async function runJobWorker() {
     jobStore.controllers.delete(job.id);
     jobStore.activeJobId = null;
     await persistJobs();
+    await releaseJobWorkerLock(workerLock);
     if (getNextQueuedJob()) {
       scheduleJobWorker();
     }
+  }
+}
+
+async function acquireJobWorkerLock() {
+  try {
+    await mkdir(JOB_WORKER_LOCK_DIR);
+    const ownerPath = path.join(JOB_WORKER_LOCK_DIR, "owner.json");
+    const owner = {
+      pid: process.pid,
+      port: PORT,
+      startedAt: new Date().toISOString(),
+    };
+    await writeFile(ownerPath, JSON.stringify(owner, null, 2));
+    return owner;
+  } catch (error) {
+    if (error.code !== "EEXIST") {
+      throw error;
+    }
+
+    const owner = await readJobWorkerLockOwner();
+    if (owner?.pid && !isProcessAlive(owner.pid)) {
+      await rm(JOB_WORKER_LOCK_DIR, { recursive: true, force: true });
+      return acquireJobWorkerLock();
+    }
+
+    return null;
+  }
+}
+
+async function releaseJobWorkerLock(owner) {
+  if (!owner) {
+    return;
+  }
+
+  const current = await readJobWorkerLockOwner();
+  if (!current || Number(current.pid) !== process.pid) {
+    return;
+  }
+
+  await rm(JOB_WORKER_LOCK_DIR, { recursive: true, force: true });
+}
+
+async function readJobWorkerLockOwner() {
+  try {
+    const raw = await readFile(path.join(JOB_WORKER_LOCK_DIR, "owner.json"), "utf8");
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -7361,6 +7427,13 @@ function inferTitle(paragraphs, filename) {
 }
 
 async function buildPaperStructureMapWithAi(paper, pages, settings, options = {}) {
+  if (isClaudeAgentSettings(settings) && !CLAUDE_SEGMENTATION_STRUCTURE_SCAN) {
+    return {
+      ...buildHeuristicPaperStructureMap(paper, pages),
+      fallbackReason: "claude-agent-structure-scan-skipped",
+    };
+  }
+
   const pageOutline = buildStructureScanInput(pages, {
     totalLimit: isClaudeAgentSettings(settings)
       ? CLAUDE_SEGMENTATION_STRUCTURE_INPUT_LIMIT
