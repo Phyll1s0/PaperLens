@@ -1,4 +1,7 @@
 import http from "node:http";
+import https from "node:https";
+import net from "node:net";
+import tls from "node:tls";
 import { execFile, spawn } from "node:child_process";
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -7955,22 +7958,20 @@ async function callModel(settings, messages, options = {}) {
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 90_000);
 
   try {
+    const requestBody = {
+      model: cleanSettings.model,
+      messages,
+      temperature: 0.2,
+      ...getProviderPayloadOptions(cleanSettings),
+      ...(options.maxTokens ? { max_tokens: options.maxTokens } : {}),
+    };
     let response;
     try {
-      response = await fetch(endpoint, {
-        method: "POST",
+      response = await requestModelEndpoint(endpoint, {
+        apiKey: cleanSettings.apiKey,
+        body: requestBody,
+        proxyUrl: cleanSettings.proxyUrl,
         signal: controller.signal,
-        headers: {
-          "content-type": "application/json",
-          "authorization": `Bearer ${cleanSettings.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: cleanSettings.model,
-          messages,
-          temperature: 0.2,
-          ...getProviderPayloadOptions(cleanSettings),
-          ...(options.maxTokens ? { max_tokens: options.maxTokens } : {}),
-        }),
       });
     } catch (error) {
       if (error.name === "AbortError") {
@@ -7982,7 +7983,7 @@ async function callModel(settings, messages, options = {}) {
       throw new Error(formatModelNetworkError(error, cleanSettings));
     }
 
-    const text = await response.text();
+    const text = response.text;
     if (!response.ok) {
       throw new Error(formatModelError(response.status, text));
     }
@@ -8002,11 +8003,363 @@ async function callModel(settings, messages, options = {}) {
 }
 
 function formatModelNetworkError(error, settings) {
-  const proxyHint = settings.proxyUrl || process.env.PAPERLENS_PROXY_URL
-    ? "已检测到代理配置，但当前普通 OpenAI-compatible 请求可能仍受 Node.js fetch 代理支持限制影响；Claude Code Provider 会优先使用代理环境。"
+  const proxyUrl = getEffectiveProxyUrl(settings.proxyUrl, getChatCompletionsEndpoint(settings.baseUrl));
+  const proxyHint = proxyUrl
+    ? `已通过 PaperLens 代理传输尝试连接：${redactProxyUrl(proxyUrl)}。请确认代理地址、端口和 Docker/宿主机地址是否正确。`
     : "如果你的网络需要代理，请在网页 Proxy URL 或 .env 的 PAPERLENS_PROXY_URL 中填写代理地址。";
 
   return `模型网络请求失败：${error.message || "fetch failed"}。${proxyHint}`;
+}
+
+async function requestModelEndpoint(endpoint, options = {}) {
+  const proxyUrl = getEffectiveProxyUrl(options.proxyUrl, endpoint);
+  const headers = {
+    "content-type": "application/json",
+    "authorization": `Bearer ${options.apiKey}`,
+  };
+  const body = JSON.stringify(options.body || {});
+
+  if (!proxyUrl) {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      signal: options.signal,
+      headers,
+      body,
+    });
+    return {
+      ok: response.ok,
+      status: response.status,
+      text: await response.text(),
+      viaProxy: false,
+    };
+  }
+
+  return await requestViaProxy(endpoint, {
+    method: "POST",
+    headers,
+    body,
+    proxyUrl,
+    signal: options.signal,
+  });
+}
+
+async function requestViaProxy(endpoint, options = {}) {
+  const proxy = new URL(options.proxyUrl);
+  const protocol = proxy.protocol.toLowerCase();
+  if (protocol === "http:" || protocol === "https:") {
+    return await requestViaHttpProxy(endpoint, options, proxy);
+  }
+
+  if (protocol === "socks:" || protocol === "socks5:" || protocol === "socks5h:") {
+    return await requestViaSocksProxy(endpoint, options, proxy);
+  }
+
+  throw new Error(`不支持的代理协议：${proxy.protocol}`);
+}
+
+async function requestViaHttpProxy(endpoint, options, proxy) {
+  const target = new URL(endpoint);
+  if (target.protocol === "http:") {
+    return await requestHttp({
+      module: proxy.protocol === "https:" ? https : http,
+      requestOptions: {
+        protocol: proxy.protocol,
+        hostname: proxy.hostname,
+        port: proxy.port || (proxy.protocol === "https:" ? 443 : 80),
+        method: options.method || "POST",
+        path: target.href,
+        headers: {
+          ...options.headers,
+          host: target.host,
+          ...getProxyAuthorizationHeader(proxy),
+        },
+      },
+      body: options.body,
+      signal: options.signal,
+      viaProxy: true,
+    });
+  }
+
+  const socket = await createHttpProxyTunnel(target, proxy, options.signal);
+  return await requestHttpOverSocket(target, options, socket, { tls: true });
+}
+
+function createHttpProxyTunnel(target, proxy, signal) {
+  return new Promise((resolve, reject) => {
+    const requestModule = proxy.protocol === "https:" ? https : http;
+    const request = requestModule.request({
+      protocol: proxy.protocol,
+      hostname: proxy.hostname,
+      port: proxy.port || (proxy.protocol === "https:" ? 443 : 80),
+      method: "CONNECT",
+      path: `${target.hostname}:${target.port || 443}`,
+      headers: getProxyAuthorizationHeader(proxy),
+    });
+
+    const cleanup = () => {
+      signal?.removeEventListener("abort", abort);
+      request.removeAllListeners();
+    };
+    const abort = () => {
+      request.destroy(createAbortError("代理连接已取消。"));
+    };
+    if (signal) {
+      if (signal.aborted) {
+        abort();
+        return;
+      }
+      signal.addEventListener("abort", abort, { once: true });
+    }
+
+    request.once("connect", (response, socket) => {
+      cleanup();
+      if (response.statusCode !== 200) {
+        socket.destroy();
+        reject(new Error(`HTTP 代理 CONNECT 失败：${response.statusCode}`));
+        return;
+      }
+      resolve(socket);
+    });
+    request.once("error", (error) => {
+      cleanup();
+      reject(error);
+    });
+    request.end();
+  });
+}
+
+async function requestViaSocksProxy(endpoint, options, proxy) {
+  const target = new URL(endpoint);
+  const socket = await createSocks5Tunnel(target, proxy, options.signal);
+  return await requestHttpOverSocket(target, options, socket, { tls: target.protocol === "https:" });
+}
+
+async function requestHttpOverSocket(target, options, socket, transport = {}) {
+  let connection = socket;
+  if (transport.tls) {
+    connection = tls.connect({
+      socket,
+      servername: target.hostname,
+    });
+    await onceConnect(connection, options.signal);
+  }
+
+  return await requestHttp({
+    module: target.protocol === "https:" ? https : http,
+    requestOptions: {
+      protocol: target.protocol,
+      hostname: target.hostname,
+      port: target.port || (target.protocol === "https:" ? 443 : 80),
+      method: options.method || "POST",
+      path: `${target.pathname}${target.search}`,
+      headers: {
+        ...options.headers,
+        host: target.host,
+      },
+      createConnection: () => connection,
+      agent: false,
+    },
+    body: options.body,
+    signal: options.signal,
+    viaProxy: true,
+  });
+}
+
+function requestHttp({ module, requestOptions, body = "", signal, viaProxy = false }) {
+  return new Promise((resolve, reject) => {
+    const request = module.request({
+      ...requestOptions,
+      headers: {
+        ...requestOptions.headers,
+        "content-length": Buffer.byteLength(body),
+      },
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => {
+        cleanup();
+        resolve({
+          ok: response.statusCode >= 200 && response.statusCode < 300,
+          status: response.statusCode || 0,
+          text: Buffer.concat(chunks).toString("utf8"),
+          viaProxy,
+        });
+      });
+    });
+
+    const cleanup = () => {
+      signal?.removeEventListener("abort", abort);
+      request.removeAllListeners("error");
+    };
+    const abort = () => request.destroy(createAbortError("模型请求已取消。"));
+    if (signal) {
+      if (signal.aborted) {
+        abort();
+        return;
+      }
+      signal.addEventListener("abort", abort, { once: true });
+    }
+    request.once("error", (error) => {
+      cleanup();
+      reject(error);
+    });
+    request.end(body);
+  });
+}
+
+function createSocks5Tunnel(target, proxy, signal) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({
+      host: proxy.hostname,
+      port: Number(proxy.port || 1080),
+    });
+    const chunks = [];
+    let stage = "greeting";
+
+    const cleanup = () => {
+      signal?.removeEventListener("abort", abort);
+      socket.removeAllListeners("data");
+      socket.removeAllListeners("error");
+      socket.removeAllListeners("connect");
+    };
+    const fail = (error) => {
+      cleanup();
+      socket.destroy();
+      reject(error);
+    };
+    const abort = () => fail(createAbortError("SOCKS5 代理连接已取消。"));
+    if (signal) {
+      if (signal.aborted) {
+        abort();
+        return;
+      }
+      signal.addEventListener("abort", abort, { once: true });
+    }
+
+    socket.once("connect", () => {
+      const methods = proxy.username ? [0x00, 0x02] : [0x00];
+      socket.write(Buffer.from([0x05, methods.length, ...methods]));
+    });
+    socket.on("data", (chunk) => {
+      chunks.push(chunk);
+      const buffer = Buffer.concat(chunks);
+      try {
+        if (stage === "greeting" && buffer.length >= 2) {
+          chunks.length = 0;
+          if (buffer[0] !== 0x05 || buffer[1] === 0xff) {
+            throw new Error("SOCKS5 代理不接受当前认证方式。");
+          }
+          if (buffer[1] === 0x02) {
+            stage = "auth";
+            const username = Buffer.from(decodeURIComponent(proxy.username || ""));
+            const password = Buffer.from(decodeURIComponent(proxy.password || ""));
+            socket.write(Buffer.from([0x01, username.length, ...username, password.length, ...password]));
+          } else {
+            stage = "connect";
+            socket.write(buildSocks5ConnectRequest(target));
+          }
+        } else if (stage === "auth" && buffer.length >= 2) {
+          chunks.length = 0;
+          if (buffer[1] !== 0x00) {
+            throw new Error("SOCKS5 代理用户名或密码认证失败。");
+          }
+          stage = "connect";
+          socket.write(buildSocks5ConnectRequest(target));
+        } else if (stage === "connect" && buffer.length >= 5) {
+          const expectedLength = getSocks5ResponseLength(buffer);
+          if (buffer.length < expectedLength) {
+            return;
+          }
+          if (buffer[1] !== 0x00) {
+            throw new Error(`SOCKS5 CONNECT 失败：0x${buffer[1].toString(16).padStart(2, "0")}`);
+          }
+          cleanup();
+          resolve(socket);
+        }
+      } catch (error) {
+        fail(error);
+      }
+    });
+    socket.once("error", fail);
+  });
+}
+
+function buildSocks5ConnectRequest(target) {
+  const port = Number(target.port || (target.protocol === "https:" ? 443 : 80));
+  const portBytes = Buffer.from([(port >> 8) & 0xff, port & 0xff]);
+  const hostname = target.hostname;
+  const ipVersion = net.isIP(hostname);
+  if (ipVersion === 4) {
+    return Buffer.concat([
+      Buffer.from([0x05, 0x01, 0x00, 0x01]),
+      Buffer.from(hostname.split(".").map((part) => Number(part))),
+      portBytes,
+    ]);
+  }
+  const hostBytes = Buffer.from(hostname);
+  return Buffer.concat([
+    Buffer.from([0x05, 0x01, 0x00, 0x03, hostBytes.length]),
+    hostBytes,
+    portBytes,
+  ]);
+}
+
+function getSocks5ResponseLength(buffer) {
+  const atyp = buffer[3];
+  if (atyp === 0x01) {
+    return 10;
+  }
+  if (atyp === 0x04) {
+    return 22;
+  }
+  if (atyp === 0x03) {
+    return 5 + Number(buffer[4] || 0) + 2;
+  }
+  return 5;
+}
+
+function onceConnect(socket, signal) {
+  return new Promise((resolve, reject) => {
+    if (socket.readyState === "open") {
+      resolve();
+      return;
+    }
+    const cleanup = () => {
+      signal?.removeEventListener("abort", abort);
+      socket.removeListener("secureConnect", onConnect);
+      socket.removeListener("connect", onConnect);
+      socket.removeListener("error", onError);
+    };
+    const onConnect = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const abort = () => {
+      cleanup();
+      socket.destroy();
+      reject(createAbortError("代理 TLS 连接已取消。"));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    socket.once("secureConnect", onConnect);
+    socket.once("connect", onConnect);
+    socket.once("error", onError);
+  });
+}
+
+function getProxyAuthorizationHeader(proxy) {
+  if (!proxy.username) {
+    return {};
+  }
+
+  const username = decodeURIComponent(proxy.username || "");
+  const password = decodeURIComponent(proxy.password || "");
+  return {
+    "proxy-authorization": `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`,
+  };
 }
 
 function requestCanceledError() {
@@ -8227,6 +8580,84 @@ function getProxyEnv(proxyUrl = "") {
   }
 
   return env;
+}
+
+function getEffectiveProxyUrl(proxyUrl = "", endpoint = "") {
+  const target = endpoint ? new URL(endpoint) : null;
+  if (target && shouldBypassProxy(target)) {
+    return "";
+  }
+
+  const directProxy = normalizeOptionalProxyUrl(proxyUrl);
+  if (directProxy) {
+    return directProxy;
+  }
+
+  const paperlensProxy = normalizeOptionalProxyUrl(process.env.PAPERLENS_PROXY_URL);
+  if (paperlensProxy) {
+    return paperlensProxy;
+  }
+
+  const protocol = target?.protocol || "https:";
+  const protocolProxy = protocol === "http:"
+    ? process.env.HTTP_PROXY || process.env.http_proxy
+    : process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
+  const envProxy = normalizeOptionalProxyUrl(protocolProxy || process.env.ALL_PROXY || process.env.all_proxy);
+  return envProxy || "";
+}
+
+function normalizeOptionalProxyUrl(proxyUrl = "") {
+  const clean = String(proxyUrl || "").trim();
+  if (!clean) {
+    return "";
+  }
+
+  try {
+    return normalizeProxyUrl(clean);
+  } catch {
+    return clean;
+  }
+}
+
+function shouldBypassProxy(target) {
+  const noProxy = String(process.env.NO_PROXY || process.env.no_proxy || "").trim();
+  if (!noProxy) {
+    return false;
+  }
+
+  const host = target.hostname.toLowerCase();
+  const port = target.port || (target.protocol === "https:" ? "443" : "80");
+  for (const rawRule of noProxy.split(",")) {
+    const rule = rawRule.trim().toLowerCase();
+    if (!rule) {
+      continue;
+    }
+    if (rule === "*") {
+      return true;
+    }
+    if (rule.includes(":")) {
+      const [ruleHost, rulePort] = rule.split(":");
+      if (rulePort && rulePort !== port) {
+        continue;
+      }
+      if (hostMatchesNoProxyRule(host, ruleHost)) {
+        return true;
+      }
+    } else if (hostMatchesNoProxyRule(host, rule)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function hostMatchesNoProxyRule(host, rule) {
+  if (!rule) {
+    return false;
+  }
+
+  const cleanRule = rule.startsWith(".") ? rule.slice(1) : rule;
+  return host === cleanRule || host.endsWith(`.${cleanRule}`);
 }
 
 function hasProxyEnv(proxyUrl = "") {
@@ -8470,7 +8901,13 @@ function getSettingsDiagnostics(settings = {}) {
   const claudeCommand = isClaudeProvider
     ? getClaudeCommandDiagnostics(commandPath)
     : { command: "", source: "none", available: false };
-  const proxyPresent = hasProxyEnv(proxyUrl);
+  const endpoint = baseUrl === "local:claude-kimi"
+    ? "https://api.kimi.com/coding/"
+    : baseUrl === "local:claude-config"
+      ? ""
+      : getChatCompletionsEndpoint(baseUrl);
+  const proxyTransport = getProxyTransportDiagnostics(proxyUrl, endpoint, isClaudeProvider);
+  const proxyPresent = proxyTransport.present;
 
   return {
     provider,
@@ -8478,7 +8915,7 @@ function getSettingsDiagnostics(settings = {}) {
       ? "local claude CLI + page Kimi key -> https://api.kimi.com/coding/"
       : baseUrl === "local:claude-config"
         ? "local claude CLI configured auth"
-      : getChatCompletionsEndpoint(baseUrl),
+      : endpoint,
     model,
     keyPresent: Boolean(apiKey || savedKey),
     keyRef: savedKey?.id || "",
@@ -8492,13 +8929,60 @@ function getSettingsDiagnostics(settings = {}) {
     claudeVerified: claudeCommand.verified,
     proxyPresent,
     proxySource: getProxySource(proxyUrl),
-    proxyAppliedToAgent: isClaudeProvider,
+    proxyAppliedToAgent: proxyTransport.applied,
+    proxyTransport,
     runtime: {
       isDocker: isRunningInDocker(),
       host: HOST,
       port: PORT,
     },
   };
+}
+
+function getProxyTransportDiagnostics(proxyUrl, endpoint, isClaudeProvider) {
+  const effectiveProxyUrl = endpoint ? getEffectiveProxyUrl(proxyUrl, endpoint) : normalizeOptionalProxyUrl(proxyUrl || process.env.PAPERLENS_PROXY_URL);
+  const source = getProxySource(proxyUrl);
+  let protocol = "";
+  try {
+    protocol = effectiveProxyUrl ? new URL(effectiveProxyUrl).protocol.replace(/:$/, "").toLowerCase() : "";
+  } catch {
+    protocol = "invalid";
+  }
+  const supported = !effectiveProxyUrl || ["http", "https", "socks", "socks5", "socks5h"].includes(protocol);
+  const mode = isClaudeProvider
+    ? "cli-env"
+    : effectiveProxyUrl
+      ? protocol.startsWith("socks") ? "socks5-tunnel" : "http-connect"
+      : "direct";
+  return {
+    present: Boolean(effectiveProxyUrl || hasProxyEnv(proxyUrl)),
+    applied: isClaudeProvider ? Boolean(effectiveProxyUrl || hasProxyEnv(proxyUrl)) : Boolean(effectiveProxyUrl && supported),
+    supported,
+    source,
+    protocol: protocol || "",
+    mode,
+    effectiveProxy: redactProxyUrl(effectiveProxyUrl),
+    noProxyBypassed: Boolean(endpoint && !effectiveProxyUrl && hasProxyEnv(proxyUrl) && shouldBypassProxy(new URL(endpoint))),
+  };
+}
+
+function redactProxyUrl(proxyUrl = "") {
+  if (!proxyUrl) {
+    return "";
+  }
+
+  try {
+    const url = new URL(proxyUrl);
+    if (url.username) {
+      url.username = "***";
+    }
+    if (url.password) {
+      url.password = "***";
+    }
+    return url.toString();
+  } catch {
+    return String(proxyUrl).replace(/\/\/([^:@/]+):([^@/]+)@/, "//***:***@");
+  }
 }
 
 function resolveBaseUrlForProvider(provider, baseUrl) {

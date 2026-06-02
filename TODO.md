@@ -5,7 +5,7 @@
 - [x] 当前运行服务可能还是旧进程：已增加 health schema v2、运行状态面板和命令行队列快照；如果仍提示旧 schema，需要重启当前服务。
 - [x] 扫描版 PDF 目前仍偏“提示型”：已支持本机 OCR Job，调用 OCRmyPDF/Tesseract 后自动回填可搜索 PDF、重新提取文本和页面结构。
 - [x] 公网部署风险还没有兜住：已支持 `PAPERLENS_ACCESS_TOKEN` 访问令牌保护 API/导出/assets，并支持服务端 API Key 加密存储和公网风险提示。
-- [ ] OpenAI-compatible Provider 的代理链路不够稳定：普通 `fetch` 对 HTTP/SOCKS 代理支持有限，Kimi/DeepSeek 在本机代理、Docker、服务器环境下表现可能不同。
+- [x] OpenAI-compatible Provider 的代理链路不够稳定：已为普通模型请求接入 PaperLens 代理传输，支持 HTTP/HTTPS proxy、SOCKS5、NO_PROXY 和诊断显示。
 - [ ] Claude Code + Kimi Code Key 仍依赖本机环境：需要 `claude` CLI、隔离配置、代理和预算状态都正确，别人复现成本偏高。
 - [ ] 长任务缺少硬性资源保护：大 PDF、批量重建视觉结构、批量补跑会消耗 CPU、磁盘和模型预算，需要更明确的限流与取消策略。
 - [ ] 现在主要依赖 JSON 文件存储：并发写入、文件体积增长、异常退出时存在数据损坏或恢复困难的风险。
@@ -17,9 +17,8 @@
 
 ## Next
 
-1. [ ] Provider 代理传输升级：给 Kimi/DeepSeek/OpenAI-compatible 调用接入可靠代理传输，并在诊断页显示代理是否真正生效。
-2. [ ] 分段编辑闭环：支持段落合并、拆分、标记噪声、重新归属章节，并只重跑变动段落。
-3. [ ] 持久化升级预研：把论文、段落、Job、导出历史从 JSON 迁移到 SQLite 或至少加入原子写、备份和恢复。
+1. [ ] 分段编辑闭环：支持段落合并、拆分、标记噪声、重新归属章节，并只重跑变动段落。
+2. [ ] 持久化升级预研：把论文、段落、Job、导出历史从 JSON 迁移到 SQLite 或至少加入原子写、备份和恢复。
 
 ## Later
 
@@ -33,6 +32,7 @@
 
 ## Done
 
+- [x] Provider 代理传输升级：OpenAI-compatible 请求不再依赖普通 `fetch` 的代理能力，后端可通过 HTTP CONNECT 或 SOCKS5 tunnel 发起模型请求，诊断页显示传输模式和代理来源。
 - [x] 部署安全基础层：可用 `PAPERLENS_ACCESS_TOKEN` 开启登录保护，API/导出/assets 需要 Cookie，health 显示公网风险，`data/secrets.json` 可加密保存。
 - [x] 内置 OCR Job：扫描版 PDF 可在页面启动本机 OCR，后台队列调用 OCRmyPDF/Tesseract，完成后自动重新提取文本、段落和视觉结构。
 - [x] 服务运行状态收敛：health schema v2 暴露后端版本、启动信息、源码/静态文件更新时间和 Job Queue 快照，页面会在旧进程/旧前端时显示修复命令。

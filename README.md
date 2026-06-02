@@ -209,7 +209,7 @@ PAPERLENS_PORT=3010
 
 如果网页提示找不到 `claude` CLI，请确认本机能运行 `claude --version`。macOS launchd 服务会把 `/opt/homebrew/bin`、`/usr/local/bin`、`~/.local/bin` 加入 PATH；如果你的 Claude Code 安装在其他位置，可以设置 `PAPERLENS_CLAUDE_CLI=/path/to/claude`。
 
-如果你的网络必须通过代理访问模型服务，最简单是在网页模型设置里填 `Proxy URL`；也可以在 `.env` 里设置 `PAPERLENS_PROXY_URL`。本机后台脚本、macOS launchd 和 Docker Compose 都会读取它；网页模型诊断里也会显示 `Proxy: detected`。也可以直接设置 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`。
+如果你的网络必须通过代理访问模型服务，最简单是在网页模型设置里填 `Proxy URL`；也可以在 `.env` 里设置 `PAPERLENS_PROXY_URL`。本机后台脚本、macOS launchd 和 Docker Compose 都会读取它。普通 OpenAI-compatible Provider 会由 PaperLens 后端代理传输层发起请求，支持 `http://`、`https://`、`socks5://` / `socks5h://` 和 `NO_PROXY`；Claude Code Provider 会把代理注入 CLI 环境。网页模型诊断里会显示代理来源和传输模式，例如 `http-connect` 或 `socks5-tunnel`。Docker 里访问宿主机代理通常要写 `http://host.docker.internal:端口`，不是 `127.0.0.1`。
 
 AI 分段会走三阶段：先做全文结构预扫描，生成标题、正文起点、References 起点、章节页码、非正文区域地图和 `segmentationPlan`；再按 3 页左右的窗口局部分段，每个 heading/paragraph 会尽量绑定计划章节，并带着结构地图、前序摘要和尾段上下文；最后做合并校验，统一修正章节归属、过滤作者/链接/图注/参考文献等非正文碎片，并合并跨页或断句段落。上传和打开旧论文时还会生成页面 `visualRegions`，用几何位置识别图片、表格、公式、代码等视觉区域，再用页面 PNG 的非白像素收紧裁剪边界，并优先用这些区域裁剪图表。长任务默认按“精读质量优先”优化：后端会把段落合并成批次，并发跑多个批次并安全合并写入；已完成段落会写入本地分析缓存，补跑或全量任务会优先复用相同段落的翻译/讲解；失败项重跑会自动降到小批次，批量失败后也会自适应缩小后续批次。每段讲解会覆盖段落含义、论文中的作用、关键概念/公式/图表关系和阅读难点。`.env` 可调整：`PAPERLENS_ANALYSIS_TARGET_MINUTES=20` 控制目标耗时估算，`PAPERLENS_AGENT_ANALYSIS_BATCH_SIZE=8` / `PAPERLENS_AGENT_ANALYSIS_CONCURRENCY=2` 控制 Claude Code Agent，`PAPERLENS_ANALYSIS_BATCH_SIZE=12` / `PAPERLENS_ANALYSIS_CONCURRENCY=3` 控制普通 OpenAI-compatible，`PAPERLENS_ANALYSIS_FAILED_RETRY_BATCH_SIZE=2` 控制失败补跑小批次。批次和并发越大越快，但更容易触发限流、超时或 JSON 不完整；如果想进一步提速，可以把批次调高，但讲解质量会受影响。
 

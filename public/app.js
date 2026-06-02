@@ -511,6 +511,14 @@ function updateModelDiagnostics(remoteDiagnostics) {
     proxyPresent: Boolean(settings.proxyUrl),
     proxySource: settings.proxyUrl ? "page" : "none",
     proxyAppliedToAgent: isClaudeProvider,
+    proxyTransport: {
+      present: Boolean(settings.proxyUrl),
+      applied: isClaudeProvider && Boolean(settings.proxyUrl),
+      mode: isClaudeProvider ? "cli-env" : "direct",
+      protocol: settings.proxyUrl ? settings.proxyUrl.split(":")[0] : "",
+      supported: true,
+      effectiveProxy: settings.proxyUrl,
+    },
   };
 
   const lines = [
@@ -528,12 +536,13 @@ function updateModelDiagnostics(remoteDiagnostics) {
     lines.push(`Claude CLI: ${diagnostics.claudeCommand}`);
   }
 
-  if (settings.provider === "claude-kimi-agent" || settings.provider === "claude-local") {
-    const proxySource = diagnostics.proxySource && diagnostics.proxySource !== "none"
-      ? ` (${diagnostics.proxySource})`
-      : "";
-    lines.push(`Proxy: ${diagnostics.proxyPresent ? `detected${proxySource}` : "not detected"}`);
-  }
+  const proxySource = diagnostics.proxySource && diagnostics.proxySource !== "none"
+    ? ` (${diagnostics.proxySource})`
+    : "";
+  const proxyMode = diagnostics.proxyTransport?.mode && diagnostics.proxyTransport.mode !== "direct"
+    ? ` · ${diagnostics.proxyTransport.mode}`
+    : "";
+  lines.push(`Proxy: ${diagnostics.proxyPresent ? `detected${proxySource}${proxyMode}` : "not detected"}`);
 
   els.modelDiagnosticsText.textContent = lines.join(" · ");
   renderProviderGuide(diagnostics);
@@ -702,13 +711,25 @@ function getProxyGuideStatus(settings, diagnostics) {
       environment: "环境变量",
     };
     const source = sourceLabels[diagnostics.proxySource] || diagnostics.proxySource || "配置";
+    const transport = diagnostics.proxyTransport || {};
+    const modeLabels = {
+      "cli-env": "CLI 环境变量",
+      "http-connect": "HTTP CONNECT",
+      "socks5-tunnel": "SOCKS5 tunnel",
+      direct: "直连",
+    };
     const applies = diagnostics.proxyAppliedToAgent
-      ? "Claude Code Provider 会把它注入 CLI 环境。"
-      : "普通 OpenAI-compatible 请求目前主要依赖运行环境对 Node fetch 代理的支持。";
+      ? `后端会通过 ${modeLabels[transport.mode] || transport.mode || "代理传输"} 应用到模型请求。`
+      : transport.noProxyBypassed
+        ? "当前目标命中 NO_PROXY，后端会绕过代理。"
+        : "已检测到代理，但当前协议不受 PaperLens 传输层支持。";
+    const status = diagnostics.proxyAppliedToAgent
+      ? "ok"
+      : transport.noProxyBypassed ? "neutral" : "warn";
     return {
-      status: diagnostics.proxyAppliedToAgent ? "ok" : "warn",
+      status,
       chip: `Proxy ${source}`,
-      text: `已检测到代理来源：${source}。${applies}`,
+      text: `已检测到代理来源：${source}${transport.effectiveProxy ? `（${transport.effectiveProxy}）` : ""}。${applies}`,
     };
   }
 
