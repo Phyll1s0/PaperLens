@@ -36,9 +36,21 @@ const state = {
     timer: null,
     pollInFlight: false,
   },
+  auth: {
+    required: false,
+    authenticated: true,
+    checking: true,
+    publicRisk: false,
+    secretsEncrypted: false,
+  },
 };
 
 const els = {
+  authOverlay: document.querySelector("#authOverlay"),
+  authForm: document.querySelector("#authForm"),
+  authTokenInput: document.querySelector("#authTokenInput"),
+  authLoginButton: document.querySelector("#authLoginButton"),
+  authStatusText: document.querySelector("#authStatusText"),
   providerSelect: document.querySelector("#providerSelect"),
   baseUrlInput: document.querySelector("#baseUrlInput"),
   modelInput: document.querySelector("#modelInput"),
@@ -143,13 +155,13 @@ const CLIENT_ANALYSIS_DEFAULTS = {
 
 loadSettings();
 bindEvents();
-loadRecentPapers();
-updateModelDiagnostics();
-updateAutoButtons();
-checkServiceVersion();
-window.setInterval(checkServiceVersion, SERVICE_VERSION_CHECK_INTERVAL_MS);
+initializeApp();
 
 function bindEvents() {
+  els.authForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    loginWithAccessToken();
+  });
   els.uploadButton.addEventListener("click", uploadPdf);
   els.pingButton.addEventListener("click", pingModel);
   els.autoAnalyzeButton.addEventListener("click", () => startAutoAnalyze());
@@ -227,6 +239,107 @@ function bindEvents() {
   for (const input of [els.aiSegmentInput, els.autoAnalyzeInput]) {
     input.addEventListener("change", saveSettings);
   }
+}
+
+async function initializeApp() {
+  renderAuthGate();
+  updateModelDiagnostics();
+  updateAutoButtons();
+
+  try {
+    const auth = await fetchAuthStatus();
+    applyAuthStatus(auth);
+    if (canUseApp()) {
+      loadRecentPapers();
+    }
+  } catch (error) {
+    applyAuthStatus({
+      authRequired: true,
+      authenticated: false,
+      message: error.message,
+    });
+  }
+
+  checkServiceVersion();
+  window.setInterval(checkServiceVersion, SERVICE_VERSION_CHECK_INTERVAL_MS);
+}
+
+async function fetchAuthStatus() {
+  const response = await fetch("/api/auth/status", {
+    cache: "no-store",
+  });
+  return await response.json().catch(() => ({}));
+}
+
+function applyAuthStatus(payload = {}) {
+  state.auth.required = Boolean(payload.authRequired);
+  state.auth.authenticated = payload.authenticated !== false;
+  state.auth.checking = false;
+  state.auth.publicRisk = Boolean(payload.publicRisk);
+  state.auth.secretsEncrypted = Boolean(payload.secretsEncrypted);
+  renderAuthGate(payload.message || "");
+}
+
+function canUseApp() {
+  return !state.auth.required || state.auth.authenticated;
+}
+
+function renderAuthGate(message = "") {
+  if (!els.authOverlay) {
+    return;
+  }
+
+  const locked = state.auth.checking || (state.auth.required && !state.auth.authenticated);
+  els.authOverlay.classList.toggle("hidden", !locked);
+  document.body.classList.toggle("auth-locked", locked);
+  if (els.authStatusText) {
+    els.authStatusText.textContent = state.auth.checking
+      ? "正在检查访问状态"
+      : message || "这个 PaperLens 实例已启用访问保护。";
+  }
+  if (locked && !state.auth.checking) {
+    window.setTimeout(() => els.authTokenInput?.focus(), 50);
+  }
+}
+
+async function loginWithAccessToken() {
+  const token = els.authTokenInput.value.trim();
+  if (!token) {
+    els.authStatusText.textContent = "请输入访问令牌。";
+    return;
+  }
+
+  els.authLoginButton.disabled = true;
+  els.authStatusText.textContent = "正在登录";
+  try {
+    const response = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(result.error || `登录失败：HTTP ${response.status}`);
+    }
+
+    els.authTokenInput.value = "";
+    applyAuthStatus(result);
+    loadRecentPapers();
+    checkServiceVersion();
+    setStatus("已进入 PaperLens");
+  } catch (error) {
+    els.authStatusText.textContent = normalizeDisplayError(error.message);
+  } finally {
+    els.authLoginButton.disabled = false;
+  }
+}
+
+function handleUnauthorizedResponse(data = {}) {
+  applyAuthStatus({
+    authRequired: true,
+    authenticated: false,
+    message: data.error || "访问令牌已失效，请重新登录。",
+  });
 }
 
 function loadSettings() {
@@ -1167,6 +1280,16 @@ function getServiceStatus(payload, responseOk) {
     };
   }
 
+  if (payload.security?.publicRisk) {
+    return {
+      level: "warn",
+      title: "部署未启用访问保护",
+      text: payload.security.message || "当前服务可能对外开放，但没有设置访问令牌。",
+      details,
+      actions: ["设置 PAPERLENS_ACCESS_TOKEN", "重启服务"],
+    };
+  }
+
   return {
     level: "ok",
     title: "服务已同步",
@@ -1196,6 +1319,10 @@ function getServiceStatusDetails(payload = {}) {
       label: "队列",
       value: formatServiceQueue(queue),
     },
+    {
+      label: "访问",
+      value: formatServiceSecurity(payload.security),
+    },
   ];
 
   if (queue.activeJob) {
@@ -1206,6 +1333,18 @@ function getServiceStatusDetails(payload = {}) {
   }
 
   return details;
+}
+
+function formatServiceSecurity(security = {}) {
+  if (security.authRequired) {
+    return security.authenticated ? "令牌保护" : "需要登录";
+  }
+
+  if (security.publicRisk) {
+    return "未保护 · 公网风险";
+  }
+
+  return "本机开发";
 }
 
 function formatServiceQueue(queue = {}) {
@@ -3878,6 +4017,9 @@ async function apiFetch(url, options = {}, label = "请求") {
 async function readResponse(response) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (response.status === 401) {
+      handleUnauthorizedResponse(data);
+    }
     throw new Error(data.error || `Request failed with ${response.status}`);
   }
 

@@ -1,6 +1,6 @@
 import http from "node:http";
 import { execFile, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, writeFile, stat } from "node:fs/promises";
 import path from "node:path";
@@ -17,6 +17,11 @@ loadDotEnv(path.join(__dirname, ".env"));
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "127.0.0.1";
+const ACCESS_TOKEN = process.env.PAPERLENS_ACCESS_TOKEN || process.env.PAPERLENS_AUTH_TOKEN || "";
+const AUTH_REQUIRED = Boolean(ACCESS_TOKEN);
+const AUTH_COOKIE_NAME = "paperlens_access";
+const AUTH_COOKIE_MAX_AGE_SECONDS = readIntegerEnv("PAPERLENS_AUTH_COOKIE_MAX_AGE_DAYS", 14, 1, 90) * 86400;
+const SECRET_ENCRYPTION_KEY = process.env.PAPERLENS_SECRET_KEY || ACCESS_TOKEN;
 const PDF_ENGINE = process.env.PAPERLENS_PDF_ENGINE || "auto";
 const PUBLIC_DIR = path.join(__dirname, "public");
 const UPLOAD_DIR = path.join(__dirname, "uploads");
@@ -106,12 +111,32 @@ const server = http.createServer(async (req, res) => {
       return serveStatic(res, path.join(PUBLIC_DIR, "index.html"));
     }
 
+    if (req.method === "GET" && url.pathname === "/api/auth/status") {
+      return json(res, buildAuthStatus(req));
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/auth/login") {
+      return await handleAuthLogin(req, res);
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/auth/logout") {
+      return handleAuthLogout(req, res);
+    }
+
     if (req.method === "GET" && url.pathname === "/api/health") {
-      return json(res, await buildHealthPayload());
+      return json(res, await buildHealthPayload(req));
     }
 
     if (req.method === "GET" && url.pathname.startsWith("/public/")) {
       return serveStatic(res, path.join(__dirname, url.pathname));
+    }
+
+    if (!isAuthorizedRequest(req, url.pathname)) {
+      return json(res, {
+        error: "需要访问令牌。请先登录 PaperLens。",
+        authRequired: AUTH_REQUIRED,
+        authenticated: false,
+      }, 401);
     }
 
     if (req.method === "GET" && url.pathname.startsWith("/assets/")) {
@@ -927,6 +952,147 @@ function getResponseAbortSignal(res) {
   return controller.signal;
 }
 
+async function handleAuthLogin(req, res) {
+  if (!AUTH_REQUIRED) {
+    return json(res, buildAuthStatus(req));
+  }
+
+  const payload = await readJson(req);
+  const token = String(payload.token || "");
+  if (!isAccessTokenValid(token)) {
+    return json(res, {
+      error: "访问令牌不正确。",
+      authRequired: true,
+      authenticated: false,
+    }, 401);
+  }
+
+  return json(res, {
+    ...buildAuthStatus({ ...req, headers: { ...req.headers, cookie: `${AUTH_COOKIE_NAME}=${encodeURIComponent(token)}` } }),
+    authenticated: true,
+  }, 200, {
+    "set-cookie": buildAuthCookie(token, req),
+  });
+}
+
+function handleAuthLogout(req, res) {
+  return json(res, {
+    ...buildAuthStatus(req),
+    authenticated: false,
+  }, 200, {
+    "set-cookie": clearAuthCookie(req),
+  });
+}
+
+function buildAuthStatus(req = null) {
+  const publicRisk = !AUTH_REQUIRED && !isLocalBindHost(HOST);
+  return {
+    authRequired: AUTH_REQUIRED,
+    authenticated: AUTH_REQUIRED ? Boolean(req && isAuthorizedRequest(req, "")) : true,
+    publicRisk,
+    secretsEncrypted: Boolean(SECRET_ENCRYPTION_KEY),
+    message: AUTH_REQUIRED
+      ? "访问保护已启用。"
+      : publicRisk
+        ? "当前服务绑定在非本机地址，但没有设置 PAPERLENS_ACCESS_TOKEN。公网部署前请启用访问令牌。"
+        : "本机开发模式未启用访问令牌。",
+  };
+}
+
+function isAuthorizedRequest(req, pathname = "") {
+  if (!AUTH_REQUIRED) {
+    return true;
+  }
+
+  if (pathname === "/api/health" || pathname.startsWith("/api/auth/")) {
+    return true;
+  }
+
+  return isAccessTokenValid(getRequestAccessToken(req));
+}
+
+function getRequestAccessToken(req) {
+  const authorization = String(req.headers.authorization || "");
+  const bearer = authorization.match(/^Bearer\s+(.+)$/i)?.[1];
+  if (bearer) {
+    return bearer.trim();
+  }
+
+  const headerToken = String(req.headers["x-paperlens-token"] || "").trim();
+  if (headerToken) {
+    return headerToken;
+  }
+
+  const cookies = parseCookies(req.headers.cookie || "");
+  return cookies[AUTH_COOKIE_NAME] || "";
+}
+
+function parseCookies(header) {
+  const cookies = {};
+  for (const part of String(header || "").split(";")) {
+    const index = part.indexOf("=");
+    if (index === -1) {
+      continue;
+    }
+    const key = part.slice(0, index).trim();
+    const value = part.slice(index + 1).trim();
+    if (!key) {
+      continue;
+    }
+    try {
+      cookies[key] = decodeURIComponent(value);
+    } catch {
+      cookies[key] = value;
+    }
+  }
+  return cookies;
+}
+
+function isAccessTokenValid(token) {
+  if (!AUTH_REQUIRED || !token) {
+    return !AUTH_REQUIRED;
+  }
+
+  return safeCompareStrings(token, ACCESS_TOKEN);
+}
+
+function safeCompareStrings(a, b) {
+  const left = createHash("sha256").update(String(a)).digest();
+  const right = createHash("sha256").update(String(b)).digest();
+  return timingSafeEqual(left, right);
+}
+
+function buildAuthCookie(token, req) {
+  return [
+    `${AUTH_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    `Max-Age=${AUTH_COOKIE_MAX_AGE_SECONDS}`,
+    isSecureRequest(req) ? "Secure" : "",
+  ].filter(Boolean).join("; ");
+}
+
+function clearAuthCookie(req) {
+  return [
+    `${AUTH_COOKIE_NAME}=`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    "Max-Age=0",
+    isSecureRequest(req) ? "Secure" : "",
+  ].filter(Boolean).join("; ");
+}
+
+function isSecureRequest(req) {
+  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
+  return forwardedProto === "https" || Boolean(req.socket?.encrypted);
+}
+
+function isLocalBindHost(host) {
+  return ["127.0.0.1", "localhost", "::1"].includes(String(host || "").toLowerCase());
+}
+
 async function loadJobs() {
   let payload = null;
   try {
@@ -970,7 +1136,11 @@ async function loadSecrets() {
   let payload = null;
   try {
     payload = JSON.parse(await readFile(SECRETS_PATH, "utf8"));
-  } catch {
+    payload = decryptSecretsPayload(payload);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.warn(`Could not load PaperLens secrets: ${error.message}`);
+    }
     payload = null;
   }
 
@@ -1098,11 +1268,12 @@ function getApiKeyPrefix(apiKey) {
 }
 
 async function persistSecrets() {
-  const payload = {
+  const plainPayload = {
     version: 1,
     updatedAt: new Date().toISOString(),
     keys: [...secretStore.keys.values()].sort((a, b) => String(a.id).localeCompare(String(b.id))),
   };
+  const payload = encryptSecretsPayload(plainPayload);
   const tmpPath = `${SECRETS_PATH}.tmp`;
   secretStore.savePromise = secretStore.savePromise
     .catch(() => {})
@@ -1111,6 +1282,54 @@ async function persistSecrets() {
       await rename(tmpPath, SECRETS_PATH);
     });
   await secretStore.savePromise;
+}
+
+function encryptSecretsPayload(payload) {
+  if (!SECRET_ENCRYPTION_KEY) {
+    return payload;
+  }
+
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", getSecretEncryptionKeyBytes(), iv);
+  const encrypted = Buffer.concat([
+    cipher.update(JSON.stringify(payload), "utf8"),
+    cipher.final(),
+  ]);
+  return {
+    version: 2,
+    encrypted: true,
+    algorithm: "aes-256-gcm",
+    updatedAt: payload.updatedAt,
+    iv: iv.toString("base64"),
+    tag: cipher.getAuthTag().toString("base64"),
+    data: encrypted.toString("base64"),
+  };
+}
+
+function decryptSecretsPayload(payload) {
+  if (!payload?.encrypted) {
+    return payload;
+  }
+
+  if (!SECRET_ENCRYPTION_KEY) {
+    throw new Error("data/secrets.json 已加密，但没有设置 PAPERLENS_SECRET_KEY 或 PAPERLENS_ACCESS_TOKEN。");
+  }
+
+  const decipher = createDecipheriv(
+    "aes-256-gcm",
+    getSecretEncryptionKeyBytes(),
+    Buffer.from(payload.iv || "", "base64"),
+  );
+  decipher.setAuthTag(Buffer.from(payload.tag || "", "base64"));
+  const decrypted = Buffer.concat([
+    decipher.update(Buffer.from(payload.data || "", "base64")),
+    decipher.final(),
+  ]);
+  return JSON.parse(decrypted.toString("utf8"));
+}
+
+function getSecretEncryptionKeyBytes() {
+  return createHash("sha256").update(SECRET_ENCRYPTION_KEY).digest();
 }
 
 function normalizeLoadedJob(job) {
@@ -5526,7 +5745,7 @@ function readIntegerEnv(name, defaultValue, min, max) {
   return Math.trunc(clampNumber(value, min, max));
 }
 
-async function buildHealthPayload() {
+async function buildHealthPayload(req = null) {
   const versionStatus = await getServiceVersionStatus();
   const queueStatus = getJobQueueStatus();
   const uptimeSeconds = Math.round(process.uptime());
@@ -5550,6 +5769,7 @@ async function buildHealthPayload() {
       uptimeSeconds,
     },
     queue: queueStatus,
+    security: buildAuthStatus(req),
     ...versionStatus,
   };
 }
@@ -8641,10 +8861,11 @@ function getContentType(filePath) {
   return types[ext] || "application/octet-stream";
 }
 
-function json(res, payload, status = 200) {
+function json(res, payload, status = 200, headers = {}) {
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
+    ...headers,
   });
   res.end(JSON.stringify(payload));
 }

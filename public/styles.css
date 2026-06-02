@@ -44,6 +44,54 @@ textarea:disabled {
   opacity: 0.62;
 }
 
+.auth-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(245, 246, 243, 0.94);
+  backdrop-filter: blur(6px);
+}
+
+.auth-card {
+  display: grid;
+  width: min(100%, 360px);
+  gap: 14px;
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.auth-card h1,
+.auth-card p {
+  margin: 0;
+}
+
+.auth-card h1 {
+  font-size: 20px;
+}
+
+.auth-card p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.auth-card .brand-mark {
+  width: 42px;
+  height: 42px;
+}
+
+body.auth-locked .app-shell {
+  filter: blur(2px);
+  pointer-events: none;
+  user-select: none;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 340px minmax(0, 1fr);

@@ -40,6 +40,20 @@ npm run docker:logs
 cp .env.example .env
 ```
 
+本机自己用可以不设访问令牌；如果用 Docker、服务器、内网共享或公网部署，建议先设置：
+
+```text
+PAPERLENS_ACCESS_TOKEN=change-this-long-random-token
+```
+
+启用后，PaperLens 会先显示访问令牌登录页；API、导出和本地论文图片资产都会要求登录 Cookie。`data/secrets.json` 中的 API Key 也会用这个令牌派生密钥加密。更稳妥的方式是单独设置长期不变的 secrets 密钥：
+
+```text
+PAPERLENS_SECRET_KEY=change-this-even-longer-random-secret
+```
+
+如果已经生成了加密的 `data/secrets.json`，更换 `PAPERLENS_SECRET_KEY` 或 `PAPERLENS_ACCESS_TOKEN` 前请先备份并确认还能解密旧文件。
+
 本机运行或 macOS launchd 使用宿主机代理地址：
 
 ```text
@@ -145,7 +159,7 @@ docker compose down
 
 Docker 会用 named volumes 持久化 `uploads/`、`data/`、`paper-assets/` 和 `.cache/`。
 
-Docker Compose 会自动读取 `.env` 中的 `PAPERLENS_PROXY_URL` 和 `PAPERLENS_OCR_LANGUAGE`。Docker 镜像会安装 OCRmyPDF、Tesseract 英文/简体中文语言包和 Claude Code CLI，因此扫描版 PDF OCR 与 `Claude Code + Kimi Code Key` Provider 都可以在容器内运行。`Claude Code 本机配置` Provider 仍然依赖容器内自己的环境变量或配置，不会自动读取宿主机的 `~/.claude`。
+Docker Compose 会自动读取 `.env` 中的 `PAPERLENS_ACCESS_TOKEN`、`PAPERLENS_SECRET_KEY`、`PAPERLENS_PROXY_URL` 和 `PAPERLENS_OCR_LANGUAGE`。Docker 镜像会安装 OCRmyPDF、Tesseract 英文/简体中文语言包和 Claude Code CLI，因此扫描版 PDF OCR 与 `Claude Code + Kimi Code Key` Provider 都可以在容器内运行。`Claude Code 本机配置` Provider 仍然依赖容器内自己的环境变量或配置，不会自动读取宿主机的 `~/.claude`。
 
 默认端口是 `3000`。如果宿主机端口被占用，可在 `.env` 设置：
 
@@ -166,7 +180,7 @@ PAPERLENS_PORT=3010
 - 自动分析会按 Provider 分流批处理；Claude Code Agent 低并发大批次，DeepSeek/OpenAI-compatible 更偏吞吐，并会缓存已完成段落。
 - 分析任务支持刷新后恢复、任务历史查看和失败段落小批次重跑。
 - 在浏览器会话中保存模型配置和本地 key id，不保存完整 API Key。
-- 后端只在本地私有 `data/secrets.json` 保存完整 API Key，任务文件只保存 key id。
+- 后端只在本地私有 `data/secrets.json` 保存完整 API Key，任务文件只保存 key id；设置访问令牌或 secret key 后会加密保存。
 - 对单个段落生成翻译、讲解和关键词。
 - 段落分析会结合邻近段落、相关图表 caption 和前文术语。
 - 段落分析上下文窗口会额外结合全文关键词、章节摘要和同引用窗口。

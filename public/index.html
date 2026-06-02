@@ -7,6 +7,19 @@
     <link rel="stylesheet" href="/public/styles.css">
   </head>
   <body>
+    <div id="authOverlay" class="auth-overlay hidden" aria-live="polite">
+      <form id="authForm" class="auth-card">
+        <div class="brand-mark">PR</div>
+        <h1>PaperLens</h1>
+        <p>输入访问令牌后继续使用本地论文库。</p>
+        <label>
+          Access Token
+          <input id="authTokenInput" type="password" autocomplete="current-password">
+        </label>
+        <button id="authLoginButton" class="primary-button" type="submit">进入 PaperLens</button>
+        <p id="authStatusText" class="status-text"></p>
+      </form>
+    </div>
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand">

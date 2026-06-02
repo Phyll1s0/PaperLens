@@ -32,18 +32,28 @@ const request = http.get({
 
       if (payload.ok) {
         const queue = payload.queue || {};
+        const security = payload.security || {};
         const activeJobs = Number(queue.activeJobs || 0);
         const queuedJobs = Number(queue.queuedJobs || 0);
         const runningJobs = Number(queue.runningJobs || 0) + Number(queue.cancelingJobs || 0);
         const queueLabel = Number.isFinite(Number(queue.savedJobs))
           ? `queue ${runningJobs} running / ${queuedJobs} queued / ${activeJobs} active`
           : "queue unavailable";
+        const securityLabel = security.authRequired
+          ? `auth enabled / secrets ${security.secretsEncrypted ? "encrypted" : "plain"}`
+          : security.publicRisk
+            ? "auth disabled / public bind risk"
+            : "auth disabled / local";
         console.log([
           `PaperLens OK v${payload.version || "0.0.0"}`,
           `schema ${payload.serviceSchemaVersion ?? "old"}`,
           `uptime ${formatDuration(payload.uptimeSeconds || 0)}`,
           queueLabel,
+          securityLabel,
         ].join(" · "));
+        if (security.publicRisk) {
+          console.warn(security.message || "PaperLens is bound to a public host without PAPERLENS_ACCESS_TOKEN.");
+        }
       }
 
       process.exit(payload.ok ? 0 : 1);
