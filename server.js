@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, writeFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { inflateSync } from "node:zlib";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -25,8 +26,8 @@ const WORKSPACE_CACHE_KEY = createHash("sha1").update(__dirname).digest("hex").s
 const SWIFT_MODULE_CACHE_DIR = path.join(CACHE_DIR, `swift-module-cache-${WORKSPACE_CACHE_KEY}`);
 const TMP_DIR = path.join(CACHE_DIR, "tmp");
 const MAX_UPLOAD_BYTES = 120 * 1024 * 1024;
-const ARTIFACT_CROP_VERSION = 7;
-const VISUAL_STRUCTURE_VERSION = 1;
+const ARTIFACT_CROP_VERSION = 8;
+const VISUAL_STRUCTURE_VERSION = 2;
 const JOB_ITEM_MAX_ATTEMPTS = 2;
 const JOB_POLL_LIMIT = 20;
 const ANALYSIS_BATCH_SIZE = readIntegerEnv("PAPERLENS_ANALYSIS_BATCH_SIZE", 12, 1, 24);
@@ -74,6 +75,7 @@ const secretStore = {
   savePromise: Promise.resolve(),
 };
 const paperWriteLocks = new Map();
+const pagePixelCache = new Map();
 
 await loadSecrets();
 await loadJobs();
@@ -2768,7 +2770,8 @@ function inferPageVisualRegions(page) {
     if (type === "caption") {
       const text = normalizeArtifactText(block.text || "");
       const label = extractArtifactLabel(text);
-      const crop = inferCaptionCrop(page, block, label);
+      const visualType = /^table\b/i.test(text) ? "table" : "figure";
+      const crop = refineCropWithPagePixels(page, inferCaptionCrop(page, block, label), visualType);
       if (!crop) {
         return;
       }
@@ -2776,7 +2779,7 @@ function inferPageVisualRegions(page) {
       regions.push({
         id: `visual_${page.pageNumber}_${index}`,
         source: "caption-anchor",
-        visualType: /^table\b/i.test(text) ? "table" : "figure",
+        visualType,
         label,
         captionBlockIndex: index,
         x: crop.x,
@@ -2785,12 +2788,14 @@ function inferPageVisualRegions(page) {
         height: crop.height,
         pageWidth: crop.pageWidth,
         pageHeight: crop.pageHeight,
+        pixelRefined: Boolean(crop.pixelRefined),
       });
       return;
     }
 
     if (type === "formula" || type === "code" || type === "figure-text") {
-      const crop = inferBlockArtifactCrop(page, block, type);
+      const visualType = type === "figure-text" ? "figure" : type;
+      const crop = refineCropWithPagePixels(page, inferBlockArtifactCrop(page, block, type), visualType);
       if (!crop) {
         return;
       }
@@ -2798,7 +2803,7 @@ function inferPageVisualRegions(page) {
       regions.push({
         id: `visual_${page.pageNumber}_${index}`,
         source: "block-cluster",
-        visualType: type === "figure-text" ? "figure" : type,
+        visualType,
         label: type === "formula" ? extractFormulaLabel(block.text || "") : "",
         seedBlockIndex: index,
         x: crop.x,
@@ -2807,6 +2812,7 @@ function inferPageVisualRegions(page) {
         height: crop.height,
         pageWidth: crop.pageWidth,
         pageHeight: crop.pageHeight,
+        pixelRefined: Boolean(crop.pixelRefined),
       });
     }
   });
@@ -3227,11 +3233,13 @@ function buildCaptionArtifactFields(page, captionBlock, blockIndex = -1) {
   const text = normalizeArtifactText(captionBlock?.text || "");
   const label = extractArtifactLabel(text);
   const visualRegion = findVisualRegionForBlock(page, blockIndex, "caption-anchor");
-  const crop = visualRegionToCrop(visualRegion) || inferCaptionCrop(page, captionBlock, label);
+  const visualType = /^table\b/i.test(text) ? "table" : "figure";
+  const crop = visualRegionToCrop(visualRegion) ||
+    refineCropWithPagePixels(page, inferCaptionCrop(page, captionBlock, label), visualType);
 
   return {
     label,
-    visualType: /^table\b/i.test(text) ? "table" : "figure",
+    visualType,
     visualRegionId: visualRegion?.id || "",
     visualSource: visualRegion?.source || "",
     cropVersion: ARTIFACT_CROP_VERSION,
@@ -3247,7 +3255,8 @@ function buildCaptionArtifactFields(page, captionBlock, blockIndex = -1) {
 function buildBlockArtifactFields(page, block, type, blockIndex = -1) {
   const text = normalizeArtifactText(block?.text || "");
   const visualRegion = findVisualRegionForBlock(page, blockIndex, "block-cluster");
-  const crop = visualRegionToCrop(visualRegion) || inferBlockArtifactCrop(page, block, type);
+  const crop = visualRegionToCrop(visualRegion) ||
+    refineCropWithPagePixels(page, inferBlockArtifactCrop(page, block, type), type === "figure-text" ? "figure" : type);
 
   return {
     label: type === "formula" ? extractFormulaLabel(text) : "",
@@ -3278,7 +3287,7 @@ function visualRegionToCrop(region) {
     return null;
   }
 
-  return normalizeCrop({
+  const crop = normalizeCrop({
     x: Number(region.x),
     y: Number(region.y),
     width: Number(region.width),
@@ -3286,6 +3295,10 @@ function visualRegionToCrop(region) {
     pageWidth: Number(region.pageWidth),
     pageHeight: Number(region.pageHeight),
   });
+  return {
+    ...crop,
+    pixelRefined: Boolean(region.pixelRefined),
+  };
 }
 
 function extractArtifactLabel(text) {
@@ -3885,6 +3898,317 @@ function normalizeCrop(crop) {
     pageWidth: crop.pageWidth,
     pageHeight: crop.pageHeight,
   };
+}
+
+function refineCropWithPagePixels(page, crop, visualType = "") {
+  if (!crop || !page?.imagePath) {
+    return crop;
+  }
+
+  const normalized = normalizeCrop(crop);
+  const pageWidth = Number(normalized.pageWidth || page.width || 0);
+  const pageHeight = Number(normalized.pageHeight || page.height || 0);
+  if (!pageWidth || !pageHeight) {
+    return normalized;
+  }
+
+  const pixels = getPagePixelData(page);
+  if (!pixels) {
+    return normalized;
+  }
+
+  const scaleX = pixels.width / pageWidth;
+  const scaleY = pixels.height / pageHeight;
+  const left = clampInteger(Math.floor(normalized.x * scaleX), 0, pixels.width - 1);
+  const top = clampInteger(Math.floor(normalized.y * scaleY), 0, pixels.height - 1);
+  const right = clampInteger(Math.ceil((normalized.x + normalized.width) * scaleX), left + 1, pixels.width);
+  const bottom = clampInteger(Math.ceil((normalized.y + normalized.height) * scaleY), top + 1, pixels.height);
+
+  let minX = right;
+  let minY = bottom;
+  let maxX = left;
+  let maxY = top;
+  let inkPixels = 0;
+  for (let y = top; y < bottom; y += 1) {
+    const rowOffset = y * pixels.rowBytes;
+    for (let x = left; x < right; x += 1) {
+      const offset = rowOffset + x * pixels.channels;
+      if (!isInkPixel(pixels, offset)) {
+        continue;
+      }
+
+      inkPixels += 1;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+
+  if (inkPixels < getMinimumInkPixels(visualType)) {
+    return normalized;
+  }
+
+  const padding = getPixelRefinementPadding(visualType);
+  const refinedLeft = clampInteger(minX - padding.x, left, right - 1);
+  const refinedTop = clampInteger(minY - padding.y, top, bottom - 1);
+  const refinedRight = clampInteger(maxX + 1 + padding.x, refinedLeft + 1, right);
+  const refinedBottom = clampInteger(maxY + 1 + padding.y, refinedTop + 1, bottom);
+  const refined = normalizeCrop({
+    x: refinedLeft / scaleX,
+    y: refinedTop / scaleY,
+    width: (refinedRight - refinedLeft) / scaleX,
+    height: (refinedBottom - refinedTop) / scaleY,
+    pageWidth,
+    pageHeight,
+  });
+
+  if (!shouldAcceptPixelRefinement(normalized, refined, visualType, inkPixels)) {
+    return normalized;
+  }
+
+  return {
+    ...refined,
+    pixelRefined: true,
+  };
+}
+
+function getPagePixelData(page) {
+  const filePath = getAssetPathFromPublicPath(page?.imagePath);
+  if (!filePath) {
+    return null;
+  }
+
+  if (pagePixelCache.has(filePath)) {
+    return pagePixelCache.get(filePath);
+  }
+
+  let pixels = null;
+  try {
+    pixels = decodePng(readFileSync(filePath));
+  } catch {
+    pixels = null;
+  }
+
+  if (pagePixelCache.size > 24) {
+    pagePixelCache.clear();
+  }
+  pagePixelCache.set(filePath, pixels);
+  return pixels;
+}
+
+function decodePng(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 33 ||
+    buffer.readUInt32BE(0) !== 0x89504e47 || buffer.readUInt32BE(4) !== 0x0d0a1a0a) {
+    return null;
+  }
+
+  let offset = 8;
+  let width = 0;
+  let height = 0;
+  let bitDepth = 0;
+  let colorType = 0;
+  let palette = null;
+  let transparency = null;
+  const idatChunks = [];
+
+  while (offset + 8 <= buffer.length) {
+    const length = buffer.readUInt32BE(offset);
+    const type = buffer.toString("latin1", offset + 4, offset + 8);
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + length;
+    if (dataEnd + 4 > buffer.length) {
+      return null;
+    }
+
+    if (type === "IHDR") {
+      width = buffer.readUInt32BE(dataStart);
+      height = buffer.readUInt32BE(dataStart + 4);
+      bitDepth = buffer[dataStart + 8];
+      colorType = buffer[dataStart + 9];
+    } else if (type === "PLTE") {
+      palette = buffer.subarray(dataStart, dataEnd);
+    } else if (type === "tRNS") {
+      transparency = buffer.subarray(dataStart, dataEnd);
+    } else if (type === "IDAT") {
+      idatChunks.push(buffer.subarray(dataStart, dataEnd));
+    } else if (type === "IEND") {
+      break;
+    }
+
+    offset = dataEnd + 4;
+  }
+
+  const channels = getPngChannelCount(colorType);
+  if (!width || !height || bitDepth !== 8 || !channels || !idatChunks.length) {
+    return null;
+  }
+
+  const rowBytes = width * channels;
+  const raw = inflateSync(Buffer.concat(idatChunks));
+  const data = new Uint8Array(height * rowBytes);
+  let rawOffset = 0;
+  for (let y = 0; y < height; y += 1) {
+    const filter = raw[rawOffset];
+    rawOffset += 1;
+    const rowStart = y * rowBytes;
+    const prevRowStart = y > 0 ? rowStart - rowBytes : -1;
+    for (let x = 0; x < rowBytes; x += 1) {
+      const rawValue = raw[rawOffset + x];
+      const left = x >= channels ? data[rowStart + x - channels] : 0;
+      const up = prevRowStart >= 0 ? data[prevRowStart + x] : 0;
+      const upLeft = prevRowStart >= 0 && x >= channels ? data[prevRowStart + x - channels] : 0;
+      data[rowStart + x] = unfilterPngByte(filter, rawValue, left, up, upLeft);
+    }
+    rawOffset += rowBytes;
+  }
+
+  return {
+    width,
+    height,
+    colorType,
+    channels,
+    rowBytes,
+    data,
+    palette,
+    transparency,
+  };
+}
+
+function getPngChannelCount(colorType) {
+  if (colorType === 0 || colorType === 3) {
+    return 1;
+  }
+  if (colorType === 2) {
+    return 3;
+  }
+  if (colorType === 4) {
+    return 2;
+  }
+  if (colorType === 6) {
+    return 4;
+  }
+  return 0;
+}
+
+function unfilterPngByte(filter, value, left, up, upLeft) {
+  if (filter === 0) {
+    return value;
+  }
+  if (filter === 1) {
+    return (value + left) & 0xff;
+  }
+  if (filter === 2) {
+    return (value + up) & 0xff;
+  }
+  if (filter === 3) {
+    return (value + Math.floor((left + up) / 2)) & 0xff;
+  }
+  if (filter === 4) {
+    return (value + paethPredictor(left, up, upLeft)) & 0xff;
+  }
+  return value;
+}
+
+function paethPredictor(left, up, upLeft) {
+  const estimate = left + up - upLeft;
+  const distanceLeft = Math.abs(estimate - left);
+  const distanceUp = Math.abs(estimate - up);
+  const distanceUpLeft = Math.abs(estimate - upLeft);
+  if (distanceLeft <= distanceUp && distanceLeft <= distanceUpLeft) {
+    return left;
+  }
+  return distanceUp <= distanceUpLeft ? up : upLeft;
+}
+
+function isInkPixel(pixels, offset) {
+  let red = 255;
+  let green = 255;
+  let blue = 255;
+  let alpha = 255;
+
+  if (pixels.colorType === 0) {
+    red = green = blue = pixels.data[offset];
+  } else if (pixels.colorType === 2) {
+    red = pixels.data[offset];
+    green = pixels.data[offset + 1];
+    blue = pixels.data[offset + 2];
+  } else if (pixels.colorType === 3) {
+    const paletteIndex = pixels.data[offset];
+    const paletteOffset = paletteIndex * 3;
+    if (!pixels.palette || paletteOffset + 2 >= pixels.palette.length) {
+      return false;
+    }
+    red = pixels.palette[paletteOffset];
+    green = pixels.palette[paletteOffset + 1];
+    blue = pixels.palette[paletteOffset + 2];
+    alpha = pixels.transparency?.[paletteIndex] ?? 255;
+  } else if (pixels.colorType === 4) {
+    red = green = blue = pixels.data[offset];
+    alpha = pixels.data[offset + 1];
+  } else if (pixels.colorType === 6) {
+    red = pixels.data[offset];
+    green = pixels.data[offset + 1];
+    blue = pixels.data[offset + 2];
+    alpha = pixels.data[offset + 3];
+  }
+
+  if (alpha < 16) {
+    return false;
+  }
+
+  const maxChannel = Math.max(red, green, blue);
+  const minChannel = Math.min(red, green, blue);
+  return maxChannel < 246 || maxChannel - minChannel > 18;
+}
+
+function getMinimumInkPixels(visualType) {
+  if (visualType === "formula") {
+    return 12;
+  }
+  if (visualType === "code") {
+    return 28;
+  }
+  return 48;
+}
+
+function getPixelRefinementPadding(visualType) {
+  if (visualType === "formula") {
+    return { x: 8, y: 6 };
+  }
+  if (visualType === "code") {
+    return { x: 10, y: 8 };
+  }
+  if (visualType === "table") {
+    return { x: 14, y: 12 };
+  }
+  return { x: 12, y: 10 };
+}
+
+function shouldAcceptPixelRefinement(original, refined, visualType, inkPixels) {
+  const area = Math.max(1, original.width * original.height);
+  const refinedArea = Math.max(1, refined.width * refined.height);
+  const widthRatio = refined.width / Math.max(1, original.width);
+  const heightRatio = refined.height / Math.max(1, original.height);
+  const inkDensity = inkPixels / area;
+
+  if (refined.width < 4 || refined.height < 4) {
+    return false;
+  }
+  if (visualType === "formula") {
+    return widthRatio >= 0.04 && heightRatio >= 0.035 && inkDensity >= 0.0002;
+  }
+  if (visualType === "code") {
+    return widthRatio >= 0.08 && heightRatio >= 0.05 && inkDensity >= 0.00035;
+  }
+  if (visualType === "table") {
+    return widthRatio >= 0.18 && heightRatio >= 0.08 && refinedArea >= area * 0.015;
+  }
+  return widthRatio >= 0.12 && heightRatio >= 0.08 && refinedArea >= area * 0.012;
+}
+
+function clampInteger(value, min, max) {
+  return Math.trunc(clampNumber(value, min, max));
 }
 
 function pickBlockBox(block) {
