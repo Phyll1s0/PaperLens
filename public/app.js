@@ -1,9 +1,13 @@
 const state = {
   paper: null,
   query: "",
+  libraryQuery: "",
+  favoriteOnly: false,
   busyParagraphId: null,
   pipelineBusy: false,
   jobHistory: [],
+  progressTimer: null,
+  lastProgressParagraphId: "",
   autoAnalyze: {
     running: false,
     stopRequested: false,
@@ -36,10 +40,16 @@ const els = {
   autoAnalyzeInput: document.querySelector("#autoAnalyzeInput"),
   uploadButton: document.querySelector("#uploadButton"),
   statusText: document.querySelector("#statusText"),
+  librarySearchInput: document.querySelector("#librarySearchInput"),
+  favoriteOnlyInput: document.querySelector("#favoriteOnlyInput"),
   paperList: document.querySelector("#paperList"),
   paperMeta: document.querySelector("#paperMeta"),
   paperTitle: document.querySelector("#paperTitle"),
   paperStats: document.querySelector("#paperStats"),
+  paperLibraryControls: document.querySelector("#paperLibraryControls"),
+  favoriteButton: document.querySelector("#favoriteButton"),
+  tagInput: document.querySelector("#tagInput"),
+  saveTagsButton: document.querySelector("#saveTagsButton"),
   emptyState: document.querySelector("#emptyState"),
   paragraphList: document.querySelector("#paragraphList"),
   outline: document.querySelector("#outline"),
@@ -116,6 +126,28 @@ function bindEvents() {
     state.query = els.searchInput.value.trim().toLowerCase();
     renderPaper();
   });
+  els.librarySearchInput.addEventListener("input", debounce(() => {
+    state.libraryQuery = els.librarySearchInput.value.trim();
+    loadRecentPapers();
+  }, 250));
+  els.favoriteOnlyInput.addEventListener("change", () => {
+    state.favoriteOnly = els.favoriteOnlyInput.checked;
+    loadRecentPapers();
+  });
+  els.favoriteButton.addEventListener("click", () => {
+    if (state.paper) {
+      updatePaperMetadata({ favorite: !state.paper.favorite });
+    }
+  });
+  els.saveTagsButton.addEventListener("click", savePaperTags);
+  els.tagInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      savePaperTags();
+    }
+  });
+  els.paragraphList.addEventListener("scroll", scheduleReadingProgressSave);
+  window.addEventListener("scroll", scheduleReadingProgressSave, { passive: true });
 
   for (const input of [els.baseUrlInput, els.modelInput, els.apiKeyInput, els.agentBudgetInput, els.proxyUrlInput]) {
     input.addEventListener("input", () => {
@@ -425,7 +457,14 @@ async function segmentPaperWithAi(options = {}) {
 
 async function loadRecentPapers() {
   try {
-    const response = await apiFetch("/api/papers", {}, "载入最近论文");
+    const params = new URLSearchParams();
+    if (state.libraryQuery) {
+      params.set("q", state.libraryQuery);
+    }
+    if (state.favoriteOnly) {
+      params.set("favorite", "1");
+    }
+    const response = await apiFetch(`/api/papers${params.toString() ? `?${params}` : ""}`, {}, "载入最近论文");
     const data = await readResponse(response);
     renderRecentPapers(data.papers || []);
   } catch (error) {
@@ -440,9 +479,11 @@ async function openPaper(paperId) {
     const response = await apiFetch(`/api/papers/${encodeURIComponent(paperId)}`, {}, "载入论文");
     state.paper = await readResponse(response);
     state.query = "";
+    state.lastProgressParagraphId = state.paper.readingProgress?.paragraphId || "";
     els.searchInput.value = "";
     setStatus("论文已载入");
     renderPaper();
+    scrollToReadingProgress();
     await syncActiveAnalysisJob();
     await loadJobHistory();
   } catch (error) {
@@ -452,28 +493,157 @@ async function openPaper(paperId) {
 
 function renderRecentPapers(papers) {
   if (!papers.length) {
-    els.paperList.textContent = "暂无论文";
+    els.paperList.textContent = state.libraryQuery || state.favoriteOnly ? "没有匹配论文" : "暂无论文";
     return;
   }
 
   const fragment = document.createDocumentFragment();
-  for (const paper of papers.slice(0, 8)) {
+  for (const paper of papers.slice(0, 20)) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "paper-list-item";
     button.addEventListener("click", () => openPaper(paper.id));
 
     const title = document.createElement("span");
-    title.textContent = paper.title || paper.filename;
+    title.textContent = `${paper.favorite ? "★ " : ""}${paper.title || paper.filename}`;
 
     const meta = document.createElement("small");
-    meta.textContent = `${paper.pageCount} 页 · ${paper.paragraphCount} 段`;
+    const progress = Number(paper.readingProgress?.percent || 0);
+    const exportLabel = paper.latestExport ? ` · ${paper.latestExport.format}` : "";
+    const matchLabel = paper.matchedParagraphCount ? ` · 命中 ${paper.matchedParagraphCount}` : "";
+    meta.textContent = `${paper.pageCount} 页 · ${paper.paragraphCount} 段 · ${progress}%${exportLabel}${matchLabel}`;
 
     button.append(title, meta);
+    if (paper.tags?.length) {
+      const tags = document.createElement("div");
+      tags.className = "paper-list-tags";
+      tags.textContent = paper.tags.map((tag) => `#${tag}`).join(" ");
+      button.append(tags);
+    }
+    if (paper.matchSnippet) {
+      const snippet = document.createElement("small");
+      snippet.className = "paper-list-snippet";
+      snippet.textContent = paper.matchSnippet;
+      button.append(snippet);
+    }
     fragment.append(button);
   }
 
   els.paperList.replaceChildren(fragment);
+}
+
+async function updatePaperMetadata(patch, options = {}) {
+  if (!state.paper) {
+    return null;
+  }
+
+  try {
+    const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(patch),
+    }, "更新论文信息");
+    state.paper = await readResponse(response);
+    if (!options.quiet) {
+      setStatus("论文信息已更新");
+      renderPaper();
+      await loadRecentPapers();
+    }
+    return state.paper;
+  } catch (error) {
+    if (!options.quiet) {
+      setStatus(error.message, true);
+    }
+    return null;
+  }
+}
+
+function savePaperTags() {
+  if (!state.paper) {
+    return;
+  }
+
+  const tags = els.tagInput.value
+    .split(/[,，#\n]/)
+    .map((tag) => tag.trim())
+    .filter(Boolean);
+  updatePaperMetadata({ tags });
+}
+
+function scheduleReadingProgressSave() {
+  if (!state.paper) {
+    return;
+  }
+
+  window.clearTimeout(state.progressTimer);
+  state.progressTimer = window.setTimeout(saveVisibleReadingProgress, 650);
+}
+
+function saveVisibleReadingProgress() {
+  const paragraph = getVisibleReadingParagraph();
+  if (!paragraph || paragraph.id === state.lastProgressParagraphId) {
+    return;
+  }
+
+  state.lastProgressParagraphId = paragraph.id;
+  updatePaperMetadata({
+    readingProgress: {
+      paragraphId: paragraph.id,
+      paragraphOrder: paragraph.order,
+    },
+  }, { quiet: true });
+}
+
+function getVisibleReadingParagraph() {
+  const cards = [...document.querySelectorAll(".paragraph-card[id]")];
+  if (!cards.length || !state.paper) {
+    return null;
+  }
+
+  const viewportTop = 92;
+  const candidate = cards.find((card) => {
+    const rect = card.getBoundingClientRect();
+    return rect.bottom > viewportTop && rect.top < window.innerHeight * 0.74;
+  }) || cards[0];
+  return state.paper.paragraphs.find((paragraph) => paragraph.id === candidate.id) || null;
+}
+
+function formatExportHistoryLabel(entry) {
+  if (!entry) {
+    return "";
+  }
+
+  const date = entry.exportedAt ? new Date(entry.exportedAt) : null;
+  const dateLabel = date && Number.isFinite(date.getTime())
+    ? date.toLocaleDateString()
+    : "";
+  return `${entry.format || "export"}${dateLabel ? ` ${dateLabel}` : ""}`;
+}
+
+function refreshPaperSoon() {
+  window.setTimeout(() => refreshPaper().then(loadRecentPapers).catch(() => {}), 900);
+}
+
+function scrollToReadingProgress() {
+  const paragraphId = state.paper?.readingProgress?.paragraphId;
+  if (!paragraphId) {
+    return;
+  }
+
+  window.setTimeout(() => {
+    document.querySelector(`#${CSS.escape(paragraphId)}`)?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+  }, 120);
+}
+
+function debounce(fn, delay = 250) {
+  let timer = null;
+  return (...args) => {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => fn(...args), delay);
+  };
 }
 
 async function pingModel() {
@@ -566,6 +736,7 @@ function downloadPaperNotes() {
   link.click();
   link.remove();
   setStatus("正在下载 Markdown 笔记");
+  refreshPaperSoon();
 }
 
 function downloadPaperDocx() {
@@ -580,6 +751,7 @@ function downloadPaperDocx() {
   link.click();
   link.remove();
   setStatus("正在下载 Word 文档");
+  refreshPaperSoon();
 }
 
 async function rerunFullPipeline() {
@@ -996,6 +1168,7 @@ function renderPaper() {
 
   if (!paper) {
     els.emptyState.classList.remove("hidden");
+    els.paperLibraryControls.classList.add("hidden");
     els.paragraphList.innerHTML = "";
     els.outline.innerHTML = "";
     updateAutoButtons();
@@ -1013,7 +1186,15 @@ function renderPaper() {
     heuristic: "基础分段",
   };
   const segmentLabel = segmentLabels[paper.segmentationMode] || "基础分段";
-  els.paperStats.textContent = `${readingParagraphs.length} 个段落 · 已讲解 ${analyzedCount} · ${segmentLabel}`;
+  const progress = Number(paper.readingProgress?.percent || 0);
+  const exportLabel = paper.exportHistory?.length
+    ? ` · 最近导出 ${formatExportHistoryLabel(paper.exportHistory[0])}`
+    : "";
+  els.paperStats.textContent = `${readingParagraphs.length} 个段落 · 已讲解 ${analyzedCount} · ${progress}% · ${segmentLabel}${exportLabel}`;
+  els.paperLibraryControls.classList.remove("hidden");
+  els.favoriteButton.textContent = paper.favorite ? "★" : "☆";
+  els.favoriteButton.setAttribute("aria-pressed", paper.favorite ? "true" : "false");
+  els.tagInput.value = (paper.tags || []).join(", ");
   renderOutline(paper);
   renderParagraphs(paper);
   updateAutoButtons();

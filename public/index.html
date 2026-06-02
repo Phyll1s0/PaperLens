@@ -74,6 +74,11 @@
 
         <section class="panel">
           <h2>最近</h2>
+          <input id="librarySearchInput" type="search" placeholder="搜索论文库">
+          <label class="check-row">
+            <input id="favoriteOnlyInput" type="checkbox">
+            只看收藏
+          </label>
           <div id="paperList" class="paper-list"></div>
         </section>
 
@@ -85,6 +90,11 @@
           <div>
             <h2 id="paperTitle">选择一篇 PDF</h2>
             <p id="paperStats">段落会显示在这里</p>
+            <div id="paperLibraryControls" class="paper-library-controls hidden">
+              <button id="favoriteButton" class="icon-button" type="button" title="收藏论文" aria-label="收藏论文">☆</button>
+              <input id="tagInput" type="text" placeholder="标签，用逗号分隔">
+              <button id="saveTagsButton" class="secondary-button" type="button">保存标签</button>
+            </div>
           </div>
           <div class="toolbar-actions">
             <div class="toolbar-buttons">

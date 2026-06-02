@@ -117,7 +117,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && url.pathname === "/api/papers") {
-      return json(res, await listPapers());
+      return json(res, await listPapers(url.searchParams));
     }
 
     const exportMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/export\.md$/);
@@ -157,6 +157,10 @@ const server = http.createServer(async (req, res) => {
     const paperMatch = url.pathname.match(/^\/api\/papers\/([^/]+)$/);
     if (req.method === "GET" && paperMatch) {
       return json(res, await loadPaper(paperMatch[1]));
+    }
+
+    if (req.method === "PATCH" && paperMatch) {
+      return await handleUpdatePaperMetadata(req, res, paperMatch[1]);
     }
 
     const jobCancelMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/cancel$/);
@@ -250,6 +254,7 @@ async function handleExportPaperMarkdown(req, res, paperId) {
   const paper = await loadPaper(paperId);
   const markdown = buildPaperMarkdownExport(paper, getRequestBaseUrl(req));
   const filename = `${sanitizeDownloadFilename(paper.title || paper.filename || paper.id)}.md`;
+  await recordPaperExport(paper, "markdown", filename);
 
   res.writeHead(200, {
     "content-type": "text/markdown; charset=utf-8",
@@ -263,6 +268,7 @@ async function handleExportPaperDocx(res, paperId) {
   const paper = await loadPaper(paperId);
   const docx = await buildPaperDocxExport(paper);
   const filename = `${sanitizeDownloadFilename(paper.title || paper.filename || paper.id)}.docx`;
+  await recordPaperExport(paper, "docx", filename);
 
   res.writeHead(200, {
     "content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -270,6 +276,28 @@ async function handleExportPaperDocx(res, paperId) {
     "cache-control": "no-store",
   });
   res.end(docx);
+}
+
+async function handleUpdatePaperMetadata(req, res, paperId) {
+  const payload = await readJson(req);
+  const paper = await loadPaper(paperId);
+
+  if (Object.prototype.hasOwnProperty.call(payload, "favorite")) {
+    paper.favorite = Boolean(payload.favorite);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(payload, "tags")) {
+    paper.tags = normalizePaperTags(payload.tags);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(payload, "readingProgress")) {
+    paper.readingProgress = normalizeReadingProgress(payload.readingProgress, paper);
+    paper.readingProgress.updatedAt = new Date().toISOString();
+  }
+
+  paper.updatedAt = new Date().toISOString();
+  await savePaper(paper);
+  return json(res, paper);
 }
 
 async function handleArtifactCropSvg(req, res, paperId, artifactId) {
@@ -471,9 +499,12 @@ async function handleRetryFailedJob(res, jobId) {
   return json(res, { job: serializeJob(job) });
 }
 
-async function listPapers() {
+async function listPapers(searchParams = new URLSearchParams()) {
   const files = await readdir(DATA_DIR).catch(() => []);
   const papers = [];
+  const query = normalizeLibraryQuery(searchParams.get("q") || searchParams.get("query") || "");
+  const tagFilter = normalizePaperTag(searchParams.get("tag") || "");
+  const favoriteOnly = /^(1|true|yes)$/i.test(String(searchParams.get("favorite") || ""));
 
   for (const file of files) {
     if (!file.endsWith(".json") || file === "jobs.json") {
@@ -486,12 +517,31 @@ async function listPapers() {
         continue;
       }
 
+      const summary = summarizePaperForLibrary(paper, query);
+      if (favoriteOnly && !summary.favorite) {
+        continue;
+      }
+      if (tagFilter && !summary.tags.some((tag) => tag.toLowerCase() === tagFilter.toLowerCase())) {
+        continue;
+      }
+      if (query && !summary.searchMatched) {
+        continue;
+      }
+
       papers.push({
         id: paper.id,
         title: paper.title,
         filename: paper.filename,
         pageCount: paper.pageCount,
-        paragraphCount: getReadingParagraphs(paper).length,
+        paragraphCount: summary.paragraphCount,
+        analyzedCount: summary.analyzedCount,
+        favorite: summary.favorite,
+        tags: summary.tags,
+        readingProgress: summary.readingProgress,
+        exportHistory: summary.exportHistory,
+        latestExport: summary.latestExport,
+        matchSnippet: summary.matchSnippet,
+        matchedParagraphCount: summary.matchedParagraphCount,
         updatedAt: paper.updatedAt,
       });
     } catch {
@@ -499,8 +549,167 @@ async function listPapers() {
     }
   }
 
-  papers.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  papers.sort((a, b) => {
+    if (a.favorite !== b.favorite) {
+      return a.favorite ? -1 : 1;
+    }
+    return String(b.updatedAt).localeCompare(String(a.updatedAt));
+  });
   return { papers };
+}
+
+function summarizePaperForLibrary(paper, query = "") {
+  const readingParagraphs = getReadingParagraphs(paper);
+  const tags = normalizePaperTags(paper.tags);
+  const exportHistory = normalizeExportHistory(paper.exportHistory).slice(0, 5);
+  const latestExport = exportHistory[0] || null;
+  const readingProgress = normalizeReadingProgress(paper.readingProgress, paper);
+  const searchableBlocks = [
+    paper.title,
+    paper.filename,
+    ...tags,
+    ...readingParagraphs.flatMap((paragraph) => [
+      paragraph.sourceText,
+      paragraph.translation,
+      paragraph.explanation,
+      ...(paragraph.keyTerms || []),
+    ]),
+  ];
+  const haystack = searchableBlocks.join(" ").toLowerCase();
+  const matchedParagraphs = query
+    ? readingParagraphs.filter((paragraph) => paperParagraphMatchesQuery(paragraph, query))
+    : [];
+
+  return {
+    paragraphCount: readingParagraphs.length,
+    analyzedCount: readingParagraphs.filter((paragraph) => !needsParagraphAnalysis(paragraph)).length,
+    favorite: Boolean(paper.favorite),
+    tags,
+    readingProgress,
+    exportHistory,
+    latestExport,
+    searchMatched: !query || haystack.includes(query),
+    matchedParagraphCount: matchedParagraphs.length,
+    matchSnippet: query ? buildLibraryMatchSnippet(paper, matchedParagraphs[0], query) : "",
+  };
+}
+
+function normalizeLibraryQuery(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().toLowerCase().slice(0, 120);
+}
+
+function paperParagraphMatchesQuery(paragraph, query) {
+  const haystack = [
+    paragraph.sourceText,
+    paragraph.translation,
+    paragraph.explanation,
+    ...(paragraph.keyTerms || []),
+  ].join(" ").toLowerCase();
+  return haystack.includes(query);
+}
+
+function buildLibraryMatchSnippet(paper, paragraph, query) {
+  if (!paragraph) {
+    const title = normalizeParagraph(paper.title || paper.filename || "");
+    return title.toLowerCase().includes(query) ? title : "";
+  }
+
+  const text = normalizeParagraph([
+    paragraph.sourceText,
+    paragraph.translation,
+    paragraph.explanation,
+  ].filter(Boolean).join(" "));
+  const index = text.toLowerCase().indexOf(query);
+  if (index === -1) {
+    return truncateText(text, 160);
+  }
+
+  const start = Math.max(0, index - 56);
+  return `${start > 0 ? "..." : ""}${truncateText(text.slice(start), 180)}`;
+}
+
+function normalizePaperTags(tags) {
+  const source = Array.isArray(tags)
+    ? tags
+    : String(tags || "").split(/[,，#\n]/);
+  const result = [];
+  for (const tag of source) {
+    const clean = normalizePaperTag(tag);
+    if (clean && !result.some((item) => item.toLowerCase() === clean.toLowerCase())) {
+      result.push(clean);
+    }
+  }
+  return result.slice(0, 12);
+}
+
+function normalizePaperTag(tag) {
+  return String(tag || "")
+    .replace(/^#+/, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 32);
+}
+
+function normalizeReadingProgress(progress, paper) {
+  const readingParagraphs = getReadingParagraphs(paper);
+  const hasExplicitProgress = Boolean(progress?.paragraphId) ||
+    Number.isFinite(Number(progress?.paragraphOrder)) ||
+    Number.isFinite(Number(progress?.percent));
+  if (!hasExplicitProgress) {
+    return {
+      paragraphId: "",
+      paragraphOrder: null,
+      pageNumber: null,
+      percent: 0,
+      updatedAt: progress?.updatedAt || "",
+    };
+  }
+
+  const paragraphId = String(progress?.paragraphId || "");
+  const paragraph = readingParagraphs.find((item) => item.id === paragraphId) ||
+    readingParagraphs.find((item) => Number(item.order) === Number(progress?.paragraphOrder)) ||
+    null;
+  const total = Math.max(1, readingParagraphs.length);
+  const order = paragraph ? Number(paragraph.order || 0) : 0;
+  const percent = paragraph
+    ? Math.round(((order + 1) / total) * 100)
+    : Math.trunc(clampNumber(Number(progress?.percent || 0), 0, 100));
+
+  return {
+    paragraphId: paragraph?.id || "",
+    paragraphOrder: paragraph ? order : null,
+    pageNumber: paragraph ? Number(paragraph.pageNumber || 0) || null : null,
+    percent: clampNumber(percent, 0, 100),
+    updatedAt: progress?.updatedAt || "",
+  };
+}
+
+function normalizeExportHistory(history) {
+  if (!Array.isArray(history)) {
+    return [];
+  }
+
+  return history
+    .filter((item) => item && item.format && item.exportedAt)
+    .map((item) => ({
+      format: String(item.format || ""),
+      filename: String(item.filename || ""),
+      exportedAt: String(item.exportedAt || ""),
+    }))
+    .sort((a, b) => String(b.exportedAt).localeCompare(String(a.exportedAt)))
+    .slice(0, 20);
+}
+
+async function recordPaperExport(paper, format, filename) {
+  const history = normalizeExportHistory(paper.exportHistory);
+  history.unshift({
+    format,
+    filename,
+    exportedAt: new Date().toISOString(),
+  });
+  paper.exportHistory = normalizeExportHistory(history);
+  paper.updatedAt = new Date().toISOString();
+  await savePaper(paper);
 }
 
 function getResponseAbortSignal(res) {
@@ -2401,6 +2610,10 @@ function buildPaperRecord({ id, filename, pdfPath, extraction }) {
     pageCount: extraction.pageCount,
     status: "ready",
     segmentationMode: extraction.pages.some((page) => Array.isArray(page.blocks) && page.blocks.length) ? "layout" : "heuristic",
+    favorite: false,
+    tags: [],
+    readingProgress: normalizeReadingProgress({}, { paragraphs }),
+    exportHistory: [],
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     pageImages,
