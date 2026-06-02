@@ -4,8 +4,10 @@ const state = {
   libraryQuery: "",
   favoriteOnly: false,
   analysisProfile: "quality",
+  showHiddenParagraphs: false,
   maintenanceBusy: false,
   busyParagraphId: null,
+  paragraphEditBusyId: null,
   pipelineBusy: false,
   jobHistory: [],
   progressTimer: null,
@@ -82,6 +84,7 @@ const els = {
   tagInput: document.querySelector("#tagInput"),
   saveTagsButton: document.querySelector("#saveTagsButton"),
   rebuildVisualButton: document.querySelector("#rebuildVisualButton"),
+  toggleHiddenParagraphsButton: document.querySelector("#toggleHiddenParagraphsButton"),
   emptyState: document.querySelector("#emptyState"),
   paragraphList: document.querySelector("#paragraphList"),
   outline: document.querySelector("#outline"),
@@ -197,6 +200,10 @@ function bindEvents() {
   });
   els.saveTagsButton.addEventListener("click", savePaperTags);
   els.rebuildVisualButton.addEventListener("click", rebuildVisualArtifacts);
+  els.toggleHiddenParagraphsButton.addEventListener("click", () => {
+    state.showHiddenParagraphs = !state.showHiddenParagraphs;
+    renderPaper();
+  });
   els.tagInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
@@ -984,6 +991,7 @@ async function openPaper(paperId) {
     state.paper = await readResponse(response);
     resetAnalysisJobState();
     state.query = "";
+    state.showHiddenParagraphs = false;
     state.lastProgressParagraphId = state.paper.readingProgress?.paragraphId || "";
     els.searchInput.value = "";
     setStatus("论文已载入");
@@ -2054,6 +2062,7 @@ function renderPaper() {
   els.paperTitle.textContent = paper.title || paper.filename;
   els.paperMeta.textContent = `${paper.pageCount} 页`;
   const readingParagraphs = getReadingParagraphs(paper);
+  const hiddenParagraphCount = getHiddenParagraphCount(paper);
   const ocrRequired = isOcrRequiredPaper(paper);
   const analyzedCount = readingParagraphs.filter((paragraph) => !needsAnalysis(paragraph)).length;
   const segmentLabels = {
@@ -2068,7 +2077,7 @@ function renderPaper() {
     : "";
   els.paperStats.textContent = ocrRequired
     ? `${paper.pageCount || 0} 页 · 需要 OCR · 已生成 ${paper.ocr?.pageImageCount || paper.pageImages?.length || 0} 张页图`
-    : `${readingParagraphs.length} 个段落 · 已讲解 ${analyzedCount} · ${progress}% · ${segmentLabel}${exportLabel}`;
+    : `${readingParagraphs.length} 个段落 · 已讲解 ${analyzedCount} · ${progress}% · ${segmentLabel}${hiddenParagraphCount ? ` · 隐藏 ${hiddenParagraphCount}` : ""}${exportLabel}`;
   els.paperLibraryControls.classList.remove("hidden");
   els.favoriteButton.textContent = paper.favorite ? "★" : "☆";
   els.favoriteButton.setAttribute("aria-pressed", paper.favorite ? "true" : "false");
@@ -2377,7 +2386,7 @@ function renderOutline(paper) {
 
 function renderParagraphs(paper) {
   const query = state.query;
-  const readingParagraphs = getReadingParagraphs(paper);
+  const readingParagraphs = getParagraphsForReadingView(paper);
   const paragraphs = query
     ? readingParagraphs.filter((paragraph) => {
       const haystack = [
@@ -2769,7 +2778,20 @@ function getArtifactLabel(type, visualType = "") {
 }
 
 function getReadingParagraphs(paper) {
-  return paper.paragraphs.filter((paragraph) => isReadingParagraph(paper, paragraph));
+  return (paper.paragraphs || []).filter((paragraph) => isReadingParagraph(paper, paragraph));
+}
+
+function getParagraphsForReadingView(paper) {
+  const paragraphs = (paper.paragraphs || []).filter((paragraph) => paragraph.kind === "paragraph");
+  return state.showHiddenParagraphs
+    ? paragraphs
+    : paragraphs.filter((paragraph) => isReadingParagraph(paper, paragraph));
+}
+
+function getHiddenParagraphCount(paper) {
+  return (paper.paragraphs || [])
+    .filter((paragraph) => paragraph.kind === "paragraph" && !isReadingParagraph(paper, paragraph))
+    .length;
 }
 
 function isReadingParagraph(paper, paragraph) {
@@ -2829,7 +2851,8 @@ function renderSectionDivider(section) {
 
 function renderParagraphCard(paragraph) {
   const card = document.createElement("article");
-  card.className = "paragraph-card";
+  const readingParagraph = isReadingParagraph(state.paper, paragraph);
+  card.className = `paragraph-card${readingParagraph ? "" : " is-ineligible"}`;
   card.id = paragraph.id;
 
   const header = document.createElement("div");
@@ -2854,10 +2877,17 @@ function renderParagraphCard(paragraph) {
   analyzeButton.className = "secondary-button";
   analyzeButton.type = "button";
   analyzeButton.textContent = getAnalyzeButtonText(paragraph);
-  analyzeButton.disabled = Boolean(state.busyParagraphId) || state.autoAnalyze.running;
+  analyzeButton.disabled = !readingParagraph ||
+    Boolean(state.busyParagraphId) ||
+    state.autoAnalyze.running ||
+    Boolean(state.paragraphEditBusyId);
   analyzeButton.addEventListener("click", () => analyzeParagraph(paragraph.id));
 
-  header.append(meta, analyzeButton);
+  const actions = document.createElement("div");
+  actions.className = "paragraph-actions";
+  actions.append(renderParagraphEditActions(paragraph, readingParagraph), analyzeButton);
+
+  header.append(meta, actions);
 
   const content = document.createElement("div");
   content.className = "paragraph-content";
@@ -2909,6 +2939,112 @@ function renderParagraphCard(paragraph) {
   content.append(renderChatBox(paragraph));
   card.append(header, content);
   return card;
+}
+
+function renderParagraphEditActions(paragraph, readingParagraph) {
+  const actions = document.createElement("div");
+  actions.className = "paragraph-edit-actions";
+  actions.append(
+    createParagraphEditButton(readingParagraph ? "隐藏" : "恢复", readingParagraph ? "标记为噪声并从自动讲解中跳过" : "恢复为正文段落", () => {
+      editParagraph(paragraph.id, { action: readingParagraph ? "mark-noise" : "restore" });
+    }, { danger: readingParagraph }),
+    createParagraphEditButton("合并下段", "把当前段落和后面的正文段落合并，只重跑合并后的段落", () => {
+      if (window.confirm("合并后会删除下一段，并清空当前段落已有翻译/讲解。确定继续吗？")) {
+        editParagraph(paragraph.id, { action: "merge-next" });
+      }
+    }),
+    createParagraphEditButton("拆分", "用 || 把当前段落拆成两段，只重跑拆出的段落", () => {
+      promptSplitParagraph(paragraph);
+    }),
+    createParagraphEditButton("改章节", "把当前段落归属到新的章节，并重跑该段", () => {
+      promptMoveParagraphSection(paragraph);
+    }),
+  );
+  return actions;
+}
+
+function createParagraphEditButton(label, title, onClick, options = {}) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `paragraph-edit-button${options.danger ? " danger" : ""}`;
+  button.textContent = label;
+  button.title = title;
+  button.disabled = Boolean(state.paragraphEditBusyId) || state.autoAnalyze.running || state.pipelineBusy;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function promptSplitParagraph(paragraph) {
+  const text = String(paragraph.sourceText || "").trim();
+  const midpoint = Math.max(1, Math.floor(text.length / 2));
+  const suggestion = text.length > 16
+    ? `${text.slice(0, midpoint).trim()} || ${text.slice(midpoint).trim()}`
+    : `${text} || `;
+  const value = window.prompt("用 || 分隔拆成两段。", suggestion);
+  if (value === null) {
+    return;
+  }
+
+  const markerIndex = value.indexOf("||");
+  if (markerIndex < 0) {
+    setStatus("拆分失败：请用 || 分隔两段。", true);
+    return;
+  }
+
+  const firstText = value.slice(0, markerIndex).trim();
+  const secondText = value.slice(markerIndex + 2).trim();
+  if (!firstText || !secondText) {
+    setStatus("拆分失败：两段都需要有内容。", true);
+    return;
+  }
+
+  editParagraph(paragraph.id, { action: "split", firstText, secondText });
+}
+
+function promptMoveParagraphSection(paragraph) {
+  const section = (state.paper?.sections || []).find((item) => item.id === paragraph.sectionId);
+  const currentTitle = section?.title || paragraph.sectionTitleHint || "正文";
+  const value = window.prompt("输入新的章节名。", currentTitle);
+  if (value === null) {
+    return;
+  }
+
+  const sectionTitle = value.trim();
+  if (!sectionTitle) {
+    setStatus("改章节失败：章节名不能为空。", true);
+    return;
+  }
+
+  editParagraph(paragraph.id, { action: "set-section", sectionTitle });
+}
+
+async function editParagraph(paragraphId, payload) {
+  if (!state.paper || state.paragraphEditBusyId) {
+    return;
+  }
+
+  state.paragraphEditBusyId = paragraphId;
+  updateAutoButtons();
+  setStatus("正在更新分段");
+
+  try {
+    const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}/paragraphs/${encodeURIComponent(paragraphId)}/edit`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    }, "更新分段");
+    const result = await readResponse(response);
+    state.paper = result.paper || state.paper;
+    state.paragraphEditBusyId = null;
+    renderPaper();
+    await loadRecentPapers();
+    setStatus(result.message || "分段已更新，变动段落已标记为待补跑。");
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    state.paragraphEditBusyId = null;
+    updateAutoButtons();
+  }
 }
 
 function getRelatedArtifactsForParagraph(paper, paragraph) {
@@ -2991,6 +3127,10 @@ function renderRelatedArtifacts(artifacts) {
 }
 
 function getAnalysisStatus(paragraph) {
+  if (!isReadingParagraph(state.paper, paragraph)) {
+    return "skipped";
+  }
+
   if (paragraph.analysisStatus === "queued") {
     return "queued";
   }
@@ -3024,6 +3164,9 @@ function getAnalysisStatusText(paragraph) {
   if (status === "error") {
     return "失败";
   }
+  if (status === "skipped") {
+    return "已隐藏";
+  }
   return "待生成";
 }
 
@@ -3040,6 +3183,9 @@ function getAnalyzeButtonText(paragraph) {
   }
   if (status === "error") {
     return "重试";
+  }
+  if (status === "skipped") {
+    return "已跳过";
   }
   return "翻译与讲解";
 }
@@ -3963,6 +4109,8 @@ function updateAutoButtons() {
   els.rerunAnalyzeButton.disabled = !state.paper || busy || ocrRequired;
   els.rebuildVisualButton.disabled = !state.paper || busy;
   els.rebuildVisualButton.textContent = state.maintenanceBusy ? "重建中" : "重建图表";
+  els.toggleHiddenParagraphsButton.disabled = !state.paper || busy || ocrRequired;
+  els.toggleHiddenParagraphsButton.textContent = state.showHiddenParagraphs ? "收起隐藏段落" : "显示隐藏段落";
   els.rebuildAllVisualButton.disabled = busy;
   els.rebuildAllVisualButton.textContent = state.maintenanceBusy ? "批量重建中" : "重建全部图表";
   els.stopAutoButton.classList.toggle("hidden", !state.autoAnalyze.running);
@@ -3985,6 +4133,7 @@ function setBusy(isBusy) {
   els.autoAnalyzeInput.disabled = isBusy;
   els.rebuildAllVisualButton.disabled = isBusy || state.maintenanceBusy;
   els.rebuildVisualButton.disabled = isBusy || state.maintenanceBusy || !state.paper;
+  els.toggleHiddenParagraphsButton.disabled = isBusy || state.maintenanceBusy || !state.paper;
 }
 
 function setStatus(text, isError = false) {

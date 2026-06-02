@@ -183,6 +183,11 @@ const server = http.createServer(async (req, res) => {
       return await handleSegmentPaper(req, res, segmentMatch[1]);
     }
 
+    const paragraphEditMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/paragraphs\/([^/]+)\/edit$/);
+    if (req.method === "POST" && paragraphEditMatch) {
+      return await handleEditPaperParagraph(req, res, paragraphEditMatch[1], paragraphEditMatch[2]);
+    }
+
     const analysisJobsMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/analysis-jobs$/);
     if (req.method === "GET" && analysisJobsMatch) {
       return await handleListAnalysisJobs(res, analysisJobsMatch[1]);
@@ -503,6 +508,238 @@ async function handleSegmentPaper(req, res, paperId) {
   const segmented = await segmentPaperWithAi(paper, settings, { signal });
   await savePaper(segmented);
   return json(res, { paper: segmented, settings: serializeClientSettings(settings) });
+}
+
+async function handleEditPaperParagraph(req, res, paperId, paragraphId) {
+  const payload = await readJson(req);
+  const result = await withPaperWriteLock(paperId, async () => {
+    const paper = await loadPaper(paperId);
+    const editResult = applyPaperParagraphEdit(paper, paragraphId, payload);
+    rebuildPaperAfterManualParagraphEdit(paper);
+    await savePaper(paper);
+    return {
+      paper,
+      ...editResult,
+    };
+  });
+
+  return json(res, result);
+}
+
+function applyPaperParagraphEdit(paper, paragraphId, payload = {}) {
+  if (!Array.isArray(paper.paragraphs)) {
+    throw badRequest("这篇论文没有可编辑的段落。");
+  }
+
+  const action = String(payload.action || "").trim();
+  const index = paper.paragraphs.findIndex((paragraph) => paragraph.id === paragraphId);
+  if (index < 0) {
+    throw badRequest("找不到要编辑的段落。");
+  }
+
+  const paragraph = paper.paragraphs[index];
+  if (paragraph.kind !== "paragraph") {
+    throw badRequest("只能编辑正文段落。");
+  }
+
+  const now = new Date().toISOString();
+  const changedParagraphIds = new Set([paragraph.id]);
+  let message = "分段已更新，变动段落已标记为待补跑。";
+
+  if (action === "mark-noise") {
+    markManualParagraphEdit(paragraph, "mark-noise", now);
+    paragraph.manualSegmentationOverride = "noise";
+    paragraph.analysisEligible = false;
+    paragraph.segmentationNoise = {
+      version: SEGMENTATION_AUDIT_VERSION,
+      action: "skip-analysis",
+      confidence: "manual",
+      reasons: ["manual"],
+      updatedAt: now,
+    };
+    resetParagraphAnalysis(paragraph);
+    message = "已隐藏该段落，后续自动讲解会跳过它。";
+  } else if (action === "restore") {
+    markManualParagraphEdit(paragraph, "restore", now);
+    paragraph.manualSegmentationOverride = "reading";
+    paragraph.analysisEligible = true;
+    delete paragraph.segmentationNoise;
+    resetParagraphAnalysis(paragraph);
+    message = "已恢复该段落，并标记为待补跑。";
+  } else if (action === "merge-next") {
+    const nextIndex = findNextManualEditableParagraphIndex(paper.paragraphs, index);
+    if (nextIndex < 0) {
+      throw badRequest("当前段落后面没有可合并的正文段落。");
+    }
+
+    const next = paper.paragraphs[nextIndex];
+    mergeManualParagraphs(paragraph, next);
+    markManualParagraphEdit(paragraph, "merge-next", now, { mergedParagraphId: next.id });
+    paragraph.manualSegmentationOverride = "reading";
+    paragraph.analysisEligible = true;
+    delete paragraph.segmentationNoise;
+    resetParagraphAnalysis(paragraph);
+    paper.paragraphs.splice(nextIndex, 1);
+    changedParagraphIds.add(next.id);
+    message = "已合并下一段，合并后的段落已标记为待补跑。";
+  } else if (action === "split") {
+    const firstText = normalizeParagraph(payload.firstText || "");
+    const secondText = normalizeParagraph(payload.secondText || "");
+    if (!firstText || !secondText) {
+      throw badRequest("拆分失败：两段都需要有内容。");
+    }
+
+    const splitParagraph = createManualSplitParagraph(paragraph, secondText, now);
+    paragraph.sourceText = firstText;
+    paragraph.rawSourceText = firstText;
+    paragraph.continuesToNext = true;
+    paragraph.manualSegmentationOverride = "reading";
+    paragraph.analysisEligible = true;
+    delete paragraph.segmentationNoise;
+    markManualParagraphEdit(paragraph, "split-first", now, { splitParagraphId: splitParagraph.id });
+    resetParagraphAnalysis(paragraph);
+    paper.paragraphs.splice(index + 1, 0, splitParagraph);
+    changedParagraphIds.add(splitParagraph.id);
+    message = "已拆成两段，这两段已标记为待补跑。";
+  } else if (action === "set-section") {
+    const sectionTitle = normalizeSectionTitleHint(payload.sectionTitle || "");
+    if (!sectionTitle) {
+      throw badRequest("改章节失败：章节名不能为空。");
+    }
+
+    paragraph.sectionTitleHint = sectionTitle;
+    paragraph.plannedSectionId = "";
+    paragraph.manualSegmentationOverride = "reading";
+    paragraph.analysisEligible = true;
+    delete paragraph.segmentationNoise;
+    markManualParagraphEdit(paragraph, "set-section", now, { sectionTitle });
+    resetParagraphAnalysis(paragraph);
+    message = "已更新段落章节，并标记该段为待补跑。";
+  } else {
+    throw badRequest("不支持的段落编辑动作。");
+  }
+
+  normalizePaperParagraphOrders(paper.paragraphs);
+  paper.manualSegmentationEdits = [
+    {
+      action,
+      paragraphId: paragraph.id,
+      changedParagraphIds: [...changedParagraphIds],
+      updatedAt: now,
+    },
+    ...(Array.isArray(paper.manualSegmentationEdits) ? paper.manualSegmentationEdits : []),
+  ].slice(0, 80);
+  paper.segmentationEditedAt = now;
+
+  return {
+    changedParagraphIds: [...changedParagraphIds],
+    message,
+  };
+}
+
+function markManualParagraphEdit(paragraph, action, updatedAt, extra = {}) {
+  paragraph.manualSegmentationEdit = {
+    action,
+    updatedAt,
+    ...extra,
+  };
+  paragraph.updatedAt = updatedAt;
+}
+
+function findNextManualEditableParagraphIndex(paragraphs, currentIndex) {
+  for (let index = currentIndex + 1; index < paragraphs.length; index += 1) {
+    const paragraph = paragraphs[index];
+    if (paragraph?.kind === "heading") {
+      return -1;
+    }
+
+    if (paragraph?.kind === "paragraph") {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function mergeManualParagraphs(previous, next) {
+  previous.sourceText = mergeParagraphText(
+    normalizeParagraph(previous.sourceText || ""),
+    normalizeParagraph(next.sourceText || ""),
+  );
+  previous.rawSourceText = previous.sourceText;
+  previous.pageEndNumber = Math.max(
+    normalizePositivePageNumber(previous.pageEndNumber || previous.pageNumber, previous.pageNumber || 1),
+    normalizePositivePageNumber(next.pageEndNumber || next.pageNumber, next.pageNumber || 1),
+  );
+  previous.continuesToNext = Boolean(next.continuesToNext);
+  previous.contextKeywords = [
+    ...normalizeKeywordList(previous.contextKeywords),
+    ...normalizeKeywordList(next.contextKeywords),
+  ].slice(0, 12);
+  previous.relatedArtifactIds = [
+    ...new Set([
+      ...(Array.isArray(previous.relatedArtifactIds) ? previous.relatedArtifactIds : []),
+      ...(Array.isArray(next.relatedArtifactIds) ? next.relatedArtifactIds : []),
+    ]),
+  ];
+}
+
+function createManualSplitParagraph(source, sourceText, updatedAt) {
+  const startPage = normalizePositivePageNumber(source.pageNumber, 1);
+  const endPage = normalizePositivePageNumber(source.pageEndNumber || source.pageNumber, startPage);
+  const paragraph = {
+    ...source,
+    id: `para_${Number(source.order || 0) + 1}_${randomUUID().slice(0, 8)}`,
+    order: Number(source.order || 0) + 1,
+    pageNumber: startPage,
+    pageEndNumber: endPage,
+    sourceText,
+    rawSourceText: sourceText,
+    translation: "",
+    explanation: "",
+    keyTerms: [],
+    relatedArtifactIds: [],
+    chatMessages: [],
+    analysisStatus: "pending",
+    analysisError: "",
+    analysisEligible: true,
+    analysisCacheHit: false,
+    analysisCachedAt: "",
+    continuesFromPrevious: true,
+    continuesToNext: Boolean(source.continuesToNext),
+    manualSegmentationEdit: {
+      action: "split-second",
+      updatedAt,
+      splitFromParagraphId: source.id,
+    },
+    manualSegmentationOverride: "reading",
+    updatedAt,
+  };
+
+  delete paragraph.segmentationNoise;
+  return paragraph;
+}
+
+function normalizePaperParagraphOrders(paragraphs) {
+  for (const [index, paragraph] of paragraphs.entries()) {
+    paragraph.order = index;
+  }
+}
+
+function rebuildPaperAfterManualParagraphEdit(paper) {
+  const paragraphs = Array.isArray(paper.paragraphs) ? paper.paragraphs : [];
+  const chunkSummaries = Array.isArray(paper.segmentationChunkSummaries) ? paper.segmentationChunkSummaries : [];
+  paper.sections = inferSectionsFromSegmentationPlan(paragraphs, paper.structureMap || null);
+  enrichSectionsWithContext(paper.sections, paragraphs, chunkSummaries);
+  paper.contextProfile = buildPaperContextProfile(paragraphs, paper.sections, chunkSummaries, paper.structureMap || null);
+  attachParagraphArtifactLinks(paper);
+  paper.segmentationStages = {
+    ...(paper.segmentationStages || {}),
+    manualEdit: {
+      updatedAt: paper.segmentationEditedAt || new Date().toISOString(),
+      edits: Array.isArray(paper.manualSegmentationEdits) ? paper.manualSegmentationEdits.length : 0,
+    },
+  };
 }
 
 async function handleCreateAnalysisJob(req, res, paperId) {
@@ -7197,6 +7434,20 @@ function auditSegmentedParagraphsForNoise(paragraphs, structureMap = null) {
 
   for (const paragraph of paragraphs || []) {
     if (!paragraph || paragraph.kind === "heading") {
+      continue;
+    }
+
+    if (paragraph.manualSegmentationOverride === "reading") {
+      if (paragraph.segmentationNoise || paragraph.analysisEligible === false) {
+        delete paragraph.segmentationNoise;
+        paragraph.analysisEligible = true;
+        changed = true;
+      }
+      continue;
+    }
+
+    if (paragraph.manualSegmentationOverride === "noise") {
+      recordSegmentationAuditReason(summary, ["manual"], "marked");
       continue;
     }
 

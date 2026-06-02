@@ -690,11 +690,11 @@ select:focus {
 
 .paper-library-controls {
   display: grid;
-  grid-template-columns: 38px minmax(180px, 1fr) auto auto;
+  grid-template-columns: 38px minmax(180px, 1fr) repeat(3, auto);
   gap: 8px;
   align-items: center;
   margin-top: 10px;
-  max-width: 720px;
+  max-width: 900px;
 }
 
 .paper-library-controls .secondary-button {
@@ -1144,6 +1144,12 @@ pre.artifact-viewer-caption {
   box-shadow: var(--shadow);
 }
 
+.paragraph-card.is-ineligible {
+  border-style: dashed;
+  background: #f8faf7;
+  box-shadow: none;
+}
+
 .paragraph-header {
   display: flex;
   gap: 12px;
@@ -1194,6 +1200,60 @@ pre.artifact-viewer-caption {
 .paragraph-status.error {
   background: rgba(180, 35, 24, 0.12);
   color: var(--danger);
+}
+
+.paragraph-status.skipped {
+  background: rgba(86, 92, 105, 0.12);
+  color: var(--muted);
+}
+
+.paragraph-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.paragraph-edit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.paragraph-edit-button {
+  padding: 6px 8px;
+  border: 1px solid #d8e0dc;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #2f3c38;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 760;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.paragraph-edit-button:hover:not(:disabled) {
+  border-color: rgba(15, 118, 110, 0.42);
+  background: rgba(15, 118, 110, 0.08);
+  color: #28544d;
+}
+
+.paragraph-edit-button.danger {
+  color: #8f2c23;
+}
+
+.paragraph-edit-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
+.paragraph-card.is-ineligible .source-text {
+  color: var(--muted);
 }
 
 .job-history {
@@ -1597,6 +1657,16 @@ pre.artifact-viewer-caption {
 
   .toolbar-buttons .secondary-button {
     width: 100%;
+  }
+
+  .paragraph-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .paragraph-actions,
+  .paragraph-edit-actions {
+    justify-content: flex-start;
   }
 
   .analysis-grid {
