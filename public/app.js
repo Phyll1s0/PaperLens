@@ -1357,11 +1357,15 @@ function renderPageArtifact(artifact) {
   card.className = `page-artifact ${artifact.type}`;
   card.id = artifact.id;
 
+  const header = document.createElement("div");
+  header.className = "page-artifact-header";
+
   const meta = document.createElement("div");
   meta.className = "page-artifact-meta";
   meta.textContent = artifact.label
     ? `${artifact.label} · ${getArtifactLabel(artifact.type, artifact.visualType)}`
     : getArtifactLabel(artifact.type, artifact.visualType);
+  header.append(meta, renderArtifactActions(artifact));
 
   const body = artifact.type === "code"
     ? document.createElement("pre")
@@ -1377,12 +1381,42 @@ function renderPageArtifact(artifact) {
 
   const crop = renderArtifactCrop(artifact);
   if (crop) {
-    card.append(meta, crop, body);
+    card.append(header, crop, body);
   } else {
-    card.append(meta, body);
+    card.append(header, body);
   }
 
   return card;
+}
+
+function renderArtifactActions(artifact) {
+  const actions = document.createElement("div");
+  actions.className = "page-artifact-actions";
+
+  if (!hasArtifactCrop(artifact)) {
+    return actions;
+  }
+
+  const viewButton = document.createElement("button");
+  viewButton.type = "button";
+  viewButton.textContent = "查看";
+  viewButton.title = `放大查看${getArtifactLabel(artifact.type, artifact.visualType)}`;
+  viewButton.addEventListener("click", () => openArtifactViewer(artifact));
+
+  const locateButton = document.createElement("button");
+  locateButton.type = "button";
+  locateButton.textContent = "定位";
+  locateButton.title = "在整页预览中定位这块内容";
+  locateButton.addEventListener("click", () => openArtifactViewer(artifact, { focusLocator: true }));
+
+  const downloadLink = document.createElement("a");
+  downloadLink.href = getArtifactCropUrl(artifact, { download: true });
+  downloadLink.download = getArtifactDownloadName(artifact);
+  downloadLink.textContent = "下载";
+  downloadLink.title = "下载裁剪图";
+
+  actions.append(viewButton, locateButton, downloadLink);
+  return actions;
 }
 
 function renderArtifactCrop(artifact) {
@@ -1402,6 +1436,17 @@ function renderArtifactCrop(artifact) {
   return frame;
 }
 
+function hasArtifactCrop(artifact) {
+  const crop = artifact?.crop || {};
+  return Boolean(
+    artifact?.imagePath &&
+      Number(crop.width) > 0 &&
+      Number(crop.height) > 0 &&
+      Number(crop.pageWidth) > 0 &&
+      Number(crop.pageHeight) > 0,
+  );
+}
+
 function renderCropImage(artifact) {
   const crop = artifact.crop;
   const image = document.createElement("img");
@@ -1418,7 +1463,12 @@ function renderCropImage(artifact) {
   return image;
 }
 
-function openArtifactViewer(artifact) {
+function openArtifactViewer(artifact, options = {}) {
+  if (!hasArtifactCrop(artifact)) {
+    focusArtifactCard(artifact?.id);
+    return;
+  }
+
   closeArtifactViewer();
 
   const overlay = document.createElement("div");
@@ -1452,19 +1502,28 @@ function openArtifactViewer(artifact) {
   pageLink.rel = "noreferrer";
   pageLink.textContent = "打开整页";
 
+  const downloadLink = document.createElement("a");
+  downloadLink.href = getArtifactCropUrl(artifact, { download: true });
+  downloadLink.download = getArtifactDownloadName(artifact);
+  downloadLink.textContent = "下载裁剪";
+
   const closeButton = document.createElement("button");
   closeButton.type = "button";
   closeButton.textContent = "关闭";
   closeButton.addEventListener("click", closeArtifactViewer);
 
-  actions.append(pageLink, closeButton);
+  actions.append(downloadLink, pageLink, closeButton);
   header.append(title, actions);
+
+  const viewerBody = document.createElement("div");
+  viewerBody.className = "artifact-viewer-body";
 
   const cropFrame = document.createElement("div");
   cropFrame.className = "artifact-viewer-crop";
   cropFrame.style.aspectRatio = `${artifact.crop.width} / ${artifact.crop.height}`;
   cropFrame.style.width = `min(100%, 1080px, calc(74vh * ${artifact.crop.width / artifact.crop.height}))`;
   cropFrame.append(renderCropImage(artifact));
+  viewerBody.append(cropFrame, renderArtifactLocator(artifact, options));
 
   const caption = document.createElement(artifact.type === "code" ? "pre" : "p");
   caption.className = "artifact-viewer-caption";
@@ -1474,7 +1533,7 @@ function openArtifactViewer(artifact) {
     renderRichText(caption, artifact.text);
   }
 
-  panel.append(header, cropFrame, caption);
+  panel.append(header, viewerBody, caption);
   overlay.append(panel);
   document.body.append(overlay);
 
@@ -1487,6 +1546,45 @@ function openArtifactViewer(artifact) {
   document.addEventListener("keydown", onKeydown);
 }
 
+function renderArtifactLocator(artifact, options = {}) {
+  const crop = artifact.crop;
+  const locator = document.createElement("section");
+  locator.className = `artifact-viewer-locator${options.focusLocator ? " is-focused" : ""}`;
+
+  const title = document.createElement("div");
+  title.className = "artifact-viewer-locator-title";
+  title.textContent = artifact.pageNumber ? `第 ${artifact.pageNumber} 页定位` : "整页定位";
+
+  const pageLink = document.createElement("a");
+  pageLink.className = "artifact-page-map";
+  pageLink.href = artifact.imagePath;
+  pageLink.target = "_blank";
+  pageLink.rel = "noreferrer";
+  pageLink.title = "打开整页图片";
+
+  const pageImage = document.createElement("img");
+  pageImage.src = artifact.imagePath;
+  pageImage.alt = artifact.pageNumber ? `第 ${artifact.pageNumber} 页整页定位` : "整页定位";
+  pageImage.loading = "lazy";
+  pageImage.decoding = "async";
+
+  const marker = document.createElement("span");
+  marker.className = "artifact-page-marker";
+  marker.style.left = `${clampPercent(crop.x / crop.pageWidth * 100)}%`;
+  marker.style.top = `${clampPercent(crop.y / crop.pageHeight * 100)}%`;
+  marker.style.width = `${clampPercent(crop.width / crop.pageWidth * 100)}%`;
+  marker.style.height = `${clampPercent(crop.height / crop.pageHeight * 100)}%`;
+
+  pageLink.append(pageImage, marker);
+
+  const hint = document.createElement("p");
+  hint.className = "artifact-viewer-locator-hint";
+  hint.textContent = "绿色框是当前裁剪在整页中的位置。";
+
+  locator.append(title, pageLink, hint);
+  return locator;
+}
+
 function closeArtifactViewer() {
   const overlay = document.querySelector(".artifact-viewer");
   if (!overlay) {
@@ -1497,6 +1595,52 @@ function closeArtifactViewer() {
     document.removeEventListener("keydown", overlay._onKeydown);
   }
   overlay.remove();
+}
+
+function focusArtifactCard(artifactId) {
+  if (!artifactId) {
+    return;
+  }
+
+  const target = document.getElementById(artifactId);
+  if (!target) {
+    return;
+  }
+
+  target.scrollIntoView({ behavior: "smooth", block: "center" });
+  target.classList.add("is-highlighted");
+  window.setTimeout(() => target.classList.remove("is-highlighted"), 1600);
+}
+
+function getArtifactCropUrl(artifact, options = {}) {
+  if (!state.paper?.id || !artifact?.id || !hasArtifactCrop(artifact)) {
+    return "";
+  }
+
+  const url = `/api/papers/${encodeURIComponent(state.paper.id)}/artifacts/${encodeURIComponent(artifact.id)}/crop.svg`;
+  return options.download ? `${url}?download=1` : url;
+}
+
+function getArtifactDownloadName(artifact) {
+  const label = artifact?.label || artifact?.visualType || artifact?.type || "paperlens-crop";
+  return `${sanitizeClientFilename(label)}.svg`;
+}
+
+function sanitizeClientFilename(value) {
+  return String(value || "paperlens-crop")
+    .trim()
+    .replace(/[^\w.-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "paperlens-crop";
+}
+
+function clampPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(100, number));
 }
 
 function getArtifactLabel(type, visualType = "") {
@@ -1712,22 +1856,27 @@ function renderRelatedArtifacts(artifacts) {
   row.append(label);
 
   for (const artifact of artifacts) {
-    const link = document.createElement("a");
-    link.className = "artifact-link";
-    link.href = `#${artifact.id}`;
-    link.textContent = artifact.label || getArtifactLabel(artifact.type, artifact.visualType);
-    link.addEventListener("click", (event) => {
-      event.preventDefault();
-      const target = document.getElementById(artifact.id);
-      if (!target) {
-        return;
-      }
+    const chip = document.createElement("span");
+    chip.className = "artifact-chip";
 
-      target.scrollIntoView({ behavior: "smooth", block: "center" });
-      target.classList.add("is-highlighted");
-      window.setTimeout(() => target.classList.remove("is-highlighted"), 1600);
+    const previewButton = document.createElement("button");
+    previewButton.className = "artifact-link";
+    previewButton.type = "button";
+    previewButton.textContent = artifact.label || getArtifactLabel(artifact.type, artifact.visualType);
+    previewButton.title = "打开裁剪预览";
+    previewButton.addEventListener("click", () => openArtifactViewer(artifact));
+
+    const jumpLink = document.createElement("a");
+    jumpLink.className = "artifact-jump";
+    jumpLink.href = `#${artifact.id}`;
+    jumpLink.textContent = "定位";
+    jumpLink.addEventListener("click", (event) => {
+      event.preventDefault();
+      focusArtifactCard(artifact.id);
     });
-    row.append(link);
+
+    chip.append(previewButton, jumpLink);
+    row.append(chip);
   }
 
   return row;

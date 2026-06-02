@@ -312,10 +312,17 @@ async function handleArtifactCropSvg(req, res, paperId, artifactId) {
     return json(res, { error: "Artifact crop is not available." }, 404);
   }
 
-  res.writeHead(200, {
+  const headers = {
     "content-type": "image/svg+xml; charset=utf-8",
     "cache-control": "no-store",
-  });
+  };
+  const requestUrl = new URL(req.url || "/", getRequestBaseUrl(req));
+  if (requestUrl.searchParams.get("download") === "1") {
+    const filename = `${sanitizeDownloadFilename(artifact.label || artifact.visualType || artifact.type || artifact.id)}.svg`;
+    headers["content-disposition"] = `attachment; filename="${filename}"`;
+  }
+
+  res.writeHead(200, headers);
   res.end(svg);
 }
 
