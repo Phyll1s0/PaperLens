@@ -22,6 +22,7 @@ const state = {
     timer: null,
     pollInFlight: false,
     lastProgressKey: "",
+    networkFailures: 0,
   },
 };
 
@@ -148,6 +149,23 @@ function bindEvents() {
   });
   els.paragraphList.addEventListener("scroll", scheduleReadingProgressSave);
   window.addEventListener("scroll", scheduleReadingProgressSave, { passive: true });
+  window.addEventListener("online", () => {
+    if (!state.paper) {
+      return;
+    }
+    setStatus("网络已恢复，正在同步后端任务");
+    syncActiveAnalysisJob();
+  });
+  window.addEventListener("offline", () => {
+    if (state.autoAnalyze.running) {
+      setStatus("浏览器网络已断开；后端分析队列会保留，恢复连接后会自动同步。", true);
+    }
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && state.paper) {
+      syncActiveAnalysisJob();
+    }
+  });
 
   for (const input of [els.baseUrlInput, els.modelInput, els.apiKeyInput, els.agentBudgetInput, els.proxyUrlInput]) {
     input.addEventListener("input", () => {
@@ -858,7 +876,7 @@ function beginAnalysisJob(job) {
   clearAutoTimer();
   if (state.autoAnalyze.running) {
     state.autoAnalyze.timer = window.setInterval(() => {
-      pollAnalysisJob().catch((error) => setStatus(error.message, true));
+      pollAnalysisJob().catch(handleAnalysisPollError);
     }, 1800);
   }
   updateAutoStatus();
@@ -866,6 +884,7 @@ function beginAnalysisJob(job) {
 }
 
 function applyAnalysisJob(job) {
+  const previousJobId = state.autoAnalyze.jobId;
   const running = isActiveAnalysisJob(job);
   state.autoAnalyze.running = running;
   state.autoAnalyze.stopRequested = Boolean(job.cancelRequested || job.status === "canceling");
@@ -878,6 +897,10 @@ function applyAnalysisJob(job) {
   state.autoAnalyze.currentBatchSize = Number(job.currentBatchSize || 0);
   state.autoAnalyze.startedAt = Date.parse(job.startedAt || job.createdAt) || Date.now();
   state.autoAnalyze.lastProgressKey = getJobProgressKey(job);
+
+  if (job.id !== previousJobId || !running) {
+    state.autoAnalyze.networkFailures = 0;
+  }
 
   if (!running) {
     clearAutoTimer();
@@ -899,6 +922,23 @@ function getJobProgressKey(job) {
   ].join(":");
 }
 
+function handleAnalysisPollError(error) {
+  if (!error.isNetworkError) {
+    setStatus(error.message, true);
+    return;
+  }
+
+  state.autoAnalyze.networkFailures += 1;
+  const count = state.autoAnalyze.networkFailures;
+  const countLabel = count > 1 ? `（第 ${count} 次）` : "";
+  const offlineLabel = navigator.onLine === false
+    ? "浏览器当前处于离线状态"
+    : "页面会继续自动重连";
+
+  setStatus(`本机连接暂时中断${countLabel}：后端 Job 会继续保留，${offlineLabel}。`, true);
+  updateAutoButtons();
+}
+
 async function pollAnalysisJob(options = {}) {
   if (!state.autoAnalyze.jobId || state.autoAnalyze.pollInFlight) {
     return;
@@ -909,6 +949,7 @@ async function pollAnalysisJob(options = {}) {
     const response = await apiFetch(`/api/jobs/${encodeURIComponent(state.autoAnalyze.jobId)}`, {}, "查询分析任务");
     const result = await readResponse(response);
     const job = result.job;
+    state.autoAnalyze.networkFailures = 0;
     const previousKey = state.autoAnalyze.lastProgressKey;
     applyAnalysisJob(job);
     const progressChanged = previousKey !== state.autoAnalyze.lastProgressKey;
@@ -1045,7 +1086,11 @@ async function syncActiveAnalysisJob() {
       updateAutoButtons();
     }
   } catch (error) {
-    setStatus(error.message, true);
+    if (state.autoAnalyze.running && error.isNetworkError) {
+      handleAnalysisPollError(error);
+    } else {
+      setStatus(error.message, true);
+    }
   }
 }
 
@@ -2246,11 +2291,14 @@ async function apiFetch(url, options = {}, label = "请求") {
       signal: controller.signal,
     });
   } catch (error) {
+    const activeJobHint = state.autoAnalyze.running
+      ? "后端分析任务仍保存在本机队列，页面恢复连接后会自动同步。"
+      : "";
     const message = error.name === "AbortError"
       ? signal?.aborted
         ? `${label}已停止。`
-        : `${label}超时。模型可能仍在处理，或本机服务暂时无响应。`
-      : `${label}失败：无法连接 PaperLens 本机服务。请确认服务仍在运行，或刷新页面后重试。`;
+        : `${label}超时。模型可能仍在处理，或本机服务暂时无响应。${activeJobHint}`
+      : `${label}失败：无法连接 PaperLens 本机服务。${activeJobHint}请确认服务仍在运行，或刷新页面后重试。`;
     const wrapped = new Error(message);
     wrapped.cause = error;
     wrapped.isNetworkError = true;
