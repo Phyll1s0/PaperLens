@@ -149,6 +149,7 @@ const PROVIDERS = {
 };
 
 const API_TIMEOUT_MS = 240_000;
+const AI_SEGMENTATION_TIMEOUT_MS = 30 * 60 * 1000;
 const CLIENT_LOADED_AT_MS = Date.now();
 const REQUIRED_SERVICE_SCHEMA_VERSION = 2;
 const SERVICE_VERSION_CHECK_INTERVAL_MS = 60_000;
@@ -968,6 +969,7 @@ async function segmentPaperWithAi(options = {}) {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ settings: getSettings() }),
+      timeoutMs: AI_SEGMENTATION_TIMEOUT_MS,
     }, "AI 分段");
     const result = await readResponse(response);
     applySecuredSettings(result.settings);

@@ -73,7 +73,10 @@ const BATCH_GLOBAL_CONTEXT_LIMIT = 900;
 const MAX_BATCH_SPLIT_DEPTH = 4;
 const SEGMENTATION_CONTEXT_TEXT_LIMIT = 1600;
 const SEGMENTATION_STRUCTURE_INPUT_LIMIT = 28_000;
+const CLAUDE_SEGMENTATION_STRUCTURE_INPUT_LIMIT = 14_000;
 const SEGMENTATION_STRUCTURE_PAGE_LIMIT = 1800;
+const SEGMENTATION_STRUCTURE_TIMEOUT_MS = readIntegerEnv("PAPERLENS_SEGMENTATION_STRUCTURE_TIMEOUT_SECONDS", 300, 60, 1800) * 1000;
+const SEGMENTATION_CHUNK_TIMEOUT_MS = readIntegerEnv("PAPERLENS_SEGMENTATION_CHUNK_TIMEOUT_SECONDS", 240, 60, 1200) * 1000;
 const SEGMENTATION_ITEM_TEXT_LIMIT = 900;
 const SECTION_CONTEXT_TEXT_LIMIT = 900;
 const SEGMENTATION_PLAN_VERSION = 1;
@@ -6877,7 +6880,11 @@ function inferTitle(paragraphs, filename) {
 }
 
 async function buildPaperStructureMapWithAi(paper, pages, settings, options = {}) {
-  const pageOutline = buildStructureScanInput(pages);
+  const pageOutline = buildStructureScanInput(pages, {
+    totalLimit: isClaudeAgentSettings(settings)
+      ? CLAUDE_SEGMENTATION_STRUCTURE_INPUT_LIMIT
+      : SEGMENTATION_STRUCTURE_INPUT_LIMIT,
+  });
   if (!pageOutline) {
     return buildHeuristicPaperStructureMap(paper, pages);
   }
@@ -6928,24 +6935,36 @@ async function buildPaperStructureMapWithAi(paper, pages, settings, options = {}
     },
   ];
 
-  const content = await callModel(settings, messages, {
-    signal: options.signal,
-    maxTokens: 3200,
-    timeoutMs: 180_000,
-  });
-  const parsed = parseModelJson(content);
-  return normalizePaperStructureMap(parsed, paper, pages);
+  try {
+    const content = await callModel(settings, messages, {
+      signal: options.signal,
+      maxTokens: 3200,
+      timeoutMs: SEGMENTATION_STRUCTURE_TIMEOUT_MS,
+    });
+    const parsed = parseModelJson(content);
+    return normalizePaperStructureMap(parsed, paper, pages);
+  } catch (error) {
+    if (options.signal?.aborted || error.statusCode === 499 || !isRecoverableSegmentationPlanError(error)) {
+      throw error;
+    }
+
+    return {
+      ...buildHeuristicPaperStructureMap(paper, pages),
+      fallbackReason: error.message || "structure-map-failed",
+    };
+  }
 }
 
-function buildStructureScanInput(pages) {
+function buildStructureScanInput(pages, options = {}) {
   const readablePages = (pages || []).filter((page) => page && Number.isFinite(Number(page.pageNumber)));
   if (!readablePages.length) {
     return "";
   }
 
+  const totalLimit = Math.max(4000, Number(options.totalLimit || SEGMENTATION_STRUCTURE_INPUT_LIMIT));
   const perPageLimit = Math.max(
-    360,
-    Math.min(SEGMENTATION_STRUCTURE_PAGE_LIMIT, Math.floor(SEGMENTATION_STRUCTURE_INPUT_LIMIT / readablePages.length) - 48),
+    240,
+    Math.min(SEGMENTATION_STRUCTURE_PAGE_LIMIT, Math.floor(totalLimit / readablePages.length) - 48),
   );
   const lines = [];
   let totalLength = 0;
@@ -6959,7 +6978,7 @@ function buildStructureScanInput(pages) {
       `--- Page ${page.pageNumber} ---`,
       truncateText(pageText, perPageLimit),
     ].join("\n");
-    if (totalLength + entry.length > SEGMENTATION_STRUCTURE_INPUT_LIMIT) {
+    if (totalLength + entry.length > totalLimit) {
       break;
     }
 
@@ -6968,6 +6987,11 @@ function buildStructureScanInput(pages) {
   }
 
   return lines.join("\n\n");
+}
+
+function isRecoverableSegmentationPlanError(error) {
+  const message = String(error?.message || "");
+  return /超时|timeout|timed out|没有返回可解析|JSON|Unexpected|parse|格式/i.test(message);
 }
 
 function buildStructurePageOutline(page, limit = SEGMENTATION_STRUCTURE_PAGE_LIMIT) {
@@ -7521,7 +7545,11 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
     },
   ];
 
-  const content = await callModel(settings, messages, { maxTokens: 6000, signal: options.signal });
+  const content = await callModel(settings, messages, {
+    maxTokens: 6000,
+    signal: options.signal,
+    timeoutMs: SEGMENTATION_CHUNK_TIMEOUT_MS,
+  });
   const parsed = parseModelJson(content);
   const rawItems = Array.isArray(parsed.items) ? parsed.items : [];
 
@@ -8678,6 +8706,15 @@ function normalizePopplerText(text) {
     .replace(/\u00ad/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function isClaudeAgentSettings(settings = {}) {
+  const cleanSettings = resolveSettingsForModel(settings);
+  const baseUrl = String(cleanSettings.baseUrl || "");
+  const provider = String(cleanSettings.provider || "");
+  return baseUrl === "local:claude-kimi" ||
+    baseUrl === "local:claude-config" ||
+    provider.startsWith("claude");
 }
 
 async function callModel(settings, messages, options = {}) {
