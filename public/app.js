@@ -32,6 +32,22 @@ const state = {
     lastProgressKey: "",
     networkFailures: 0,
   },
+  segmentationJob: {
+    running: false,
+    stopRequested: false,
+    jobId: null,
+    status: "",
+    phase: "",
+    message: "",
+    completed: 0,
+    failed: 0,
+    total: 0,
+    startedAt: 0,
+    timer: null,
+    pollInFlight: false,
+    lastProgressKey: "",
+    networkFailures: 0,
+  },
   ocrJob: {
     running: false,
     jobId: null,
@@ -149,7 +165,6 @@ const PROVIDERS = {
 };
 
 const API_TIMEOUT_MS = 240_000;
-const AI_SEGMENTATION_TIMEOUT_MS = 30 * 60 * 1000;
 const CLIENT_LOADED_AT_MS = Date.now();
 const REQUIRED_SERVICE_SCHEMA_VERSION = 2;
 const SERVICE_VERSION_CHECK_INTERVAL_MS = 60_000;
@@ -231,15 +246,17 @@ function bindEvents() {
       return;
     }
     setStatus("网络已恢复，正在同步后端任务");
+    syncActiveSegmentationJob();
     syncActiveAnalysisJob();
   });
   window.addEventListener("offline", () => {
-    if (state.autoAnalyze.running) {
-      setStatus("浏览器网络已断开；后端分析队列会保留，恢复连接后会自动同步。", true);
+    if (state.autoAnalyze.running || state.segmentationJob.running) {
+      setStatus("浏览器网络已断开；后端任务队列会保留，恢复连接后会自动同步。", true);
     }
   });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && state.paper) {
+      syncActiveSegmentationJob();
       syncActiveAnalysisJob();
     }
     if (document.visibilityState === "visible") {
@@ -888,6 +905,8 @@ async function uploadPdf() {
     }, "上传 PDF");
     const paper = await readResponse(response);
     state.paper = paper;
+    resetSegmentationJobState();
+    resetAnalysisJobState();
     state.query = "";
     state.exportQa = null;
     els.searchInput.value = "";
@@ -957,35 +976,44 @@ async function segmentPaperWithAi(options = {}) {
     return false;
   }
 
-  const startedAt = Date.now();
-  const timer = window.setInterval(() => {
-    const elapsed = Math.round((Date.now() - startedAt) / 1000);
-    setStatus(`AI 正在重新分段 · 已用 ${elapsed}s`);
-  }, 1000);
-  setStatus("AI 正在重新分段 · 已用 0s");
+  setStatus("正在创建 AI 分段任务");
+  updateAutoButtons();
 
   try {
     const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}/segment`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ settings: getSettings() }),
-      timeoutMs: AI_SEGMENTATION_TIMEOUT_MS,
-    }, "AI 分段");
+    }, "创建 AI 分段任务");
     const result = await readResponse(response);
     applySecuredSettings(result.settings);
-    state.paper = result.paper;
+    if (result.paper) {
+      state.paper = result.paper;
+    }
     renderPaper();
     loadRecentPapers();
-    setStatus(`AI 分段完成：${getReadingParagraphs(state.paper).length} 个段落`);
-    state.lastSegmentationError = "";
-    return true;
+    if (!result.job) {
+      setStatus(result.message || "没有需要重新分段的内容");
+      state.lastSegmentationError = "";
+      return true;
+    }
+
+    beginSegmentationJob(result.job);
+    const completed = await waitForSegmentationJob(result.job.id);
+    if (completed) {
+      state.lastSegmentationError = "";
+      return true;
+    }
+
+    state.lastSegmentationError = state.segmentationJob.message || state.segmentationJob.status || "AI 分段未完成";
+    return false;
   } catch (error) {
     state.lastSegmentationError = error.message || "未知错误";
     const message = `AI 分段失败，继续使用基础分段：${error.message}`;
     setStatus(message, !options.continueOnError);
     return false;
   } finally {
-    window.clearInterval(timer);
+    updateAutoButtons();
   }
 }
 
@@ -1013,6 +1041,7 @@ async function openPaper(paperId) {
     const response = await apiFetch(`/api/papers/${encodeURIComponent(paperId)}`, {}, "载入论文");
     state.paper = await readResponse(response);
     resetAnalysisJobState();
+    resetSegmentationJobState();
     state.query = "";
     state.exportQa = null;
     state.showHiddenParagraphs = false;
@@ -1021,6 +1050,7 @@ async function openPaper(paperId) {
     setStatus("论文已载入");
     renderPaper();
     scrollToReadingProgress();
+    await syncActiveSegmentationJob();
     await syncActiveAnalysisJob();
     await loadJobHistory();
   } catch (error) {
@@ -1827,7 +1857,202 @@ async function createAnalysisJob(payload = {}) {
   }
 }
 
+function beginSegmentationJob(job) {
+  applySegmentationJob(job);
+  clearSegmentationTimer();
+  if (state.segmentationJob.running) {
+    state.segmentationJob.timer = window.setInterval(() => {
+      pollSegmentationJob().catch(handleSegmentationPollError);
+    }, 1800);
+  }
+  updateSegmentationStatus();
+  updateAutoButtons();
+}
+
+function applySegmentationJob(job) {
+  const previousJobId = state.segmentationJob.jobId;
+  const running = isActiveSegmentationJob(job);
+  state.segmentationJob.running = running;
+  state.segmentationJob.stopRequested = Boolean(job.cancelRequested || job.status === "canceling");
+  state.segmentationJob.jobId = job.id;
+  state.segmentationJob.status = job.status || "";
+  state.segmentationJob.phase = job.phase || "";
+  state.segmentationJob.message = job.message || "";
+  state.segmentationJob.completed = Number(job.completed || 0);
+  state.segmentationJob.failed = Number(job.failed || 0);
+  state.segmentationJob.total = Number(job.total || 0);
+  state.segmentationJob.startedAt = Date.parse(job.startedAt || job.createdAt) || Date.now();
+  state.segmentationJob.lastProgressKey = getJobProgressKey(job);
+
+  if (job.id !== previousJobId || !running) {
+    state.segmentationJob.networkFailures = 0;
+  }
+
+  if (!running) {
+    clearSegmentationTimer();
+  }
+}
+
+function resetSegmentationJobState() {
+  clearSegmentationTimer();
+  Object.assign(state.segmentationJob, {
+    running: false,
+    stopRequested: false,
+    jobId: null,
+    status: "",
+    phase: "",
+    message: "",
+    completed: 0,
+    failed: 0,
+    total: 0,
+    startedAt: 0,
+    pollInFlight: false,
+    lastProgressKey: "",
+    networkFailures: 0,
+  });
+}
+
+function clearSegmentationTimer() {
+  if (state.segmentationJob.timer) {
+    window.clearInterval(state.segmentationJob.timer);
+    state.segmentationJob.timer = null;
+  }
+}
+
+function isActiveSegmentationJob(job) {
+  return job && job.type === "segmentation" && (job.status === "queued" || job.status === "running" || job.status === "canceling");
+}
+
+async function waitForSegmentationJob(jobId) {
+  while (state.segmentationJob.jobId === jobId && state.segmentationJob.running) {
+    await clientSleep(1800);
+    try {
+      await pollSegmentationJob({ forceRefresh: true });
+    } catch (error) {
+      if (error.isNetworkError) {
+        handleSegmentationPollError(error);
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  return state.segmentationJob.jobId === jobId && state.segmentationJob.status === "done";
+}
+
+async function pollSegmentationJob(options = {}) {
+  if (!state.segmentationJob.jobId || state.segmentationJob.pollInFlight) {
+    return null;
+  }
+
+  state.segmentationJob.pollInFlight = true;
+  try {
+    const response = await apiFetch(`/api/jobs/${encodeURIComponent(state.segmentationJob.jobId)}`, {}, "查询分段任务");
+    const result = await readResponse(response);
+    const job = result.job;
+    state.segmentationJob.networkFailures = 0;
+    const previousKey = state.segmentationJob.lastProgressKey;
+    applySegmentationJob(job);
+    const progressChanged = previousKey !== state.segmentationJob.lastProgressKey;
+    if (options.forceRefresh || progressChanged || !state.segmentationJob.running) {
+      await refreshCurrentPaper();
+    }
+
+    updateSegmentationStatus();
+    updateAutoButtons();
+
+    if (!state.segmentationJob.running) {
+      loadRecentPapers();
+      if (job.status === "done") {
+        setStatus(`AI 分段完成：${getReadingParagraphs(state.paper).length} 个段落`);
+      } else if (job.status === "canceled") {
+        setStatus("AI 分段已停止。", true);
+      } else {
+        setStatus(`AI 分段失败：${job.message || job.error || "未知错误"}`, true);
+      }
+    }
+    return job;
+  } finally {
+    state.segmentationJob.pollInFlight = false;
+  }
+}
+
+function handleSegmentationPollError(error) {
+  if (!error.isNetworkError) {
+    setStatus(error.message, true);
+    return;
+  }
+
+  state.segmentationJob.networkFailures += 1;
+  const count = state.segmentationJob.networkFailures;
+  const countLabel = count > 1 ? `（第 ${count} 次）` : "";
+  setStatus(`本机连接暂时中断${countLabel}：AI 分段任务仍保存在后端队列，页面会继续自动重连。`, true);
+  updateAutoButtons();
+}
+
+async function syncActiveSegmentationJob() {
+  if (!state.paper) {
+    return;
+  }
+
+  try {
+    const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}/segment-jobs/active`, {}, "同步分段任务");
+    const result = await readResponse(response);
+    if (result.job) {
+      beginSegmentationJob(result.job);
+      await pollSegmentationJob({ forceRefresh: true });
+    } else if (state.segmentationJob.running) {
+      resetSegmentationJobState();
+      updateAutoButtons();
+    } else if (!state.segmentationJob.running && state.segmentationJob.jobId) {
+      resetSegmentationJobState();
+      updateAutoButtons();
+    }
+  } catch (error) {
+    if (state.segmentationJob.running && error.isNetworkError) {
+      handleSegmentationPollError(error);
+    } else {
+      setStatus(error.message, true);
+    }
+  }
+}
+
+function updateSegmentationStatus() {
+  if (!state.segmentationJob.running) {
+    return;
+  }
+
+  const elapsed = Math.max(0, Math.round((Date.now() - state.segmentationJob.startedAt) / 1000));
+  const progress = `${state.segmentationJob.completed + state.segmentationJob.failed}/${state.segmentationJob.total}`;
+  const stopLabel = state.segmentationJob.stopRequested ? " · 正在停止" : "";
+  setStatus(`AI 分段队列 ${progress} · 已用 ${elapsed}s · ${state.segmentationJob.message || "处理中"}${stopLabel}`, state.segmentationJob.failed > 0);
+}
+
+function clientSleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 async function stopAutoAnalyze() {
+  if (state.segmentationJob.running && state.segmentationJob.jobId) {
+    state.segmentationJob.stopRequested = true;
+    updateAutoButtons();
+    setStatus("正在停止 AI 分段任务");
+    try {
+      const response = await apiFetch(`/api/jobs/${encodeURIComponent(state.segmentationJob.jobId)}/cancel`, {
+        method: "POST",
+      }, "停止分段任务");
+      const result = await readResponse(response);
+      applySegmentationJob(result.job);
+      updateSegmentationStatus();
+      updateAutoButtons();
+    } catch (error) {
+      setStatus(error.message, true);
+      state.segmentationJob.stopRequested = false;
+      updateAutoButtons();
+    }
+    return;
+  }
+
   if (!state.autoAnalyze.running || !state.autoAnalyze.jobId) {
     return;
   }
@@ -1919,6 +2144,8 @@ function getJobProgressKey(job) {
     job.failed,
     job.currentParagraphId || "",
     job.currentBatchSize || 0,
+    job.phase || "",
+    job.message || "",
     job.updatedAt || "",
   ].join(":");
 }
@@ -4403,7 +4630,7 @@ function updateAutoStatus() {
 }
 
 function updateAutoButtons() {
-  const busy = state.autoAnalyze.running || state.pipelineBusy || state.maintenanceBusy || state.ocrJob.running;
+  const busy = state.autoAnalyze.running || state.segmentationJob.running || state.pipelineBusy || state.maintenanceBusy || state.ocrJob.running;
   const ocrRequired = isOcrRequiredPaper(state.paper);
   const missingCount = state.paper ? getMissingAnalysisCount(state.paper) : 0;
   els.qualityProfileButton.disabled = busy;
@@ -4424,8 +4651,10 @@ function updateAutoButtons() {
   els.toggleHiddenParagraphsButton.textContent = state.showHiddenParagraphs ? "收起隐藏段落" : "显示隐藏段落";
   els.rebuildAllVisualButton.disabled = busy;
   els.rebuildAllVisualButton.textContent = state.maintenanceBusy ? "批量重建中" : "重建全部图表";
-  els.stopAutoButton.classList.toggle("hidden", !state.autoAnalyze.running);
-  els.stopAutoButton.disabled = !state.autoAnalyze.running || state.autoAnalyze.stopRequested;
+  const stoppable = state.autoAnalyze.running || state.segmentationJob.running;
+  els.stopAutoButton.classList.toggle("hidden", !stoppable);
+  els.stopAutoButton.disabled = !stoppable || state.autoAnalyze.stopRequested || state.segmentationJob.stopRequested;
+  els.stopAutoButton.textContent = state.segmentationJob.running ? "停止分段" : "停止";
   renderAnalysisDashboard();
   renderJobHistory();
 }
@@ -4476,8 +4705,8 @@ async function apiFetch(url, options = {}, label = "请求") {
       signal: controller.signal,
     });
   } catch (error) {
-    const activeJobHint = state.autoAnalyze.running
-      ? "后端分析任务仍保存在本机队列，页面恢复连接后会自动同步。"
+    const activeJobHint = state.autoAnalyze.running || state.segmentationJob.running
+      ? "后端任务仍保存在本机队列，页面恢复连接后会自动同步。"
       : "";
     const message = error.name === "AbortError"
       ? signal?.aborted

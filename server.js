@@ -201,6 +201,20 @@ const server = http.createServer(async (req, res) => {
       return await handleSegmentPaper(req, res, segmentMatch[1]);
     }
 
+    const segmentJobsMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/segment-jobs$/);
+    if (req.method === "GET" && segmentJobsMatch) {
+      return await handleListSegmentationJobs(res, segmentJobsMatch[1]);
+    }
+
+    if (req.method === "POST" && segmentJobsMatch) {
+      return await handleSegmentPaper(req, res, segmentJobsMatch[1]);
+    }
+
+    const activeSegmentJobMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/segment-jobs\/active$/);
+    if (req.method === "GET" && activeSegmentJobMatch) {
+      return await handleGetActiveSegmentationJob(res, activeSegmentJobMatch[1]);
+    }
+
     const paragraphEditMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/paragraphs\/([^/]+)\/edit$/);
     if (req.method === "POST" && paragraphEditMatch) {
       return await handleEditPaperParagraph(req, res, paragraphEditMatch[1], paragraphEditMatch[2]);
@@ -559,7 +573,6 @@ async function handleSegmentPaper(req, res, paperId) {
   const payload = await readJson(req);
   const paper = await loadPaper(paperId);
   const pages = Array.isArray(paper.extractionPages) ? paper.extractionPages : [];
-  const signal = getResponseAbortSignal(res);
 
   if (!pages.length) {
     return json(res, { error: "这篇论文缺少原始页面文本，无法重新 AI 分段。请重新上传 PDF。" }, 400);
@@ -571,10 +584,55 @@ async function handleSegmentPaper(req, res, paperId) {
     envName: "PAPERLENS_MAX_AI_SEGMENTATION_PAGES",
   });
   const settings = await secureSettingsForJob(payload.settings || {});
+  const force = Boolean(payload.force);
+  const existing = findActiveSegmentationJobForPaper(paperId);
+  if (existing && !force) {
+    return json(res, {
+      job: serializeJob(existing),
+      paper,
+      settings: serializeClientSettings(existing.settings || settings),
+      message: "AI 分段任务已经在运行。",
+    });
+  }
 
-  const segmented = await segmentPaperWithAi(paper, settings, { signal });
-  await savePaper(segmented);
-  return json(res, { paper: segmented, settings: serializeClientSettings(settings) });
+  if (existing && force) {
+    await cancelJob(existing.id);
+  }
+
+  const job = createSegmentationJob({ paper, settings });
+  paper.segmentationJob = buildPaperSegmentationJobStatus(job, {
+    status: "queued",
+    phase: "queued",
+    message: "AI 分段任务已加入本机队列。",
+  });
+  paper.updatedAt = new Date().toISOString();
+  await savePaper(paper);
+
+  jobStore.jobs.set(job.id, job);
+  await persistJobs();
+  scheduleJobWorker();
+
+  return json(res, {
+    job: serializeJob(job),
+    paper,
+    settings: serializeClientSettings(settings),
+    message: "AI 分段任务已加入本机队列。",
+  });
+}
+
+async function handleListSegmentationJobs(res, paperId) {
+  const jobs = [...jobStore.jobs.values()]
+    .filter((job) => job.type === "segmentation" && job.paperId === paperId)
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+    .slice(0, JOB_POLL_LIMIT)
+    .map(serializeJobSummary);
+
+  return json(res, { jobs });
+}
+
+async function handleGetActiveSegmentationJob(res, paperId) {
+  const job = findActiveSegmentationJobForPaper(paperId);
+  return json(res, { job: job ? serializeJob(job) : null });
 }
 
 async function handleEditPaperParagraph(req, res, paperId, paragraphId) {
@@ -1009,6 +1067,10 @@ async function handleRetryFailedJob(res, jobId) {
     return json(res, { error: "任务还在运行，不能同时重跑失败项。" }, 409);
   }
 
+  if (job.type !== "analysis") {
+    return json(res, { error: "只有段落分析任务支持重跑失败项。" }, 400);
+  }
+
   const failedItems = job.items.filter((item) => item.status === "error");
   if (!failedItems.length) {
     return json(res, { job: serializeJob(job), message: "没有失败项需要重跑。" });
@@ -1420,7 +1482,7 @@ async function loadJobs() {
 
   const jobs = Array.isArray(payload?.jobs) ? payload.jobs : [];
   for (const job of jobs) {
-    if (!job?.id || !["analysis", "ocr"].includes(job.type)) {
+    if (!job?.id || !["analysis", "ocr", "segmentation"].includes(job.type)) {
       continue;
     }
 
@@ -1429,7 +1491,7 @@ async function loadJobs() {
       continue;
     }
 
-    if (normalized.type === "analysis") {
+    if (normalized.type === "analysis" || normalized.type === "segmentation") {
       try {
         normalized.settings = await secureSettingsForJob(normalized.settings, { migrate: true });
       } catch (error) {
@@ -1437,7 +1499,7 @@ async function loadJobs() {
         normalized.settings = redactJobSettings(normalized.settings || {});
         if (isActiveJobStatus(normalized.status)) {
           normalized.status = "error";
-          normalized.error = "历史任务模型配置无法迁移，请重新创建分析任务。";
+          normalized.error = "历史任务模型配置无法迁移，请重新创建任务。";
           normalized.completedAt = new Date().toISOString();
         }
       }
@@ -1655,6 +1717,10 @@ function normalizeLoadedJob(job) {
     return normalizeLoadedOcrJob(job);
   }
 
+  if (job.type === "segmentation") {
+    return normalizeLoadedSegmentationJob(job);
+  }
+
   const items = Array.isArray(job.items) ? job.items : [];
   const normalizedItems = items
     .filter((item) => item?.paragraphId)
@@ -1688,6 +1754,49 @@ function normalizeLoadedJob(job) {
     failed,
     currentParagraphId: "",
     currentBatchSize: 0,
+    error: String(job.error || ""),
+    createdAt: job.createdAt || new Date().toISOString(),
+    startedAt: job.startedAt || "",
+    completedAt: job.completedAt || "",
+    updatedAt: job.updatedAt || new Date().toISOString(),
+  };
+}
+
+function normalizeLoadedSegmentationJob(job) {
+  const items = Array.isArray(job.items) && job.items.length
+    ? job.items
+    : [{ paragraphId: "__segmentation__", status: job.status, attempts: 0 }];
+  const normalizedItems = items.map((item, index) => ({
+    paragraphId: String(item.paragraphId || `chunk_${index + 1}`),
+    pageRange: String(item.pageRange || ""),
+    status: normalizeLoadedJobItemStatus(item.status),
+    attempts: Number.isFinite(Number(item.attempts)) ? Number(item.attempts) : 0,
+    error: String(item.error || ""),
+    startedAt: item.startedAt || "",
+    completedAt: item.completedAt || "",
+  }));
+  const completed = normalizedItems.filter((item) => item.status === "done").length;
+  const failed = normalizedItems.filter((item) => item.status === "error").length;
+  return {
+    id: String(job.id),
+    type: "segmentation",
+    paperId: String(job.paperId || ""),
+    paperTitle: String(job.paperTitle || ""),
+    status: normalizeLoadedJobStatus(job.status),
+    cancelRequested: false,
+    retryFailedOnly: false,
+    cacheHits: 0,
+    adaptiveBatchSize: null,
+    settings: job.settings || {},
+    items: normalizedItems,
+    total: Math.max(1, normalizedItems.length),
+    completed,
+    failed,
+    currentParagraphId: "",
+    currentBatchSize: 0,
+    phase: String(job.phase || ""),
+    message: String(job.message || ""),
+    segmentation: job.segmentation || null,
     error: String(job.error || ""),
     createdAt: job.createdAt || new Date().toISOString(),
     startedAt: job.startedAt || "",
@@ -1813,6 +1922,49 @@ function createAnalysisJob({ paper, paragraphIds, settings, rerunAll, cacheHits 
   };
 }
 
+function createSegmentationJob({ paper, settings }) {
+  const now = new Date().toISOString();
+  const chunks = chunkPagesForSegmentation(paper.extractionPages || []);
+  return {
+    id: `seg_${Date.now()}_${randomUUID().slice(0, 8)}`,
+    type: "segmentation",
+    paperId: paper.id,
+    paperTitle: paper.title || paper.filename || "",
+    status: "queued",
+    cancelRequested: false,
+    retryFailedOnly: false,
+    cacheHits: 0,
+    adaptiveBatchSize: null,
+    settings,
+    items: chunks.map((chunk, index) => ({
+      paragraphId: `chunk_${index + 1}`,
+      pageRange: getPageRangeLabel(chunk),
+      status: "queued",
+      attempts: 0,
+      error: "",
+      startedAt: "",
+      completedAt: "",
+    })),
+    total: chunks.length,
+    completed: 0,
+    failed: 0,
+    currentParagraphId: "",
+    currentBatchSize: 0,
+    phase: "queued",
+    message: "等待 AI 分段处理。",
+    segmentation: {
+      pageCount: getPaperPageCount(paper),
+      chunks: chunks.length,
+      mode: "ai",
+    },
+    error: "",
+    createdAt: now,
+    startedAt: "",
+    completedAt: "",
+    updatedAt: now,
+  };
+}
+
 function createOcrJob({ paper }) {
   const now = new Date().toISOString();
   return {
@@ -1850,6 +2002,14 @@ function createOcrJob({ paper }) {
     completedAt: "",
     updatedAt: now,
   };
+}
+
+function findActiveSegmentationJobForPaper(paperId) {
+  const jobs = [...jobStore.jobs.values()]
+    .filter((job) => job.type === "segmentation" && job.paperId === paperId && isActiveJobStatus(job.status))
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+
+  return jobs[0] || null;
 }
 
 function findActiveAnalysisJobForPaper(paperId) {
@@ -1897,6 +2057,7 @@ function serializeJob(job) {
     updatedAt: job.updatedAt,
     items: job.items.map((item) => ({
       paragraphId: item.paragraphId,
+      pageRange: item.pageRange || "",
       status: item.status,
       attempts: item.attempts,
       error: item.error || "",
@@ -1913,6 +2074,12 @@ function serializeJob(job) {
     payload.phase = job.phase || "";
     payload.message = job.message || "";
     payload.ocr = job.ocr || null;
+  }
+
+  if (job.type === "segmentation") {
+    payload.phase = job.phase || "";
+    payload.message = job.message || "";
+    payload.segmentation = job.segmentation || null;
   }
 
   return payload;
@@ -1947,6 +2114,12 @@ function serializeJobSummary(job) {
     payload.phase = job.phase || "";
     payload.message = job.message || "";
     payload.ocr = job.ocr || null;
+  }
+
+  if (job.type === "segmentation") {
+    payload.phase = job.phase || "";
+    payload.message = job.message || "";
+    payload.segmentation = job.segmentation || null;
   }
 
   return payload;
@@ -2027,6 +2200,8 @@ async function runJobWorker() {
   try {
     if (job.type === "ocr") {
       await runOcrJob(job, controller.signal);
+    } else if (job.type === "segmentation") {
+      await runSegmentationJob(job, controller.signal);
     } else {
       await runAnalysisJob(job, controller.signal);
     }
@@ -2083,6 +2258,185 @@ async function runAnalysisJob(job, signal) {
   } else {
     job.status = "done";
     job.completedAt = finishedAt;
+  }
+}
+
+async function runSegmentationJob(job, signal) {
+  const now = new Date().toISOString();
+  job.status = "running";
+  job.startedAt ||= now;
+  job.updatedAt = now;
+  job.phase = "structure";
+  job.message = "AI 正在扫描全文结构。";
+  await updatePaperSegmentationJobStatus(job.paperId, job, {
+    status: "running",
+    phase: job.phase,
+    message: job.message,
+  });
+  await persistJobs();
+
+  try {
+    const paper = await loadPaper(job.paperId);
+    const pages = Array.isArray(paper.extractionPages) ? paper.extractionPages : [];
+    if (!pages.length) {
+      throw new Error("这篇论文缺少原始页面文本，无法重新 AI 分段。请重新上传 PDF。");
+    }
+
+    const segmented = await segmentPaperWithAi(paper, resolveJobSettings(job.settings), {
+      signal,
+      onProgress: async (event) => {
+        await updateSegmentationJobProgress(job, event);
+      },
+    });
+
+    if (signal.aborted || job.cancelRequested) {
+      throw createAbortError("AI 分段任务已停止。");
+    }
+
+    const finishedAt = new Date().toISOString();
+    for (const item of job.items) {
+      if (item.status !== "done") {
+        item.status = "done";
+        item.completedAt = finishedAt;
+        item.error = "";
+      }
+    }
+    recalculateJobProgress(job);
+    job.status = "done";
+    job.phase = "done";
+    job.message = `AI 分段完成：${getReadingParagraphs(segmented).length} 个段落。`;
+    job.currentParagraphId = "";
+    job.currentBatchSize = 0;
+    job.error = "";
+    job.completedAt = finishedAt;
+    job.updatedAt = finishedAt;
+    segmented.segmentationJob = buildPaperSegmentationJobStatus(job, {
+      status: "done",
+      phase: job.phase,
+      message: job.message,
+      completedAt: finishedAt,
+    });
+
+    await withPaperWriteLock(job.paperId, async () => {
+      const currentPaper = await loadPaper(job.paperId);
+      mergePaperMetadataAfterSegmentation(currentPaper, segmented);
+      await savePaper(segmented);
+      return segmented;
+    });
+    await persistJobs();
+  } catch (error) {
+    const finishedAt = new Date().toISOString();
+    const canceled = signal.aborted || job.cancelRequested || error.statusCode === 499 || error.name === "AbortError";
+    for (const item of job.items) {
+      if (item.status === "queued" || item.status === "running") {
+        item.status = canceled ? "canceled" : "error";
+        item.error = canceled ? "" : error.message || "AI 分段失败。";
+        item.completedAt = finishedAt;
+      }
+    }
+    recalculateJobProgress(job);
+    job.status = canceled ? "canceled" : "error";
+    job.phase = canceled ? "canceled" : "error";
+    job.message = canceled ? "AI 分段任务已停止。" : error.message || "AI 分段失败。";
+    job.error = canceled ? "" : job.message;
+    job.currentParagraphId = "";
+    job.currentBatchSize = 0;
+    job.completedAt = finishedAt;
+    job.updatedAt = finishedAt;
+    await updatePaperSegmentationJobStatus(job.paperId, job, {
+      status: job.status,
+      phase: job.phase,
+      message: job.message,
+      error: job.error,
+      completedAt: finishedAt,
+    }).catch(() => {});
+    await persistJobs();
+  }
+}
+
+async function updateSegmentationJobProgress(job, event = {}) {
+  const now = new Date().toISOString();
+  if (event.phase === "structure-start") {
+    job.phase = "structure";
+    job.message = "AI 正在扫描全文结构。";
+  } else if (event.phase === "structure-done") {
+    job.phase = "segment";
+    job.message = "全文结构扫描完成，正在进入页块分段。";
+  } else if (event.phase === "chunk-start") {
+    const item = job.items[event.chunkIndex];
+    if (item) {
+      item.status = "running";
+      item.startedAt ||= now;
+      item.attempts = Number(item.attempts || 0) + 1;
+      item.error = "";
+      job.currentParagraphId = item.paragraphId;
+      job.currentBatchSize = 1;
+    }
+    job.phase = "segment";
+    job.message = `AI 正在分段 ${Number(event.chunkIndex || 0) + 1}/${event.totalChunks || job.total} · ${event.pageRange || ""}`.trim();
+  } else if (event.phase === "chunk-done") {
+    const item = job.items[event.chunkIndex];
+    if (item && item.status !== "done") {
+      item.status = "done";
+      item.completedAt = now;
+      item.error = "";
+    }
+    job.currentParagraphId = "";
+    job.currentBatchSize = 0;
+    job.phase = "segment";
+    job.message = `AI 分段进度 ${Number(event.chunkIndex || 0) + 1}/${event.totalChunks || job.total} · 已生成 ${event.itemCount || 0} 项。`;
+  } else if (event.phase === "validation") {
+    job.phase = "validation";
+    job.message = "AI 分段完成，正在校验和清理段落。";
+  }
+
+  recalculateJobProgress(job);
+  job.updatedAt = now;
+  await updatePaperSegmentationJobStatus(job.paperId, job, {
+    status: job.status,
+    phase: job.phase,
+    message: job.message,
+  }).catch(() => {});
+  await persistJobs();
+}
+
+async function updatePaperSegmentationJobStatus(paperId, job, patch = {}) {
+  return withPaperWriteLock(paperId, async () => {
+    const paper = await loadPaper(paperId);
+    paper.segmentationJob = buildPaperSegmentationJobStatus(job, patch);
+    paper.updatedAt = new Date().toISOString();
+    await savePaper(paper);
+    return paper;
+  });
+}
+
+function buildPaperSegmentationJobStatus(job, patch = {}) {
+  const now = new Date().toISOString();
+  return {
+    jobId: job.id,
+    status: patch.status || job.status,
+    phase: patch.phase || job.phase || "",
+    message: patch.message || job.message || "",
+    total: Number(job.total || 0),
+    completed: Number(job.completed || 0),
+    failed: Number(job.failed || 0),
+    error: patch.error || job.error || "",
+    queuedAt: job.createdAt || "",
+    startedAt: job.startedAt || "",
+    completedAt: patch.completedAt || job.completedAt || "",
+    updatedAt: now,
+  };
+}
+
+function mergePaperMetadataAfterSegmentation(previousPaper, nextPaper) {
+  nextPaper.favorite = Boolean(previousPaper.favorite);
+  nextPaper.tags = normalizePaperTags(previousPaper.tags);
+  nextPaper.exportHistory = normalizeExportHistory(previousPaper.exportHistory);
+  nextPaper.createdAt = previousPaper.createdAt || nextPaper.createdAt;
+  nextPaper.readingProgress = normalizeReadingProgress(previousPaper.readingProgress || {}, nextPaper);
+  nextPaper.maintenance = previousPaper.maintenance || {};
+  if (previousPaper.ocr) {
+    nextPaper.ocr = previousPaper.ocr;
   }
 }
 
@@ -2969,6 +3323,14 @@ async function cancelJob(jobId) {
   } else {
     await markRemainingJobItemsCanceled(job);
     job.completedAt = job.updatedAt;
+    if (job.type === "segmentation") {
+      await updatePaperSegmentationJobStatus(job.paperId, job, {
+        status: "canceled",
+        phase: "canceled",
+        message: "AI 分段任务已停止。",
+        completedAt: job.completedAt,
+      }).catch(() => {});
+    }
   }
   await persistJobs();
   scheduleJobWorker();
@@ -7316,13 +7678,24 @@ function buildHeuristicPaperStructureMap(paper, pages) {
 
 async function segmentPaperWithAi(paper, settings, options = {}) {
   const pages = paper.extractionPages || [];
+  await options.onProgress?.({ phase: "structure-start" });
   const structureMap = await buildPaperStructureMapWithAi(paper, pages, settings, { signal: options.signal });
   const chunks = chunkPagesForSegmentation(pages);
   const items = [];
   const chunkSummaries = [];
   const windowState = createSegmentationWindowState();
+  await options.onProgress?.({
+    phase: "structure-done",
+    totalChunks: chunks.length,
+  });
 
   for (const [index, chunk] of chunks.entries()) {
+    await options.onProgress?.({
+      phase: "chunk-start",
+      chunkIndex: index,
+      totalChunks: chunks.length,
+      pageRange: getPageRangeLabel(chunk),
+    });
     const result = await segmentPageChunkWithAi(paper, chunk, settings, {
       signal: options.signal,
       chunkIndex: index,
@@ -7342,8 +7715,16 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
       keywords: normalizeKeywordList(result.keywords).slice(0, 12),
       activeSectionTitle: windowState.activeSectionTitle,
     });
+    await options.onProgress?.({
+      phase: "chunk-done",
+      chunkIndex: index,
+      totalChunks: chunks.length,
+      pageRange: getPageRangeLabel(chunk),
+      itemCount: chunkItems.length,
+    });
   }
 
+  await options.onProgress?.({ phase: "validation", totalChunks: chunks.length });
   const validation = validateAndRepairSegmentedParagraphs(
     buildParagraphsFromSegmentItems(items, structureMap),
     structureMap,
