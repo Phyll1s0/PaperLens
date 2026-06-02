@@ -3,7 +3,11 @@ FROM node:20-bookworm-slim
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     ca-certificates \
+    ocrmypdf \
     poppler-utils \
+    tesseract-ocr \
+    tesseract-ocr-chi-sim \
+    tesseract-ocr-eng \
     tini \
   && rm -rf /var/lib/apt/lists/*
 

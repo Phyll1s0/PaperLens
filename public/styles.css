@@ -728,6 +728,38 @@ select:focus {
   line-height: 1.55;
 }
 
+.ocr-job-status {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  border: 1px solid rgba(180, 83, 42, 0.18);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.ocr-job-status strong {
+  color: #332923;
+  font-size: 13px;
+}
+
+.ocr-job-status span {
+  color: #6a5144;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.ocr-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.ocr-actions .primary-button {
+  min-width: 0;
+}
+
 .ocr-steps {
   padding-left: 18px;
 }

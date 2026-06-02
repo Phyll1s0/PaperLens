@@ -27,6 +27,15 @@ const state = {
     lastProgressKey: "",
     networkFailures: 0,
   },
+  ocrJob: {
+    running: false,
+    jobId: null,
+    status: "",
+    message: "",
+    startedAt: 0,
+    timer: null,
+    pollInFlight: false,
+  },
 };
 
 const els = {
@@ -1905,8 +1914,10 @@ function renderPaper() {
   els.favoriteButton.setAttribute("aria-pressed", paper.favorite ? "true" : "false");
   els.tagInput.value = (paper.tags || []).join(", ");
   if (ocrRequired) {
+    syncOcrJobFromPaper(paper);
     renderScannedPaper(paper);
   } else {
+    resetOcrJobState();
     renderOutline(paper);
     renderParagraphs(paper);
   }
@@ -1955,14 +1966,42 @@ function renderOcrRequiredNotice(paper) {
     `可阅读段落 ${ocr.readableParagraphCount || 0} 个`,
     `可提取字符 ${ocr.textCharacters || 0} 个`,
     `页图 ${ocr.pageImageCount || paper.pageImages?.length || 0} 张`,
-  ].join(" · ");
+    ocr.language ? `语言 ${ocr.language}` : "",
+  ].filter(Boolean).join(" · ");
+
+  const jobStatus = document.createElement("div");
+  jobStatus.className = "ocr-job-status";
+  const jobTitle = document.createElement("strong");
+  jobTitle.textContent = getOcrStatusTitle(paper);
+  const jobBody = document.createElement("span");
+  jobBody.textContent = getOcrStatusBody(paper);
+  jobStatus.append(jobTitle, jobBody);
+
+  const actions = document.createElement("div");
+  actions.className = "ocr-actions";
+  const ocrButton = document.createElement("button");
+  ocrButton.className = "primary-button";
+  ocrButton.type = "button";
+  ocrButton.textContent = state.ocrJob.running ? "OCR 运行中" : "本机 OCR 并重新解析";
+  ocrButton.disabled = state.ocrJob.running || state.pipelineBusy || state.autoAnalyze.running;
+  ocrButton.addEventListener("click", startOcrJob);
+  actions.append(ocrButton);
+
+  if (state.ocrJob.running) {
+    const stopButton = document.createElement("button");
+    stopButton.className = "secondary-button";
+    stopButton.type = "button";
+    stopButton.textContent = "停止 OCR";
+    stopButton.addEventListener("click", stopOcrJob);
+    actions.append(stopButton);
+  }
 
   const steps = document.createElement("ol");
   steps.className = "ocr-steps";
   for (const step of [
-    "安装 OCRmyPDF 和 Tesseract。",
-    "用 OCRmyPDF 生成可搜索 PDF。",
-    "把生成后的 OCR PDF 重新上传到 PaperLens。",
+    "点击上方按钮后，PaperLens 会调用本机 OCRmyPDF/Tesseract。",
+    "OCR 完成后会自动重新提取文本、页面结构和段落。",
+    "如果本机缺少工具，可以按下面命令安装后再重试。",
   ]) {
     const item = document.createElement("li");
     item.textContent = step;
@@ -1973,14 +2012,185 @@ function renderOcrRequiredNotice(paper) {
   commands.className = "ocr-command";
   commands.textContent = [
     "brew install ocrmypdf tesseract tesseract-lang",
-    "ocrmypdf --skip-text --deskew --rotate-pages input.pdf output.ocr.pdf",
+    "PAPERLENS_OCR_LANGUAGE=eng npm run dev",
+    "ocrmypdf --skip-text --deskew --rotate-pages -l eng input.pdf output.ocr.pdf",
   ].join("\n");
 
   const note = document.createElement("p");
-  note.textContent = "Docker 或 Linux 环境可安装 ocrmypdf、tesseract-ocr 和对应语言包。中文论文通常还需要 tesseract-ocr-chi-sim 或 chi_tra。";
+  note.textContent = "Docker 镜像会内置 OCRmyPDF、Tesseract 英文和简体中文语言包；中文论文可设置 PAPERLENS_OCR_LANGUAGE=eng+chi_sim。";
 
-  notice.append(title, summary, steps, commands, note);
+  notice.append(title, summary, jobStatus, actions, steps, commands, note);
   return notice;
+}
+
+function getOcrStatusTitle(paper) {
+  const status = paper.ocr?.status || "";
+  if (state.ocrJob.running || status === "queued" || status === "running") {
+    return "OCR 任务运行中";
+  }
+  if (status === "failed") {
+    return "上次 OCR 失败";
+  }
+  return "可在本机自动 OCR";
+}
+
+function getOcrStatusBody(paper) {
+  const ocr = paper.ocr || {};
+  if (state.ocrJob.message && (!ocr.jobId || state.ocrJob.jobId === ocr.jobId)) {
+    return state.ocrJob.message;
+  }
+  if (ocr.error) {
+    return normalizeDisplayError(ocr.error);
+  }
+  return ocr.recommendation || "将扫描版 PDF 转成可搜索 PDF 后，PaperLens 会继续分段和讲解。";
+}
+
+async function startOcrJob() {
+  if (!state.paper || state.ocrJob.running) {
+    return;
+  }
+
+  setStatus("正在创建本机 OCR 任务");
+  try {
+    const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}/ocr-jobs`, {
+      method: "POST",
+    }, "创建 OCR 任务");
+    const result = await readResponse(response);
+    if (result.paper) {
+      state.paper = result.paper;
+    }
+    if (!result.job) {
+      renderPaper();
+      setStatus(result.message || "这篇 PDF 不需要 OCR");
+      return;
+    }
+
+    beginOcrJob(result.job);
+    renderPaper();
+    setStatus(result.message || "已加入本机 OCR 队列");
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
+function beginOcrJob(job) {
+  applyOcrJob(job);
+  clearOcrTimer();
+  if (state.ocrJob.running) {
+    state.ocrJob.timer = window.setInterval(() => {
+      pollOcrJob().catch((error) => {
+        setStatus(error.message, true);
+      });
+    }, 1800);
+  }
+}
+
+function applyOcrJob(job) {
+  state.ocrJob.running = isActiveAnalysisJob(job);
+  state.ocrJob.jobId = job.id;
+  state.ocrJob.status = job.status || "";
+  state.ocrJob.message = job.message || getJobStatusText(job.status);
+  state.ocrJob.startedAt = Date.parse(job.startedAt || job.createdAt) || Date.now();
+  if (!state.ocrJob.running) {
+    clearOcrTimer();
+  }
+}
+
+function syncOcrJobFromPaper(paper) {
+  const jobId = paper?.ocr?.jobId || "";
+  const status = paper?.ocr?.status || "";
+  const active = jobId && (status === "queued" || status === "running");
+  if (!active || state.ocrJob.jobId === jobId) {
+    return;
+  }
+
+  beginOcrJob({
+    id: jobId,
+    type: "ocr",
+    paperId: paper.id,
+    paperTitle: paper.title || paper.filename || "",
+    status,
+    total: 1,
+    completed: 0,
+    failed: 0,
+    message: paper.ocr?.recommendation || "OCR 任务运行中",
+    createdAt: paper.ocr?.queuedAt || paper.ocr?.startedAt || new Date().toISOString(),
+    startedAt: paper.ocr?.startedAt || "",
+    updatedAt: paper.updatedAt || "",
+  });
+}
+
+async function pollOcrJob() {
+  if (!state.ocrJob.jobId || state.ocrJob.pollInFlight) {
+    return;
+  }
+
+  state.ocrJob.pollInFlight = true;
+  try {
+    const response = await apiFetch(`/api/jobs/${encodeURIComponent(state.ocrJob.jobId)}`, {}, "查询 OCR 任务");
+    const result = await readResponse(response);
+    const job = result.job;
+    applyOcrJob(job);
+    await refreshCurrentPaper();
+    loadRecentPapers();
+
+    if (state.ocrJob.running) {
+      const elapsed = Math.round((Date.now() - state.ocrJob.startedAt) / 1000);
+      setStatus(`${job.message || "OCR 运行中"} · 已用 ${formatDuration(elapsed)}`);
+    } else if (job.status === "done") {
+      resetOcrJobState({ keepMessage: true });
+      setStatus(job.message || "OCR 完成，已重新解析论文");
+    } else if (job.status === "canceled") {
+      resetOcrJobState();
+      setStatus("OCR 任务已停止");
+    } else {
+      resetOcrJobState({ keepMessage: true });
+      setStatus(job.error || job.message || "OCR 失败", true);
+    }
+
+    renderPaper();
+  } finally {
+    state.ocrJob.pollInFlight = false;
+  }
+}
+
+async function stopOcrJob() {
+  if (!state.ocrJob.running || !state.ocrJob.jobId) {
+    return;
+  }
+
+  setStatus("正在停止 OCR 任务");
+  try {
+    const response = await apiFetch(`/api/jobs/${encodeURIComponent(state.ocrJob.jobId)}/cancel`, {
+      method: "POST",
+    }, "停止 OCR 任务");
+    const result = await readResponse(response);
+    if (result.job) {
+      applyOcrJob(result.job);
+    }
+    await pollOcrJob();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
+function resetOcrJobState(options = {}) {
+  clearOcrTimer();
+  Object.assign(state.ocrJob, {
+    running: false,
+    jobId: null,
+    status: "",
+    message: options.keepMessage ? state.ocrJob.message : "",
+    startedAt: 0,
+    pollInFlight: false,
+  });
+}
+
+function clearOcrTimer() {
+  if (state.ocrJob.timer) {
+    window.clearInterval(state.ocrJob.timer);
+    state.ocrJob.timer = null;
+  }
 }
 
 function renderOutline(paper) {
@@ -3578,7 +3788,7 @@ function updateAutoStatus() {
 }
 
 function updateAutoButtons() {
-  const busy = state.autoAnalyze.running || state.pipelineBusy || state.maintenanceBusy;
+  const busy = state.autoAnalyze.running || state.pipelineBusy || state.maintenanceBusy || state.ocrJob.running;
   const ocrRequired = isOcrRequiredPaper(state.paper);
   const missingCount = state.paper ? getMissingAnalysisCount(state.paper) : 0;
   els.qualityProfileButton.disabled = busy;

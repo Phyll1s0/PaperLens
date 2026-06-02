@@ -58,6 +58,24 @@ PAPERLENS_PROXY_URL=http://host.docker.internal:7897
 
 也可以不写 `.env`，直接在网页的模型设置里填 `Proxy URL`。这个值只保存在当前浏览器会话中，适合每个使用者按自己的代理端口临时配置。
 
+扫描版 PDF 可以在页面里点击“本机 OCR 并重新解析”。PaperLens 会调用本机 `ocrmypdf` 和 `tesseract`，生成可搜索 PDF 后自动重新提取段落、页面结构和图表裁剪。本机需要先安装：
+
+```bash
+brew install ocrmypdf tesseract tesseract-lang
+```
+
+默认 OCR 语言是英文：
+
+```text
+PAPERLENS_OCR_LANGUAGE=eng
+```
+
+中英文混排论文可改成：
+
+```text
+PAPERLENS_OCR_LANGUAGE=eng+chi_sim
+```
+
 ### 本机前台运行
 
 ```bash
@@ -127,7 +145,7 @@ docker compose down
 
 Docker 会用 named volumes 持久化 `uploads/`、`data/`、`paper-assets/` 和 `.cache/`。
 
-Docker Compose 会自动读取 `.env` 中的 `PAPERLENS_PROXY_URL`。Docker 镜像会安装 Claude Code CLI，因此 `Claude Code + Kimi Code Key` Provider 在容器里也能用页面输入的 Kimi Code Key 调用。`Claude Code 本机配置` Provider 仍然依赖容器内自己的环境变量或配置，不会自动读取宿主机的 `~/.claude`。
+Docker Compose 会自动读取 `.env` 中的 `PAPERLENS_PROXY_URL` 和 `PAPERLENS_OCR_LANGUAGE`。Docker 镜像会安装 OCRmyPDF、Tesseract 英文/简体中文语言包和 Claude Code CLI，因此扫描版 PDF OCR 与 `Claude Code + Kimi Code Key` Provider 都可以在容器内运行。`Claude Code 本机配置` Provider 仍然依赖容器内自己的环境变量或配置，不会自动读取宿主机的 `~/.claude`。
 
 默认端口是 `3000`。如果宿主机端口被占用，可在 `.env` 设置：
 
@@ -139,6 +157,7 @@ PAPERLENS_PORT=3010
 
 - 上传 PDF。
 - Docker/Linux 使用 Poppler 提取文本和页面快照；macOS 本机自动回退 PDFKit。
+- 扫描版 PDF 支持本机 OCR Job，完成后自动重新提取文本、段落和视觉结构。
 - 论文库支持收藏、标签、全文搜索、阅读进度和导出历史。
 - 自动切分段落并生成基础目录。
 - 可在上传后使用 AI 重新分段。

@@ -34,6 +34,8 @@ const WORKSPACE_CACHE_KEY = createHash("sha1").update(__dirname).digest("hex").s
 const SWIFT_MODULE_CACHE_DIR = path.join(CACHE_DIR, `swift-module-cache-${WORKSPACE_CACHE_KEY}`);
 const TMP_DIR = path.join(CACHE_DIR, "tmp");
 const MAX_UPLOAD_BYTES = 120 * 1024 * 1024;
+const OCR_LANGUAGE = process.env.PAPERLENS_OCR_LANGUAGE || process.env.PAPERLENS_OCR_LANG || "eng";
+const OCR_TIMEOUT_MS = readIntegerEnv("PAPERLENS_OCR_TIMEOUT_SECONDS", 1800, 60, 7200) * 1000;
 const ARTIFACT_CROP_VERSION = 10;
 const VISUAL_STRUCTURE_VERSION = 4;
 const SEGMENTATION_AUDIT_VERSION = 1;
@@ -165,6 +167,20 @@ const server = http.createServer(async (req, res) => {
     const activeAnalysisJobMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/analysis-jobs\/active$/);
     if (req.method === "GET" && activeAnalysisJobMatch) {
       return await handleGetActiveAnalysisJob(res, activeAnalysisJobMatch[1]);
+    }
+
+    const ocrJobsMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/ocr-jobs$/);
+    if (req.method === "GET" && ocrJobsMatch) {
+      return await handleListOcrJobs(res, ocrJobsMatch[1]);
+    }
+
+    if (req.method === "POST" && ocrJobsMatch) {
+      return await handleCreateOcrJob(res, ocrJobsMatch[1]);
+    }
+
+    const activeOcrJobMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/ocr-jobs\/active$/);
+    if (req.method === "GET" && activeOcrJobMatch) {
+      return await handleGetActiveOcrJob(res, activeOcrJobMatch[1]);
     }
 
     const paperMatch = url.pathname.match(/^\/api\/papers\/([^/]+)$/);
@@ -563,6 +579,66 @@ async function handleGetActiveAnalysisJob(res, paperId) {
   return json(res, { job: job ? serializeJob(job) : null });
 }
 
+async function handleCreateOcrJob(res, paperId) {
+  const paper = await loadPaper(paperId);
+  const existing = findActiveOcrJobForPaper(paperId);
+  if (existing) {
+    return json(res, {
+      job: serializeJob(existing),
+      paper,
+      message: "OCR 任务已经在运行。",
+    });
+  }
+
+  if (!isPaperOcrRequired(paper)) {
+    return json(res, {
+      job: null,
+      paper,
+      message: "这篇 PDF 已有可阅读文本，不需要 OCR。",
+    });
+  }
+
+  const job = createOcrJob({ paper });
+  paper.status = "needs_ocr";
+  paper.segmentationMode = "ocr-required";
+  paper.ocr = buildPaperOcrStatus(paper, {
+    needed: true,
+    status: "queued",
+    reason: paper.ocr?.reason || "no-readable-text",
+    detectedAt: paper.ocr?.detectedAt || new Date().toISOString(),
+    jobId: job.id,
+    language: OCR_LANGUAGE,
+    queuedAt: job.createdAt,
+    error: "",
+  });
+  await savePaper(paper);
+
+  jobStore.jobs.set(job.id, job);
+  await persistJobs();
+  scheduleJobWorker();
+
+  return json(res, {
+    job: serializeJob(job),
+    paper,
+    message: "已加入本机 OCR 队列。",
+  });
+}
+
+async function handleListOcrJobs(res, paperId) {
+  const jobs = [...jobStore.jobs.values()]
+    .filter((job) => job.type === "ocr" && job.paperId === paperId)
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+    .slice(0, JOB_POLL_LIMIT)
+    .map(serializeJobSummary);
+
+  return json(res, { jobs });
+}
+
+async function handleGetActiveOcrJob(res, paperId) {
+  const job = findActiveOcrJobForPaper(paperId);
+  return json(res, { job: job ? serializeJob(job) : null });
+}
+
 async function handleGetJob(res, jobId) {
   const job = jobStore.jobs.get(jobId);
   if (!job) {
@@ -861,20 +937,26 @@ async function loadJobs() {
 
   const jobs = Array.isArray(payload?.jobs) ? payload.jobs : [];
   for (const job of jobs) {
-    if (!job?.id || job.type !== "analysis") {
+    if (!job?.id || !["analysis", "ocr"].includes(job.type)) {
       continue;
     }
 
     const normalized = normalizeLoadedJob(job);
-    try {
-      normalized.settings = await secureSettingsForJob(normalized.settings, { migrate: true });
-    } catch (error) {
-      console.warn(`Skipping invalid model settings for job ${normalized.id}: ${error.message}`);
-      normalized.settings = redactJobSettings(normalized.settings || {});
-      if (isActiveJobStatus(normalized.status)) {
-        normalized.status = "error";
-        normalized.error = "历史任务模型配置无法迁移，请重新创建分析任务。";
-        normalized.completedAt = new Date().toISOString();
+    if (!normalized) {
+      continue;
+    }
+
+    if (normalized.type === "analysis") {
+      try {
+        normalized.settings = await secureSettingsForJob(normalized.settings, { migrate: true });
+      } catch (error) {
+        console.warn(`Skipping invalid model settings for job ${normalized.id}: ${error.message}`);
+        normalized.settings = redactJobSettings(normalized.settings || {});
+        if (isActiveJobStatus(normalized.status)) {
+          normalized.status = "error";
+          normalized.error = "历史任务模型配置无法迁移，请重新创建分析任务。";
+          normalized.completedAt = new Date().toISOString();
+        }
       }
     }
     jobStore.jobs.set(job.id, normalized);
@@ -1032,6 +1114,10 @@ async function persistSecrets() {
 }
 
 function normalizeLoadedJob(job) {
+  if (job.type === "ocr") {
+    return normalizeLoadedOcrJob(job);
+  }
+
   const items = Array.isArray(job.items) ? job.items : [];
   const normalizedItems = items
     .filter((item) => item?.paragraphId)
@@ -1064,6 +1150,48 @@ function normalizeLoadedJob(job) {
     failed,
     currentParagraphId: "",
     currentBatchSize: 0,
+    error: String(job.error || ""),
+    createdAt: job.createdAt || new Date().toISOString(),
+    startedAt: job.startedAt || "",
+    completedAt: job.completedAt || "",
+    updatedAt: job.updatedAt || new Date().toISOString(),
+  };
+}
+
+function normalizeLoadedOcrJob(job) {
+  const items = Array.isArray(job.items) && job.items.length
+    ? job.items
+    : [{ paragraphId: "__ocr__", status: job.status, attempts: 0 }];
+  const normalizedItems = items.map((item) => ({
+    paragraphId: String(item.paragraphId || "__ocr__"),
+    status: normalizeLoadedJobItemStatus(item.status),
+    attempts: Number.isFinite(Number(item.attempts)) ? Number(item.attempts) : 0,
+    error: String(item.error || ""),
+    startedAt: item.startedAt || "",
+    completedAt: item.completedAt || "",
+  }));
+  const completed = normalizedItems.filter((item) => item.status === "done").length;
+  const failed = normalizedItems.filter((item) => item.status === "error").length;
+  return {
+    id: String(job.id),
+    type: "ocr",
+    paperId: String(job.paperId || ""),
+    paperTitle: String(job.paperTitle || ""),
+    status: normalizeLoadedJobStatus(job.status),
+    cancelRequested: false,
+    retryFailedOnly: false,
+    cacheHits: 0,
+    adaptiveBatchSize: null,
+    settings: {},
+    items: normalizedItems,
+    total: Math.max(1, normalizedItems.length),
+    completed,
+    failed,
+    currentParagraphId: "",
+    currentBatchSize: 0,
+    phase: String(job.phase || ""),
+    message: String(job.message || ""),
+    ocr: job.ocr || null,
     error: String(job.error || ""),
     createdAt: job.createdAt || new Date().toISOString(),
     startedAt: job.startedAt || "",
@@ -1146,9 +1274,56 @@ function createAnalysisJob({ paper, paragraphIds, settings, rerunAll, cacheHits 
   };
 }
 
+function createOcrJob({ paper }) {
+  const now = new Date().toISOString();
+  return {
+    id: `ocr_${Date.now()}_${randomUUID().slice(0, 8)}`,
+    type: "ocr",
+    paperId: paper.id,
+    paperTitle: paper.title || paper.filename || "",
+    status: "queued",
+    cancelRequested: false,
+    retryFailedOnly: false,
+    cacheHits: 0,
+    adaptiveBatchSize: null,
+    settings: {},
+    items: [{
+      paragraphId: "__ocr__",
+      status: "queued",
+      attempts: 0,
+      error: "",
+      startedAt: "",
+      completedAt: "",
+    }],
+    total: 1,
+    completed: 0,
+    failed: 0,
+    currentParagraphId: "",
+    currentBatchSize: 0,
+    phase: "queued",
+    message: "等待本机 OCR 工具处理 PDF",
+    ocr: {
+      language: OCR_LANGUAGE,
+    },
+    error: "",
+    createdAt: now,
+    startedAt: "",
+    completedAt: "",
+    updatedAt: now,
+  };
+}
+
 function findActiveAnalysisJobForPaper(paperId) {
   const jobs = [...jobStore.jobs.values()]
     .filter((job) => job.type === "analysis" && job.paperId === paperId && isActiveJobStatus(job.status))
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+
+  return jobs[0] || null;
+}
+
+function findActiveOcrJobForPaper(paperId) {
+  const jobs = [...jobStore.jobs.values()]
+    .filter((job) => job.type === "ocr" && job.paperId === paperId && isActiveJobStatus(job.status))
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
 
   return jobs[0] || null;
@@ -1159,7 +1334,7 @@ function isActiveJobStatus(status) {
 }
 
 function serializeJob(job) {
-  return {
+  const payload = {
     id: job.id,
     type: job.type,
     paperId: job.paperId,
@@ -1170,7 +1345,6 @@ function serializeJob(job) {
     retryFailedOnly: Boolean(job.retryFailedOnly),
     cacheHits: Number(job.cacheHits || 0),
     adaptiveBatchSize: Number(job.adaptiveBatchSize || 0),
-    strategy: getAnalysisStrategySnapshot(job.settings, job),
     total: job.total,
     completed: job.completed,
     failed: job.failed,
@@ -1190,10 +1364,22 @@ function serializeJob(job) {
       completedAt: item.completedAt || "",
     })),
   };
+
+  if (job.type === "analysis") {
+    payload.strategy = getAnalysisStrategySnapshot(job.settings, job);
+  }
+
+  if (job.type === "ocr") {
+    payload.phase = job.phase || "";
+    payload.message = job.message || "";
+    payload.ocr = job.ocr || null;
+  }
+
+  return payload;
 }
 
 function serializeJobSummary(job) {
-  return {
+  const payload = {
     id: job.id,
     type: job.type,
     paperId: job.paperId,
@@ -1201,7 +1387,6 @@ function serializeJobSummary(job) {
     status: job.status,
     retryFailedOnly: Boolean(job.retryFailedOnly),
     cacheHits: Number(job.cacheHits || 0),
-    strategy: getAnalysisStrategySnapshot(job.settings, job),
     total: job.total,
     completed: job.completed,
     failed: job.failed,
@@ -1212,6 +1397,18 @@ function serializeJobSummary(job) {
     completedAt: job.completedAt || "",
     updatedAt: job.updatedAt,
   };
+
+  if (job.type === "analysis") {
+    payload.strategy = getAnalysisStrategySnapshot(job.settings, job);
+  }
+
+  if (job.type === "ocr") {
+    payload.phase = job.phase || "";
+    payload.message = job.message || "";
+    payload.ocr = job.ocr || null;
+  }
+
+  return payload;
 }
 
 function getRunningJobItemCount(job) {
@@ -1289,7 +1486,11 @@ async function runJobWorker() {
   jobStore.controllers.set(job.id, controller);
 
   try {
-    await runAnalysisJob(job, controller.signal);
+    if (job.type === "ocr") {
+      await runOcrJob(job, controller.signal);
+    } else {
+      await runAnalysisJob(job, controller.signal);
+    }
   } finally {
     jobStore.controllers.delete(job.id);
     jobStore.activeJobId = null;
@@ -1344,6 +1545,245 @@ async function runAnalysisJob(job, signal) {
     job.status = "done";
     job.completedAt = finishedAt;
   }
+}
+
+async function runOcrJob(job, signal) {
+  const now = new Date().toISOString();
+  const item = job.items[0] || {
+    paragraphId: "__ocr__",
+    status: "queued",
+    attempts: 0,
+    error: "",
+    startedAt: "",
+    completedAt: "",
+  };
+  job.items = [item];
+  job.status = "running";
+  job.startedAt ||= now;
+  job.updatedAt = now;
+  job.phase = "diagnose";
+  job.message = "正在检查本机 OCRmyPDF/Tesseract";
+  item.status = "running";
+  item.startedAt ||= now;
+  item.attempts = Number(item.attempts || 0) + 1;
+  await persistJobs();
+
+  try {
+    await updatePaperOcrStatus(job.paperId, {
+      status: "running",
+      needed: true,
+      jobId: job.id,
+      language: OCR_LANGUAGE,
+      startedAt: job.startedAt,
+      error: "",
+    });
+
+    const diagnostics = await getOcrToolDiagnostics();
+    if (!diagnostics.available) {
+      const error = new Error(diagnostics.message);
+      error.ocrReason = "missing-tool";
+      throw error;
+    }
+
+    const paper = await loadPaper(job.paperId);
+    if (!isPaperOcrRequired(paper)) {
+      const finishedAt = new Date().toISOString();
+      item.status = "done";
+      item.completedAt = finishedAt;
+      job.status = "done";
+      job.completed = 1;
+      job.failed = 0;
+      job.phase = "done";
+      job.message = "这篇 PDF 已有可阅读文本，不需要 OCR。";
+      job.completedAt = finishedAt;
+      job.updatedAt = finishedAt;
+      await persistJobs();
+      return;
+    }
+
+    const outputPdfPath = buildOcrOutputPdfPath(paper);
+    job.phase = "ocr";
+    job.message = `OCRmyPDF 正在处理 PDF · language=${OCR_LANGUAGE}`;
+    job.ocr = {
+      ...(job.ocr || {}),
+      language: OCR_LANGUAGE,
+      tool: diagnostics.version || "ocrmypdf",
+      outputPdfPath,
+    };
+    job.updatedAt = new Date().toISOString();
+    await persistJobs();
+
+    await runOcrMyPdf(paper.pdfPath, outputPdfPath, signal);
+
+    if (signal.aborted || job.cancelRequested) {
+      throw createAbortError("OCR 任务已停止。");
+    }
+
+    job.phase = "extract";
+    job.message = "OCR 完成，正在重新提取文本和页面结构";
+    job.updatedAt = new Date().toISOString();
+    await persistJobs();
+
+    const assetDir = path.join(ASSET_DIR, paper.id);
+    const extraction = await extractPdfText(outputPdfPath, assetDir, `/assets/${paper.id}`);
+    const nextPaper = buildPaperRecord({
+      id: paper.id,
+      filename: paper.filename,
+      pdfPath: outputPdfPath,
+      extraction,
+    });
+    mergePaperMetadataAfterOcr(paper, nextPaper);
+    nextPaper.originalPdfPath = paper.originalPdfPath || paper.pdfPath;
+    nextPaper.ocr = buildPaperOcrStatus(nextPaper, {
+      needed: false,
+      status: "done",
+      reason: "ocr-completed",
+      detectedAt: paper.ocr?.detectedAt || new Date().toISOString(),
+      jobId: job.id,
+      language: OCR_LANGUAGE,
+      tool: diagnostics.version || "ocrmypdf",
+      startedAt: job.startedAt,
+      completedAt: new Date().toISOString(),
+      outputPdfPath,
+      error: "",
+    });
+
+    if (!getReadingParagraphs(nextPaper).length) {
+      markPaperNeedsOcr(nextPaper);
+      nextPaper.ocr = buildPaperOcrStatus(nextPaper, {
+        needed: true,
+        status: "failed",
+        reason: "ocr-produced-no-readable-text",
+        detectedAt: paper.ocr?.detectedAt || new Date().toISOString(),
+        jobId: job.id,
+        language: OCR_LANGUAGE,
+        tool: diagnostics.version || "ocrmypdf",
+        startedAt: job.startedAt,
+        completedAt: new Date().toISOString(),
+        outputPdfPath,
+        error: "OCR 完成后仍没有提取到可阅读文本，请检查 PDF 是否为照片质量过低、语言包是否正确，或手动 OCR 后重新上传。",
+      });
+      await savePaper(nextPaper);
+      throw new Error(nextPaper.ocr.error);
+    }
+
+    await savePaper(nextPaper);
+
+    const finishedAt = new Date().toISOString();
+    item.status = "done";
+    item.completedAt = finishedAt;
+    job.status = "done";
+    job.completed = 1;
+    job.failed = 0;
+    job.phase = "done";
+    job.message = `OCR 完成：重新提取 ${getReadingParagraphs(nextPaper).length} 个段落`;
+    job.completedAt = finishedAt;
+    job.updatedAt = finishedAt;
+    await persistJobs();
+  } catch (error) {
+    const finishedAt = new Date().toISOString();
+    const canceled = signal.aborted || job.cancelRequested || error.name === "AbortError";
+    item.status = canceled ? "canceled" : "error";
+    item.error = canceled ? "" : error.message;
+    item.completedAt = finishedAt;
+    job.status = canceled ? "canceled" : "error";
+    job.completed = 0;
+    job.failed = canceled ? 0 : 1;
+    job.phase = canceled ? "canceled" : "error";
+    job.error = canceled ? "" : error.message;
+    job.message = canceled ? "OCR 任务已停止。" : error.message;
+    job.completedAt = finishedAt;
+    job.updatedAt = finishedAt;
+    await updatePaperOcrStatus(job.paperId, {
+      status: canceled ? "required" : "failed",
+      needed: true,
+      reason: error.ocrReason || "ocr-failed",
+      jobId: job.id,
+      language: OCR_LANGUAGE,
+      completedAt: finishedAt,
+      error: canceled ? "" : error.message,
+    }).catch(() => {});
+    await persistJobs();
+  }
+}
+
+async function updatePaperOcrStatus(paperId, patch) {
+  const paper = await loadPaper(paperId);
+  paper.status = patch.needed === false ? "ready" : "needs_ocr";
+  paper.segmentationMode = patch.needed === false
+    ? paper.segmentationMode === "ocr-required" ? "heuristic" : paper.segmentationMode
+    : "ocr-required";
+  paper.ocr = buildPaperOcrStatus(paper, {
+    ...(paper.ocr || {}),
+    ...patch,
+    needed: patch.needed !== undefined ? patch.needed : true,
+  });
+  await savePaper(paper);
+  return paper;
+}
+
+async function getOcrToolDiagnostics() {
+  try {
+    const version = await execFileText("ocrmypdf", ["--version"], {
+      cwd: __dirname,
+      timeout: 10_000,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    return {
+      available: true,
+      version: `ocrmypdf ${version.trim().split(/\r?\n/)[0]}`.trim(),
+    };
+  } catch (error) {
+    return {
+      available: false,
+      message: [
+        "未找到可用的 OCRmyPDF。",
+        "macOS 可运行 brew install ocrmypdf tesseract tesseract-lang；",
+        "Docker 用户请重新 build 镜像；",
+        `当前错误：${error.message}`,
+      ].join(" "),
+    };
+  }
+}
+
+async function runOcrMyPdf(inputPath, outputPath, signal) {
+  const args = [
+    "--skip-text",
+    "--deskew",
+    "--rotate-pages",
+    "-l",
+    OCR_LANGUAGE,
+    inputPath,
+    outputPath,
+  ];
+  await execFileText("ocrmypdf", args, {
+    cwd: __dirname,
+    timeout: OCR_TIMEOUT_MS,
+    maxBuffer: 40 * 1024 * 1024,
+    signal,
+  });
+}
+
+function buildOcrOutputPdfPath(paper) {
+  const sourceBase = path.basename(paper.pdfPath || paper.filename || "paper.pdf", ".pdf")
+    .replace(/[^\w.-]+/g, "_")
+    .slice(0, 80);
+  return path.join(UPLOAD_DIR, `${sourceBase}.ocr-${Date.now()}.pdf`);
+}
+
+function mergePaperMetadataAfterOcr(previousPaper, nextPaper) {
+  nextPaper.favorite = Boolean(previousPaper.favorite);
+  nextPaper.tags = normalizePaperTags(previousPaper.tags);
+  nextPaper.exportHistory = normalizeExportHistory(previousPaper.exportHistory);
+  nextPaper.createdAt = previousPaper.createdAt || nextPaper.createdAt;
+  nextPaper.readingProgress = normalizeReadingProgress(previousPaper.readingProgress || {}, nextPaper);
+  nextPaper.maintenance = previousPaper.maintenance || {};
+}
+
+function createAbortError(message) {
+  const error = new Error(message);
+  error.name = "AbortError";
+  return error;
 }
 
 async function runAnalysisJobItem(job, item, signal) {
@@ -1826,6 +2266,18 @@ function isFatalModelConfigurationError(error) {
 }
 
 async function markRemainingJobItemsCanceled(job) {
+  if (job.type !== "analysis") {
+    for (const item of job.items || []) {
+      if (item.status === "queued" || item.status === "running") {
+        item.status = "canceled";
+        item.completedAt = new Date().toISOString();
+      }
+    }
+    recalculateJobProgress(job);
+    await persistJobs();
+    return;
+  }
+
   for (const item of job.items) {
     if (item.status === "queued" || item.status === "running") {
       item.status = "canceled";
@@ -2843,13 +3295,17 @@ function markPaperNeedsOcr(paper) {
   return paper;
 }
 
+function isPaperOcrRequired(paper) {
+  return Boolean(paper?.ocr?.needed || paper?.status === "needs_ocr" || paper?.segmentationMode === "ocr-required");
+}
+
 function buildPaperOcrStatus(paper, patch = {}) {
   const extractionPages = Array.isArray(paper.extractionPages) ? paper.extractionPages : [];
   const textCharacters = extractionPages.reduce((total, page) =>
     total + String(page.text || "").replace(/\s+/g, "").length, 0);
   const pageImages = Array.isArray(paper.pageImages) ? paper.pageImages : [];
   const readingParagraphs = getReadingParagraphs(paper);
-  return {
+  const status = {
     needed: Boolean(patch.needed),
     status: patch.status || "not_required",
     reason: patch.reason || "",
@@ -2860,6 +3316,31 @@ function buildPaperOcrStatus(paper, patch = {}) {
     readableParagraphCount: readingParagraphs.length,
     recommendation: "请先用 OCRmyPDF/Tesseract 生成可搜索 PDF，再重新上传 OCR 后的 PDF。",
   };
+
+  for (const key of [
+    "jobId",
+    "language",
+    "tool",
+    "queuedAt",
+    "startedAt",
+    "completedAt",
+    "outputPdfPath",
+    "error",
+  ]) {
+    if (patch[key] !== undefined) {
+      status[key] = patch[key];
+    }
+  }
+
+  if (status.status === "queued" || status.status === "running") {
+    status.recommendation = "PaperLens 正在本机 OCR；完成后会自动重新提取文本和段落。";
+  } else if (status.status === "failed") {
+    status.recommendation = "本机 OCR 未完成。请检查 OCRmyPDF/Tesseract 是否安装、语言包是否正确，或手动 OCR 后重新上传。";
+  } else if (status.status === "done") {
+    status.recommendation = "OCR 已完成，PaperLens 已重新提取可阅读文本。";
+  }
+
+  return status;
 }
 
 function normalizePaperOcrStatus(paper) {
