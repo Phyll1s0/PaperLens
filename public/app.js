@@ -12,6 +12,7 @@ const state = {
   jobHistory: [],
   exportQa: null,
   modelDiagnosticReport: null,
+  lastSegmentationError: "",
   progressTimer: null,
   lastProgressParagraphId: "",
   autoAnalyze: {
@@ -924,12 +925,16 @@ async function runPostUploadPipeline() {
 
   let segmentationReady = true;
   if (els.aiSegmentInput.checked) {
+    state.lastSegmentationError = "";
     segmentationReady = await segmentPaperWithAi({ continueOnError: true });
   }
 
   if (els.autoAnalyzeInput.checked) {
     if (!segmentationReady) {
-      setStatus("AI 分段失败，已暂停自动分析。请重新分段后再启动翻译讲解。", true);
+      const reason = state.lastSegmentationError
+        ? `：${state.lastSegmentationError}`
+        : "";
+      setStatus(`AI 分段失败${reason}。已暂停自动分析，请重新分段后再启动翻译讲解。`, true);
       return;
     }
 
@@ -970,8 +975,10 @@ async function segmentPaperWithAi(options = {}) {
     renderPaper();
     loadRecentPapers();
     setStatus(`AI 分段完成：${getReadingParagraphs(state.paper).length} 个段落`);
+    state.lastSegmentationError = "";
     return true;
   } catch (error) {
+    state.lastSegmentationError = error.message || "未知错误";
     const message = `AI 分段失败，继续使用基础分段：${error.message}`;
     setStatus(message, !options.continueOnError);
     return false;

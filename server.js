@@ -9130,11 +9130,13 @@ function callClaudeAgent(settings, messages, options = {}) {
     .filter((message) => message.role !== "system")
     .map((message) => `${message.role.toUpperCase()}:\n${message.content}`)
     .join("\n\n");
+  const safePrompt = sanitizeClaudeCliArgument(prompt);
+  const safeSystemPrompt = sanitizeClaudeCliArgument(systemPrompt);
 
   return new Promise((resolve, reject) => {
     const args = [
       "-p",
-      prompt,
+      safePrompt,
       "--bare",
       "--no-session-persistence",
       "--tools",
@@ -9144,7 +9146,7 @@ function callClaudeAgent(settings, messages, options = {}) {
       "--output-format",
       "json",
       "--system-prompt",
-      systemPrompt,
+      safeSystemPrompt,
       "--max-budget-usd",
       String(settings.agentBudgetUsd || 500),
     ];
@@ -9243,6 +9245,10 @@ function callClaudeAgent(settings, messages, options = {}) {
 
     child.stdin.end();
   });
+}
+
+function sanitizeClaudeCliArgument(value) {
+  return String(value || "").replace(/\0/g, "");
 }
 
 function buildCommandPath() {
