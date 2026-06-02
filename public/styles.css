@@ -150,7 +150,7 @@ body.auth-locked .app-shell {
 
 .service-status {
   display: none;
-  margin: -10px 0 14px;
+  margin: 0;
   gap: 8px;
   padding: 10px;
   border: 1px solid #dfe7e2;
@@ -159,6 +159,37 @@ body.auth-locked .app-shell {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.45;
+}
+
+.service-status-panel {
+  margin-top: 14px;
+  border: 1px solid rgba(216, 222, 217, 0.95);
+  border-radius: 8px;
+  background: #fbfcfa;
+}
+
+.service-status-panel summary {
+  min-height: 36px;
+  padding: 9px 10px;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 800;
+  list-style-position: inside;
+}
+
+.service-status-panel.warn summary {
+  color: #7a3d20;
+}
+
+.service-status-panel.error summary {
+  color: var(--danger);
+}
+
+.service-status-panel .service-status {
+  border: 0;
+  border-top: 1px solid rgba(216, 222, 217, 0.95);
+  border-radius: 0 0 8px 8px;
 }
 
 .service-status.visible {

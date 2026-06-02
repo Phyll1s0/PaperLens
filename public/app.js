@@ -65,6 +65,8 @@ const els = {
   modelDiagnosticsText: document.querySelector("#modelDiagnosticsText"),
   providerHintText: document.querySelector("#providerHintText"),
   providerGuide: document.querySelector("#providerGuide"),
+  serviceStatusPanel: document.querySelector("#serviceStatusPanel"),
+  serviceStatusSummary: document.querySelector("#serviceStatusSummary"),
   serviceStatusText: document.querySelector("#serviceStatusText"),
   diagnosticButton: document.querySelector("#diagnosticButton"),
   diagnosticReport: document.querySelector("#diagnosticReport"),
@@ -1450,6 +1452,18 @@ function truncateServiceText(text, maxLength) {
 
 function renderServiceStatus(status) {
   const visible = Boolean(status.title || status.text);
+  if (els.serviceStatusPanel) {
+    els.serviceStatusPanel.classList.toggle("visible", visible);
+    els.serviceStatusPanel.classList.toggle("ok", status.level === "ok");
+    els.serviceStatusPanel.classList.toggle("warn", status.level === "warn");
+    els.serviceStatusPanel.classList.toggle("error", status.level === "error");
+  }
+  if (els.serviceStatusSummary) {
+    els.serviceStatusSummary.textContent = visible
+      ? `服务状态 · ${status.title || "已同步"}`
+      : "服务状态";
+  }
+
   els.serviceStatusText.classList.toggle("visible", visible);
   els.serviceStatusText.classList.toggle("ok", status.level === "ok");
   els.serviceStatusText.classList.toggle("warn", status.level === "warn");

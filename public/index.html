@@ -29,7 +29,6 @@
             <p id="paperMeta">未载入论文</p>
           </div>
         </div>
-        <div id="serviceStatusText" class="service-status" aria-live="polite"></div>
 
         <section class="panel">
           <h2>模型</h2>
@@ -115,6 +114,11 @@
           <button id="rebuildAllVisualButton" class="secondary-button full-width" type="button" title="批量重建本地论文库的图片、公式和代码裁剪">重建全部图表</button>
           <div id="paperList" class="paper-list"></div>
         </section>
+
+        <details id="serviceStatusPanel" class="service-status-panel">
+          <summary><span id="serviceStatusSummary">服务状态</span></summary>
+          <div id="serviceStatusText" class="service-status" aria-live="polite"></div>
+        </details>
 
         <nav class="outline" id="outline"></nav>
       </aside>
