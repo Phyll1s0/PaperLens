@@ -10,6 +10,7 @@ const state = {
   paragraphEditBusyId: null,
   pipelineBusy: false,
   jobHistory: [],
+  exportQa: null,
   progressTimer: null,
   lastProgressParagraphId: "",
   autoAnalyze: {
@@ -93,6 +94,7 @@ const els = {
   resumeAnalyzeButton: document.querySelector("#resumeAnalyzeButton"),
   downloadNotesButton: document.querySelector("#downloadNotesButton"),
   downloadDocxButton: document.querySelector("#downloadDocxButton"),
+  exportQaButton: document.querySelector("#exportQaButton"),
   rerunAnalyzeButton: document.querySelector("#rerunAnalyzeButton"),
   stopAutoButton: document.querySelector("#stopAutoButton"),
   jobHistory: document.querySelector("#jobHistory"),
@@ -171,6 +173,7 @@ function bindEvents() {
   els.resumeAnalyzeButton.addEventListener("click", resumeMissingAnalysis);
   els.downloadNotesButton.addEventListener("click", downloadPaperNotes);
   els.downloadDocxButton.addEventListener("click", downloadPaperDocx);
+  els.exportQaButton.addEventListener("click", runExportQa);
   els.rerunAnalyzeButton.addEventListener("click", rerunFullPipeline);
   els.stopAutoButton.addEventListener("click", stopAutoAnalyze);
   els.providerSelect.addEventListener("change", () => {
@@ -874,6 +877,7 @@ async function uploadPdf() {
     const paper = await readResponse(response);
     state.paper = paper;
     state.query = "";
+    state.exportQa = null;
     els.searchInput.value = "";
     setStatus(isOcrRequiredPaper(paper)
       ? "检测到扫描版 PDF：需要先 OCR，再进行分段和讲解。"
@@ -991,6 +995,7 @@ async function openPaper(paperId) {
     state.paper = await readResponse(response);
     resetAnalysisJobState();
     state.query = "";
+    state.exportQa = null;
     state.showHiddenParagraphs = false;
     state.lastProgressParagraphId = state.paper.readingProgress?.paragraphId || "";
     els.searchInput.value = "";
@@ -1605,6 +1610,44 @@ function downloadPaperDocx() {
   link.remove();
   setStatus("正在下载 Word 文档");
   refreshPaperSoon();
+}
+
+async function runExportQa() {
+  if (!state.paper) {
+    return;
+  }
+
+  els.exportQaButton.disabled = true;
+  els.exportQaButton.textContent = "检查中";
+  setStatus("正在检查导出质量");
+
+  try {
+    const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}/export-qa`, {}, "导出检查");
+    const result = await readResponse(response);
+    state.exportQa = result;
+    renderPaper();
+    setStatus(formatExportQaStatus(result), result.status === "error");
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    updateAutoButtons();
+  }
+}
+
+function formatExportQaStatus(result) {
+  const summary = result?.summary || {};
+  if (result?.status === "ok") {
+    return `导出检查通过：${summary.readingParagraphs || 0} 段、${summary.checkedArtifacts || 0} 个图表`;
+  }
+
+  const severityLabel = result?.status === "error" ? "发现错误" : "发现提示";
+  return [
+    `导出检查${severityLabel} ${summary.issueCount || 0} 项`,
+    `未完成 ${summary.unfinishedParagraphs || 0}`,
+    `坏引用 ${summary.brokenArtifactRefs || 0}`,
+    `图片问题 ${(summary.missingArtifactCrops || 0) + (summary.missingAssetFiles || 0) + (summary.lowConfidenceCrops || 0)}`,
+    `LaTeX ${summary.latexRisks || 0}`,
+  ].join(" · ");
 }
 
 async function rerunFullPipeline() {
@@ -2426,6 +2469,10 @@ function renderParagraphs(paper) {
   let lastSectionId = "";
   let lastPageNumber = 0;
 
+  if (state.exportQa?.paperId === paper.id) {
+    fragment.append(renderExportQaPanel(state.exportQa));
+  }
+
   for (const paragraph of paragraphs) {
     if (paragraph.pageNumber !== lastPageNumber) {
       const pageImage = getPageImage(paper, paragraph.pageNumber);
@@ -2447,6 +2494,148 @@ function renderParagraphs(paper) {
   }
 
   els.paragraphList.replaceChildren(fragment);
+}
+
+function renderExportQaPanel(result) {
+  const panel = document.createElement("section");
+  panel.className = `export-qa-panel ${result.status || "warn"}`;
+
+  const header = document.createElement("div");
+  header.className = "export-qa-header";
+
+  const titleWrap = document.createElement("div");
+  const title = document.createElement("h3");
+  title.textContent = "导出检查";
+  const meta = document.createElement("p");
+  meta.textContent = formatExportQaPanelMeta(result);
+  titleWrap.append(title, meta);
+
+  const badge = document.createElement("span");
+  badge.className = "export-qa-badge";
+  badge.textContent = getExportQaStatusLabel(result.status);
+  header.append(titleWrap, badge);
+  panel.append(header);
+
+  const summary = document.createElement("div");
+  summary.className = "export-qa-summary";
+  for (const item of getExportQaSummaryItems(result.summary || {})) {
+    const chip = document.createElement("span");
+    chip.textContent = `${item.label} ${item.value}`;
+    summary.append(chip);
+  }
+  panel.append(summary);
+
+  const issues = Array.isArray(result.issues) ? result.issues : [];
+  if (!issues.length) {
+    const empty = document.createElement("p");
+    empty.className = "export-qa-empty";
+    empty.textContent = "导出前检查通过。";
+    panel.append(empty);
+    return panel;
+  }
+
+  const list = document.createElement("div");
+  list.className = "export-qa-issues";
+  for (const issue of issues.slice(0, 12)) {
+    list.append(renderExportQaIssue(issue));
+  }
+  panel.append(list);
+
+  if (issues.length > 12) {
+    const more = document.createElement("p");
+    more.className = "export-qa-more";
+    more.textContent = `还有 ${issues.length - 12} 项问题未展开。`;
+    panel.append(more);
+  }
+
+  return panel;
+}
+
+function renderExportQaIssue(issue) {
+  const row = document.createElement("div");
+  row.className = `export-qa-issue ${issue.severity || "warn"}`;
+
+  const marker = document.createElement("span");
+  marker.className = "export-qa-marker";
+  marker.textContent = issue.severity === "error" ? "错误" : "提示";
+
+  const body = document.createElement("div");
+  body.className = "export-qa-issue-body";
+  const message = document.createElement("strong");
+  message.textContent = issue.message || "导出风险";
+  const context = document.createElement("p");
+  context.textContent = formatExportQaIssueContext(issue);
+  body.append(message, context);
+
+  row.append(marker, body);
+  if (issue.paragraphId) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary-button export-qa-locate";
+    button.textContent = "定位";
+    button.addEventListener("click", () => {
+      document.querySelector(`#${CSS.escape(issue.paragraphId)}`)?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+    });
+    row.append(button);
+  }
+
+  return row;
+}
+
+function formatExportQaPanelMeta(result) {
+  const checkedAt = result.checkedAt ? new Date(result.checkedAt) : null;
+  const timeLabel = checkedAt && Number.isFinite(checkedAt.getTime())
+    ? checkedAt.toLocaleString()
+    : "";
+  const summary = result.summary || {};
+  return [
+    `${summary.issueCount || 0} 项问题`,
+    `${summary.readingParagraphs || 0} 个正文段落`,
+    timeLabel,
+  ].filter(Boolean).join(" · ");
+}
+
+function getExportQaStatusLabel(status) {
+  if (status === "ok") {
+    return "通过";
+  }
+  if (status === "error") {
+    return "需处理";
+  }
+  return "可优化";
+}
+
+function getExportQaSummaryItems(summary) {
+  return [
+    { label: "未完成", value: summary.unfinishedParagraphs || 0 },
+    { label: "坏引用", value: summary.brokenArtifactRefs || 0 },
+    { label: "缺裁剪", value: summary.missingArtifactCrops || 0 },
+    { label: "低置信图", value: summary.lowConfidenceCrops || 0 },
+    { label: "资源缺失", value: summary.missingAssetFiles || 0 },
+    { label: "LaTeX", value: summary.latexRisks || 0 },
+  ];
+}
+
+function formatExportQaIssueContext(issue) {
+  const parts = [];
+  if (issue.paragraphOrder) {
+    parts.push(`P${issue.paragraphOrder}`);
+  }
+  if (issue.pageNumber) {
+    parts.push(`第 ${issue.pageNumber} 页`);
+  }
+  if (issue.artifactLabel) {
+    parts.push(issue.artifactLabel);
+  } else if (issue.artifactId) {
+    parts.push(issue.artifactId);
+  }
+  if (issue.recommendation) {
+    parts.push(issue.recommendation);
+  }
+  return parts.join(" · ") || issue.type || "";
 }
 
 function getPageImage(paper, pageNumber) {
@@ -4129,6 +4318,8 @@ function updateAutoButtons() {
     : "补跑未完成";
   els.downloadNotesButton.disabled = !state.paper;
   els.downloadDocxButton.disabled = !state.paper;
+  els.exportQaButton.disabled = !state.paper || busy;
+  els.exportQaButton.textContent = "导出检查";
   els.rerunAnalyzeButton.disabled = !state.paper || busy || ocrRequired;
   els.rebuildVisualButton.disabled = !state.paper || busy;
   els.rebuildVisualButton.textContent = state.maintenanceBusy ? "重建中" : "重建图表";
