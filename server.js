@@ -113,6 +113,11 @@ const server = http.createServer(async (req, res) => {
       return json(res, await listPapers());
     }
 
+    const exportMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/export\.md$/);
+    if (req.method === "GET" && exportMatch) {
+      return await handleExportPaperMarkdown(res, exportMatch[1]);
+    }
+
     const segmentMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/segment$/);
     if (req.method === "POST" && segmentMatch) {
       return await handleSegmentPaper(req, res, segmentMatch[1]);
@@ -222,6 +227,19 @@ async function handleUpload(req, res) {
 
   await savePaper(paper);
   return json(res, paper);
+}
+
+async function handleExportPaperMarkdown(res, paperId) {
+  const paper = await loadPaper(paperId);
+  const markdown = buildPaperMarkdownExport(paper);
+  const filename = `${sanitizeDownloadFilename(paper.title || paper.filename || paper.id)}.md`;
+
+  res.writeHead(200, {
+    "content-type": "text/markdown; charset=utf-8",
+    "content-disposition": `attachment; filename="${filename}"`,
+    "cache-control": "no-store",
+  });
+  res.end(markdown);
 }
 
 async function handleSegmentPaper(req, res, paperId) {
@@ -2121,6 +2139,123 @@ function buildPaperRecord({ id, filename, pdfPath, extraction }) {
 
   attachParagraphArtifactLinks(paper);
   return paper;
+}
+
+function buildPaperMarkdownExport(paper) {
+  const title = normalizeExportLine(paper.title || paper.filename || "PaperLens Notes");
+  const sectionsById = new Map((paper.sections || []).map((section) => [section.id, section]));
+  const artifactsById = new Map((paper.pageArtifacts || []).map((artifact) => [artifact.id, artifact]));
+  const lines = [
+    `# ${escapeMarkdownHeading(title)}`,
+    "",
+    `- 文件：${normalizeExportLine(paper.filename || "") || "未知"}`,
+    `- 页数：${paper.pageCount || "未知"}`,
+    `- 段落数：${(paper.paragraphs || []).filter((paragraph) => isReadingParagraphForPaper(paper, paragraph)).length}`,
+    `- 导出时间：${new Date().toISOString()}`,
+    "",
+  ];
+
+  let currentSectionTitle = "";
+  for (const paragraph of paper.paragraphs || []) {
+    if (paragraph.kind === "heading") {
+      const heading = normalizeExportLine(paragraph.sourceText || "");
+      if (heading) {
+        currentSectionTitle = heading;
+        lines.push(`## ${escapeMarkdownHeading(heading)}`, "");
+      }
+      continue;
+    }
+
+    if (!isReadingParagraphForPaper(paper, paragraph)) {
+      continue;
+    }
+
+    const section = sectionsById.get(paragraph.sectionId);
+    const sectionTitle = normalizeExportLine(section?.title || paragraph.sectionTitleHint || "");
+    if (sectionTitle && sectionTitle !== "正文" && sectionTitle !== currentSectionTitle) {
+      currentSectionTitle = sectionTitle;
+      lines.push(`## ${escapeMarkdownHeading(sectionTitle)}`, "");
+    }
+
+    const pageLabel = formatExportPageRange(paragraph);
+    lines.push(`### P${Number(paragraph.order || 0) + 1}${pageLabel ? ` · ${pageLabel}` : ""}`, "");
+    appendMarkdownBlock(lines, "原文", paragraph.sourceText);
+    appendMarkdownBlock(lines, "翻译", paragraph.translation || "尚未生成");
+    appendMarkdownBlock(lines, "讲解", paragraph.explanation || "尚未生成");
+
+    const keyTerms = normalizeKeywordList(paragraph.keyTerms).slice(0, 12);
+    if (keyTerms.length) {
+      lines.push(`**术语：** ${keyTerms.map((term) => `\`${escapeMarkdownInline(term)}\``).join(" ")}`, "");
+    }
+
+    const relatedArtifacts = (Array.isArray(paragraph.relatedArtifactIds) ? paragraph.relatedArtifactIds : [])
+      .map((id) => artifactsById.get(id))
+      .filter(Boolean);
+    if (relatedArtifacts.length) {
+      lines.push("**相关图表：**");
+      for (const artifact of relatedArtifacts) {
+        const label = normalizeExportLine(artifact.label || artifact.visualType || artifact.type || "图表");
+        const imagePath = normalizeExportLine(artifact.imagePath || "");
+        const caption = normalizeExportBlock(artifact.text || "");
+        lines.push(`- ${escapeMarkdownInline(label)}${imagePath ? `：${imagePath}` : ""}`);
+        if (caption) {
+          lines.push(`  ${caption}`);
+        }
+      }
+      lines.push("");
+    }
+  }
+
+  return `${lines.join("\n").replace(/\n{4,}/g, "\n\n\n").trim()}\n`;
+}
+
+function appendMarkdownBlock(lines, label, text) {
+  const clean = normalizeExportBlock(text);
+  if (!clean) {
+    return;
+  }
+
+  lines.push(`**${label}**`, "", clean, "");
+}
+
+function formatExportPageRange(paragraph) {
+  const start = Number(paragraph.pageNumber || 0);
+  const end = Number(paragraph.pageEndNumber || start);
+  if (!start) {
+    return "";
+  }
+
+  return end && end !== start ? `p.${start}-${end}` : `p.${start}`;
+}
+
+function normalizeExportLine(text) {
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeExportBlock(text) {
+  return String(text || "")
+    .replace(/\r/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function escapeMarkdownHeading(text) {
+  return escapeMarkdownInline(text).replace(/^#+\s*/, "");
+}
+
+function escapeMarkdownInline(text) {
+  return String(text || "").replace(/([\\`*_{}\[\]()#+.!|-])/g, "\\$1");
+}
+
+function sanitizeDownloadFilename(text) {
+  const clean = String(text || "")
+    .replace(/\.pdf$/i, "")
+    .replace(/[^\w.-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 96);
+  return clean || "paperlens-notes";
 }
 
 function enhancePagesWithVisualStructure(pages) {
