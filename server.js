@@ -115,7 +115,12 @@ const server = http.createServer(async (req, res) => {
 
     const exportMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/export\.md$/);
     if (req.method === "GET" && exportMatch) {
-      return await handleExportPaperMarkdown(res, exportMatch[1]);
+      return await handleExportPaperMarkdown(req, res, exportMatch[1]);
+    }
+
+    const artifactCropMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/artifacts\/([^/]+)\/crop\.svg$/);
+    if (req.method === "GET" && artifactCropMatch) {
+      return await handleArtifactCropSvg(req, res, artifactCropMatch[1], artifactCropMatch[2]);
     }
 
     const segmentMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/segment$/);
@@ -229,9 +234,9 @@ async function handleUpload(req, res) {
   return json(res, paper);
 }
 
-async function handleExportPaperMarkdown(res, paperId) {
+async function handleExportPaperMarkdown(req, res, paperId) {
   const paper = await loadPaper(paperId);
-  const markdown = buildPaperMarkdownExport(paper);
+  const markdown = buildPaperMarkdownExport(paper, getRequestBaseUrl(req));
   const filename = `${sanitizeDownloadFilename(paper.title || paper.filename || paper.id)}.md`;
 
   res.writeHead(200, {
@@ -240,6 +245,25 @@ async function handleExportPaperMarkdown(res, paperId) {
     "cache-control": "no-store",
   });
   res.end(markdown);
+}
+
+async function handleArtifactCropSvg(req, res, paperId, artifactId) {
+  const paper = await loadPaper(paperId);
+  const artifact = (paper.pageArtifacts || []).find((item) => item.id === artifactId);
+  if (!artifact) {
+    return json(res, { error: "Artifact not found." }, 404);
+  }
+
+  const svg = buildArtifactCropSvg(artifact, getRequestBaseUrl(req));
+  if (!svg) {
+    return json(res, { error: "Artifact crop is not available." }, 404);
+  }
+
+  res.writeHead(200, {
+    "content-type": "image/svg+xml; charset=utf-8",
+    "cache-control": "no-store",
+  });
+  res.end(svg);
 }
 
 async function handleSegmentPaper(req, res, paperId) {
@@ -2141,7 +2165,7 @@ function buildPaperRecord({ id, filename, pdfPath, extraction }) {
   return paper;
 }
 
-function buildPaperMarkdownExport(paper) {
+function buildPaperMarkdownExport(paper, baseUrl = "") {
   const title = normalizeExportLine(paper.title || paper.filename || "PaperLens Notes");
   const sectionsById = new Map((paper.sections || []).map((section) => [section.id, section]));
   const artifactsById = new Map((paper.pageArtifacts || []).map((artifact) => [artifact.id, artifact]));
@@ -2197,7 +2221,11 @@ function buildPaperMarkdownExport(paper) {
         const label = normalizeExportLine(artifact.label || artifact.visualType || artifact.type || "图表");
         const imagePath = normalizeExportLine(artifact.imagePath || "");
         const caption = normalizeExportBlock(artifact.text || "");
+        const cropUrl = getExportArtifactCropUrl(paper, artifact, baseUrl);
         lines.push(`- ${escapeMarkdownInline(label)}${imagePath ? `：${imagePath}` : ""}`);
+        if (cropUrl) {
+          lines.push(`  ![${escapeMarkdownImageAlt(label)}](${cropUrl})`);
+        }
         if (caption) {
           lines.push(`  ${caption}`);
         }
@@ -2207,6 +2235,62 @@ function buildPaperMarkdownExport(paper) {
   }
 
   return `${lines.join("\n").replace(/\n{4,}/g, "\n\n\n").trim()}\n`;
+}
+
+function getExportArtifactCropUrl(paper, artifact, baseUrl = "") {
+  if (!artifact?.crop || !artifact.imagePath) {
+    return "";
+  }
+
+  const prefix = String(baseUrl || "").replace(/\/+$/, "");
+  const paperId = encodeURIComponent(paper.id);
+  const artifactId = encodeURIComponent(artifact.id);
+  return `${prefix}/api/papers/${paperId}/artifacts/${artifactId}/crop.svg`;
+}
+
+function buildArtifactCropSvg(artifact, baseUrl = "") {
+  const crop = artifact.crop || {};
+  const x = Number(crop.x);
+  const y = Number(crop.y);
+  const width = Number(crop.width);
+  const height = Number(crop.height);
+  const pageWidth = Number(crop.pageWidth || artifact.pageWidth);
+  const pageHeight = Number(crop.pageHeight || artifact.pageHeight);
+  if (![x, y, width, height, pageWidth, pageHeight].every(Number.isFinite) ||
+    width <= 0 || height <= 0 || pageWidth <= 0 || pageHeight <= 0 || !artifact.imagePath) {
+    return "";
+  }
+
+  const imageUrl = toAbsolutePublicUrl(artifact.imagePath, baseUrl);
+  const label = normalizeExportLine(artifact.label || artifact.visualType || artifact.type || "PaperLens crop");
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${formatSvgNumber(width)}" height="${formatSvgNumber(height)}" viewBox="${formatSvgNumber(x)} ${formatSvgNumber(y)} ${formatSvgNumber(width)} ${formatSvgNumber(height)}" role="img" aria-label="${escapeXmlAttribute(label)}">`,
+    `<title>${escapeXmlText(label)}</title>`,
+    `<image href="${escapeXmlAttribute(imageUrl)}" x="0" y="0" width="${formatSvgNumber(pageWidth)}" height="${formatSvgNumber(pageHeight)}" preserveAspectRatio="none"/>`,
+    "</svg>",
+  ].join("\n");
+}
+
+function toAbsolutePublicUrl(value, baseUrl = "") {
+  const url = String(value || "");
+  if (/^https?:\/\//i.test(url)) {
+    return url;
+  }
+
+  const prefix = String(baseUrl || "").replace(/\/+$/, "");
+  return `${prefix}${url.startsWith("/") ? url : `/${url}`}`;
+}
+
+function getRequestBaseUrl(req) {
+  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+  const proto = forwardedProto || (req.socket?.encrypted ? "https" : "http");
+  const host = req.headers["x-forwarded-host"] || req.headers.host || `${HOST}:${PORT}`;
+  return `${proto}://${String(host).split(",")[0].trim()}`;
+}
+
+function formatSvgNumber(value) {
+  return Number(value).toFixed(3).replace(/\.?0+$/, "");
 }
 
 function appendMarkdownBlock(lines, label, text) {
@@ -2245,8 +2329,25 @@ function escapeMarkdownHeading(text) {
   return escapeMarkdownInline(text).replace(/^#+\s*/, "");
 }
 
+function escapeMarkdownImageAlt(text) {
+  return String(text || "").replace(/[\]\n\r]/g, " ").trim();
+}
+
 function escapeMarkdownInline(text) {
   return String(text || "").replace(/([\\`*_{}\[\]()#+.!|-])/g, "\\$1");
+}
+
+function escapeXmlText(text) {
+  return String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function escapeXmlAttribute(text) {
+  return escapeXmlText(text)
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
 }
 
 function sanitizeDownloadFilename(text) {
