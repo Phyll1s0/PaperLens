@@ -32,7 +32,7 @@ Updated: 2026-06-02
 - [x] JSON 持久化加固：论文、Job、加密 Secrets 走原子写入；论文/Job 保存后生成最近备份，读取损坏时自动从最新有效备份恢复；health 暴露 persistence 状态。
 - [x] 分段编辑闭环：段落卡片支持隐藏/恢复、合并下段、用 `||` 拆分、改章节；后端保存人工覆盖，重建章节上下文和图表引用，只清空变动段落的旧分析。
 - [x] Provider 代理传输升级：OpenAI-compatible 请求不再依赖普通 `fetch` 的代理能力，后端可通过 HTTP CONNECT 或 SOCKS5 tunnel 发起模型请求，诊断页显示传输模式和代理来源。
-- [x] Provider 配置向导：把 Claude Code、Kimi、DeepSeek、代理和 Docker 环境差异做成更明确的检测与修复建议。
+- [x] Provider 教程入口：把 Claude Code、Kimi、DeepSeek、代理和 Docker 环境差异收进模型面板教程，并给出检测与修复建议。
 - [x] 部署安全基础层：可用 `PAPERLENS_ACCESS_TOKEN` 开启登录保护，API/导出/assets 需要 Cookie，health 显示公网风险，`data/secrets.json` 可加密保存。
 - [x] 内置 OCR Job：扫描版 PDF 可在页面启动本机 OCR，后台队列调用 OCRmyPDF/Tesseract，完成后自动重新提取文本、段落和视觉结构。
 - [x] 服务运行状态收敛：health schema v2 暴露后端版本、启动信息、源码/静态文件更新时间和 Job Queue 快照，页面会在旧进程/旧前端时显示修复命令。
@@ -44,7 +44,7 @@ Updated: 2026-06-02
 - [x] PDF 视觉资产交互升级：图片、公式、代码块裁剪支持定位整页、放大查看、下载和更清晰的相关段落入口。
 - [x] LaTeX/公式渲染修复：兼容常见 `$...$`、`\(...\)`、`\[...\]`、残缺公式和解释文本中的 Markdown/LaTeX 混排。
 - [x] 长任务断线恢复提示：`fail to fetch`、刷新、网络短断时明确提示后端任务仍在继续，并自动同步活跃 Job。
-- [x] 开源易用性：首次配置向导、一键启动脚本、Docker Compose 模板完善。
+- [x] 开源易用性：首次配置教程、一键启动脚本、Docker Compose 模板完善。
 - [x] 论文库能力：标签、收藏、全文搜索、阅读进度和导出历史。
 - [x] 速度优化：缓存已完成段落、失败段落小批次、Provider 分流策略。
 - [x] 导出格式升级：支持 `.docx`，保留章节、段落、图片和术语。

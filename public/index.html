@@ -33,6 +33,11 @@
 
         <section class="panel">
           <h2>模型</h2>
+          <details class="model-tutorial">
+            <summary>教程</summary>
+            <p id="providerHintText" class="diagnostics-text"></p>
+            <div id="providerGuide" class="provider-guide" aria-live="polite"></div>
+          </details>
           <label>
             Provider
             <select id="providerSelect">
@@ -71,7 +76,6 @@
           </div>
           <p id="modelStatusText" class="status-text">尚未测试</p>
           <p id="modelDiagnosticsText" class="diagnostics-text"></p>
-          <p id="providerHintText" class="diagnostics-text"></p>
           <div id="diagnosticReport" class="diagnostic-report hidden" aria-live="polite">
             <div class="diagnostic-report-header">
               <strong>Provider 诊断包</strong>
@@ -79,7 +83,6 @@
             </div>
             <pre id="diagnosticReportText"></pre>
           </div>
-          <div id="providerGuide" class="provider-guide" aria-live="polite"></div>
         </section>
 
         <section class="panel">

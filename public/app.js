@@ -647,7 +647,7 @@ function getProviderGuide(settings, diagnostics) {
   items.push(...getProviderSpecificGuideItems(settings, diagnostics, { keyOk, isClaudeProvider }));
 
   return {
-    title: "配置向导",
+    title: providerLabel,
     summary: getProviderGuideSummary(settings, diagnostics),
     chips,
     items,
