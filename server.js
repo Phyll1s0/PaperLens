@@ -106,6 +106,7 @@ const jobStore = {
   controllers: new Map(),
   workerScheduled: false,
   savePromise: Promise.resolve(),
+  syncPromise: null,
 };
 const secretStore = {
   keys: new Map(),
@@ -585,6 +586,7 @@ async function handleSegmentPaper(req, res, paperId) {
   });
   const settings = await secureSettingsForJob(payload.settings || {});
   const force = Boolean(payload.force);
+  await syncJobsFromDisk();
   const existing = findActiveSegmentationJobForPaper(paperId);
   if (existing && !force) {
     return json(res, {
@@ -621,6 +623,7 @@ async function handleSegmentPaper(req, res, paperId) {
 }
 
 async function handleListSegmentationJobs(res, paperId) {
+  await syncJobsFromDisk();
   const jobs = [...jobStore.jobs.values()]
     .filter((job) => job.type === "segmentation" && job.paperId === paperId)
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
@@ -631,6 +634,7 @@ async function handleListSegmentationJobs(res, paperId) {
 }
 
 async function handleGetActiveSegmentationJob(res, paperId) {
+  await syncJobsFromDisk();
   const job = findActiveSegmentationJobForPaper(paperId);
   return json(res, { job: job ? serializeJob(job) : null });
 }
@@ -878,6 +882,7 @@ async function handleCreateAnalysisJob(req, res, paperId) {
       : [];
   const rerunAll = Boolean(payload.rerunAll);
   const forceSelected = Boolean(payload.force);
+  await syncJobsFromDisk();
   const existing = findActiveAnalysisJobForPaper(paperId);
 
   if (existing && !rerunAll && !forceSelected) {
@@ -958,6 +963,7 @@ async function handleCreateAnalysisJob(req, res, paperId) {
 }
 
 async function handleListAnalysisJobs(res, paperId) {
+  await syncJobsFromDisk();
   const jobs = [...jobStore.jobs.values()]
     .filter((job) => job.type === "analysis" && job.paperId === paperId)
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
@@ -968,12 +974,14 @@ async function handleListAnalysisJobs(res, paperId) {
 }
 
 async function handleGetActiveAnalysisJob(res, paperId) {
+  await syncJobsFromDisk();
   const job = findActiveAnalysisJobForPaper(paperId);
   return json(res, { job: job ? serializeJob(job) : null });
 }
 
 async function handleCreateOcrJob(res, paperId) {
   const paper = await loadPaper(paperId);
+  await syncJobsFromDisk();
   const existing = findActiveOcrJobForPaper(paperId);
   if (existing) {
     return json(res, {
@@ -1024,6 +1032,7 @@ async function handleCreateOcrJob(res, paperId) {
 }
 
 async function handleListOcrJobs(res, paperId) {
+  await syncJobsFromDisk();
   const jobs = [...jobStore.jobs.values()]
     .filter((job) => job.type === "ocr" && job.paperId === paperId)
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
@@ -1034,11 +1043,13 @@ async function handleListOcrJobs(res, paperId) {
 }
 
 async function handleGetActiveOcrJob(res, paperId) {
+  await syncJobsFromDisk();
   const job = findActiveOcrJobForPaper(paperId);
   return json(res, { job: job ? serializeJob(job) : null });
 }
 
 async function handleGetJob(res, jobId) {
+  await syncJobsFromDisk();
   const job = jobStore.jobs.get(jobId);
   if (!job) {
     return json(res, { error: "Job not found." }, 404);
@@ -1048,6 +1059,7 @@ async function handleGetJob(res, jobId) {
 }
 
 async function handleCancelJob(res, jobId) {
+  await syncJobsFromDisk();
   const job = jobStore.jobs.get(jobId);
   if (!job) {
     return json(res, { error: "Job not found." }, 404);
@@ -1058,6 +1070,7 @@ async function handleCancelJob(res, jobId) {
 }
 
 async function handleRetryFailedJob(res, jobId) {
+  await syncJobsFromDisk();
   const job = jobStore.jobs.get(jobId);
   if (!job) {
     return json(res, { error: "Job not found." }, 404);
@@ -1511,6 +1524,109 @@ async function loadJobs() {
   await persistJobs();
 }
 
+async function syncJobsFromDisk() {
+  if (jobStore.syncPromise) {
+    return jobStore.syncPromise;
+  }
+
+  jobStore.syncPromise = (async () => {
+    let payload = null;
+    try {
+      payload = await readJsonFileWithRecovery(JOBS_PATH, { optional: true });
+    } catch {
+      payload = null;
+    }
+
+    const jobs = Array.isArray(payload?.jobs) ? payload.jobs : [];
+    for (const job of jobs) {
+      if (!job?.id || !["analysis", "ocr", "segmentation"].includes(job.type)) {
+        continue;
+      }
+
+      const normalized = await normalizeLoadedJobForRuntime(job);
+      if (!normalized) {
+        continue;
+      }
+
+      const existing = jobStore.jobs.get(normalized.id);
+      if (existing && existing.id === jobStore.activeJobId) {
+        if (normalized.cancelRequested && !existing.cancelRequested) {
+          existing.cancelRequested = true;
+          existing.status = existing.status === "queued" ? "canceled" : "canceling";
+          existing.updatedAt = normalized.updatedAt || new Date().toISOString();
+          jobStore.controllers.get(existing.id)?.abort();
+        }
+        continue;
+      }
+
+      if (!existing || isDiskJobNewer(normalized, existing)) {
+        jobStore.jobs.set(normalized.id, normalized);
+      }
+    }
+  })().finally(() => {
+    jobStore.syncPromise = null;
+  });
+
+  return jobStore.syncPromise;
+}
+
+async function normalizeLoadedJobForRuntime(job) {
+  const normalized = normalizeLoadedJob(job);
+  if (!normalized) {
+    return null;
+  }
+
+  normalized.status = normalizeRuntimeJobStatus(job.status);
+  normalized.cancelRequested = Boolean(job.cancelRequested);
+  if (Array.isArray(job.items)) {
+    normalized.items = normalized.items.map((item, index) => ({
+      ...item,
+      status: normalizeRuntimeJobItemStatus(job.items[index]?.status),
+    }));
+    recalculateJobProgress(normalized);
+  }
+
+  if (normalized.type === "analysis" || normalized.type === "segmentation") {
+    try {
+      normalized.settings = await secureSettingsForJob(normalized.settings, { migrate: true });
+    } catch (error) {
+      console.warn(`Skipping invalid model settings for job ${normalized.id}: ${error.message}`);
+      normalized.settings = redactJobSettings(normalized.settings || {});
+      if (isActiveJobStatus(normalized.status)) {
+        normalized.status = "error";
+        normalized.error = "历史任务模型配置无法迁移，请重新创建任务。";
+        normalized.completedAt = new Date().toISOString();
+      }
+    }
+  }
+
+  return normalized;
+}
+
+function normalizeRuntimeJobStatus(status) {
+  if (status === "queued" || status === "running" || status === "canceling" || status === "done" || status === "error" || status === "canceled") {
+    return status;
+  }
+
+  return "queued";
+}
+
+function normalizeRuntimeJobItemStatus(status) {
+  if (status === "queued" || status === "running" || status === "done" || status === "error" || status === "canceled") {
+    return status;
+  }
+
+  return "queued";
+}
+
+function isDiskJobNewer(nextJob, currentJob) {
+  return getJobTimestampMs(nextJob) >= getJobTimestampMs(currentJob);
+}
+
+function getJobTimestampMs(job) {
+  return Date.parse(job?.updatedAt || job?.completedAt || job?.startedAt || job?.createdAt || "") || 0;
+}
+
 async function loadSecrets() {
   let payload = null;
   try {
@@ -1741,7 +1857,7 @@ function normalizeLoadedJob(job) {
     paperId: String(job.paperId || ""),
     paperTitle: String(job.paperTitle || ""),
     status: normalizeLoadedJobStatus(job.status),
-    cancelRequested: false,
+    cancelRequested: Boolean(job.cancelRequested),
     rerunAll: Boolean(job.rerunAll),
     retryFailedOnly: Boolean(job.retryFailedOnly),
     cacheHits: Number.isFinite(Number(job.cacheHits)) ? Number(job.cacheHits) : 0,
@@ -1783,7 +1899,7 @@ function normalizeLoadedSegmentationJob(job) {
     paperId: String(job.paperId || ""),
     paperTitle: String(job.paperTitle || ""),
     status: normalizeLoadedJobStatus(job.status),
-    cancelRequested: false,
+    cancelRequested: Boolean(job.cancelRequested),
     retryFailedOnly: false,
     cacheHits: 0,
     adaptiveBatchSize: null,
@@ -1825,7 +1941,7 @@ function normalizeLoadedOcrJob(job) {
     paperId: String(job.paperId || ""),
     paperTitle: String(job.paperTitle || ""),
     status: normalizeLoadedJobStatus(job.status),
-    cancelRequested: false,
+    cancelRequested: Boolean(job.cancelRequested),
     retryFailedOnly: false,
     cacheHits: 0,
     adaptiveBatchSize: null,
@@ -2136,6 +2252,7 @@ function recalculateJobProgress(job) {
 }
 
 async function persistJobs() {
+  await syncJobsFromDisk();
   const jobs = [...jobStore.jobs.values()]
     .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
     .slice(-JOB_POLL_LIMIT);
@@ -2188,6 +2305,7 @@ async function runJobWorker() {
     return;
   }
 
+  await syncJobsFromDisk();
   const job = getNextQueuedJob();
   if (!job) {
     return;
@@ -2217,7 +2335,7 @@ async function runJobWorker() {
 
 function getNextQueuedJob() {
   return [...jobStore.jobs.values()]
-    .filter((job) => isActiveJobStatus(job.status))
+    .filter((job) => job.status === "queued")
     .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))[0] || null;
 }
 
@@ -6818,6 +6936,7 @@ function readIntegerEnv(name, defaultValue, min, max) {
 }
 
 async function buildHealthPayload(req = null) {
+  await syncJobsFromDisk();
   const versionStatus = await getServiceVersionStatus();
   const queueStatus = getJobQueueStatus();
   const uptimeSeconds = Math.round(process.uptime());
