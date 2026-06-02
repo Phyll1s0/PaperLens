@@ -5,7 +5,7 @@ import tls from "node:tls";
 import { execFile, spawn } from "node:child_process";
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, readFile, readdir, rename, writeFile, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, unlink, writeFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { inflateSync } from "node:zlib";
@@ -29,6 +29,7 @@ const PDF_ENGINE = process.env.PAPERLENS_PDF_ENGINE || "auto";
 const PUBLIC_DIR = path.join(__dirname, "public");
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 const DATA_DIR = path.join(__dirname, "data");
+const DATA_BACKUP_DIR = path.join(DATA_DIR, ".backups");
 const ASSET_DIR = path.join(__dirname, "paper-assets");
 const CACHE_DIR = path.join(__dirname, ".cache");
 const JOBS_PATH = path.join(DATA_DIR, "jobs.json");
@@ -42,6 +43,8 @@ const WORKSPACE_CACHE_KEY = createHash("sha1").update(__dirname).digest("hex").s
 const SWIFT_MODULE_CACHE_DIR = path.join(CACHE_DIR, `swift-module-cache-${WORKSPACE_CACHE_KEY}`);
 const TMP_DIR = path.join(CACHE_DIR, "tmp");
 const MAX_UPLOAD_BYTES = 120 * 1024 * 1024;
+const JSON_BACKUP_RETENTION = readIntegerEnv("PAPERLENS_JSON_BACKUP_RETENTION", 8, 0, 50);
+const JSON_BACKUP_MIN_INTERVAL_MS = readIntegerEnv("PAPERLENS_JSON_BACKUP_MIN_INTERVAL_SECONDS", 300, 0, 86_400) * 1000;
 const OCR_LANGUAGE = process.env.PAPERLENS_OCR_LANGUAGE || process.env.PAPERLENS_OCR_LANG || "eng";
 const OCR_TIMEOUT_MS = readIntegerEnv("PAPERLENS_OCR_TIMEOUT_SECONDS", 1800, 60, 7200) * 1000;
 const ARTIFACT_CROP_VERSION = 10;
@@ -83,6 +86,7 @@ const EXTRA_BIN_DIRS = [
 
 await mkdir(UPLOAD_DIR, { recursive: true });
 await mkdir(DATA_DIR, { recursive: true });
+await mkdir(DATA_BACKUP_DIR, { recursive: true });
 await mkdir(ASSET_DIR, { recursive: true });
 await mkdir(SWIFT_MODULE_CACHE_DIR, { recursive: true });
 await mkdir(TMP_DIR, { recursive: true });
@@ -436,8 +440,8 @@ async function handleRebuildAllVisualArtifacts(res) {
     }
 
     try {
-      const raw = JSON.parse(await readFile(path.join(DATA_DIR, file), "utf8"));
-      if (!raw.id || !Array.isArray(raw.paragraphs)) {
+      const raw = await readJsonFileWithRecovery(path.join(DATA_DIR, file), { optional: true });
+      if (!raw?.id || !Array.isArray(raw.paragraphs)) {
         continue;
       }
 
@@ -980,8 +984,8 @@ async function listPapers(searchParams = new URLSearchParams()) {
     }
 
     try {
-      const paper = JSON.parse(await readFile(path.join(DATA_DIR, file), "utf8"));
-      if (!paper.id || !Array.isArray(paper.paragraphs)) {
+      const paper = await readJsonFileWithRecovery(path.join(DATA_DIR, file), { optional: true });
+      if (!paper?.id || !Array.isArray(paper.paragraphs)) {
         continue;
       }
 
@@ -1336,7 +1340,7 @@ function isLocalBindHost(host) {
 async function loadJobs() {
   let payload = null;
   try {
-    payload = JSON.parse(await readFile(JOBS_PATH, "utf8"));
+    payload = await readJsonFileWithRecovery(JOBS_PATH, { optional: true });
   } catch {
     payload = null;
   }
@@ -1375,7 +1379,7 @@ async function loadJobs() {
 async function loadSecrets() {
   let payload = null;
   try {
-    payload = JSON.parse(await readFile(SECRETS_PATH, "utf8"));
+    payload = await readJsonFileWithRecovery(SECRETS_PATH, { optional: true, mode: 0o600 });
     payload = decryptSecretsPayload(payload);
   } catch (error) {
     if (error.code !== "ENOENT") {
@@ -1514,12 +1518,13 @@ async function persistSecrets() {
     keys: [...secretStore.keys.values()].sort((a, b) => String(a.id).localeCompare(String(b.id))),
   };
   const payload = encryptSecretsPayload(plainPayload);
-  const tmpPath = `${SECRETS_PATH}.tmp`;
   secretStore.savePromise = secretStore.savePromise
     .catch(() => {})
     .then(async () => {
-      await writeFile(tmpPath, JSON.stringify(payload, null, 2), { mode: 0o600 });
-      await rename(tmpPath, SECRETS_PATH);
+      await writeJsonFileAtomic(SECRETS_PATH, payload, {
+        mode: 0o600,
+        backup: Boolean(SECRET_ENCRYPTION_KEY),
+      });
     });
   await secretStore.savePromise;
 }
@@ -1893,12 +1898,10 @@ async function persistJobs() {
       cancelRequested: Boolean(job.cancelRequested),
     })),
   };
-  const tmpPath = `${JOBS_PATH}.tmp`;
   jobStore.savePromise = jobStore.savePromise
     .catch(() => {})
     .then(async () => {
-      await writeFile(tmpPath, JSON.stringify(payload, null, 2));
-      await rename(tmpPath, JOBS_PATH);
+      await writeJsonFileAtomic(JOBS_PATH, payload);
     });
   await jobStore.savePromise;
 }
@@ -6010,7 +6013,21 @@ async function buildHealthPayload(req = null) {
     },
     queue: queueStatus,
     security: buildAuthStatus(req),
+    persistence: buildPersistenceStatus(),
     ...versionStatus,
+  };
+}
+
+function buildPersistenceStatus() {
+  return {
+    storage: "json",
+    atomicWrites: true,
+    backupEnabled: JSON_BACKUP_RETENTION > 0,
+    backupDir: DATA_BACKUP_DIR,
+    backupRetention: JSON_BACKUP_RETENTION,
+    backupMinIntervalSeconds: Math.round(JSON_BACKUP_MIN_INTERVAL_MS / 1000),
+    recovery: "newest-valid-backup",
+    secretsBackedUp: Boolean(SECRET_ENCRYPTION_KEY && JSON_BACKUP_RETENTION > 0),
   };
 }
 
@@ -9350,9 +9367,133 @@ function parseMultipart(body, boundary) {
   return parts;
 }
 
+async function readJsonFileWithRecovery(filePath, options = {}) {
+  try {
+    return JSON.parse(await readFile(filePath, "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      if (options.optional) {
+        return null;
+      }
+      throw error;
+    }
+
+    const backup = await readNewestValidJsonBackup(filePath);
+    if (!backup) {
+      throw error;
+    }
+
+    console.warn(`Recovered ${path.basename(filePath)} from backup ${path.basename(backup.path)} after JSON read failed: ${error.message}`);
+    if (options.restore !== false) {
+      await writeJsonFileAtomic(filePath, backup.payload, {
+        backup: false,
+        mode: options.mode,
+      });
+    }
+    return backup.payload;
+  }
+}
+
+async function writeJsonFileAtomic(filePath, payload, options = {}) {
+  const dir = path.dirname(filePath);
+  await mkdir(dir, { recursive: true });
+
+  const tmpPath = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(tmpPath, JSON.stringify(payload, null, 2), options.mode ? { mode: options.mode } : undefined);
+    await rename(tmpPath, filePath);
+  } catch (error) {
+    await unlink(tmpPath).catch(() => {});
+    throw error;
+  }
+  await backupJsonFileAfterWrite(filePath, payload, options).catch((error) => {
+    console.warn(`Could not create JSON backup for ${path.basename(filePath)}: ${error.message}`);
+  });
+}
+
+async function backupJsonFileAfterWrite(filePath, payload, options = {}) {
+  if (options.backup === false || JSON_BACKUP_RETENTION <= 0) {
+    return;
+  }
+
+  const backupDir = getJsonBackupDir(filePath);
+  const backups = await listJsonBackups(filePath);
+  const newest = backups[0];
+  if (newest && Date.now() - newest.mtimeMs < JSON_BACKUP_MIN_INTERVAL_MS) {
+    return;
+  }
+
+  await mkdir(backupDir, { recursive: true });
+  const backupPath = path.join(backupDir, `${path.basename(filePath, ".json")}-${formatBackupTimestamp(new Date())}.json`);
+  await writeFile(backupPath, JSON.stringify(payload, null, 2), options.mode ? { mode: options.mode } : undefined);
+  await pruneJsonBackups(filePath);
+}
+
+async function readNewestValidJsonBackup(filePath) {
+  const backups = await listJsonBackups(filePath);
+  for (const backup of backups) {
+    try {
+      return {
+        path: backup.path,
+        payload: JSON.parse(await readFile(backup.path, "utf8")),
+      };
+    } catch {
+      // Try the next newest backup.
+    }
+  }
+
+  return null;
+}
+
+async function pruneJsonBackups(filePath) {
+  const backups = await listJsonBackups(filePath);
+  for (const backup of backups.slice(JSON_BACKUP_RETENTION)) {
+    await unlink(backup.path).catch(() => {});
+  }
+}
+
+async function listJsonBackups(filePath) {
+  const backupDir = getJsonBackupDir(filePath);
+  const entries = await readdir(backupDir).catch(() => []);
+  const backups = [];
+  for (const entry of entries) {
+    if (!entry.endsWith(".json")) {
+      continue;
+    }
+
+    const backupPath = path.join(backupDir, entry);
+    const fileStat = await stat(backupPath).catch(() => null);
+    if (!fileStat?.isFile()) {
+      continue;
+    }
+
+    backups.push({
+      path: backupPath,
+      mtimeMs: fileStat.mtimeMs,
+    });
+  }
+
+  return backups.sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
+
+function getJsonBackupDir(filePath) {
+  return path.join(DATA_BACKUP_DIR, sanitizeBackupKey(path.basename(filePath, ".json")));
+}
+
+function sanitizeBackupKey(value) {
+  return String(value || "json")
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 120) || "json";
+}
+
+function formatBackupTimestamp(date) {
+  return date.toISOString().replace(/[:.]/g, "-");
+}
+
 async function loadPaper(paperId) {
   const paperPath = getPaperPath(paperId);
-  const paper = JSON.parse(await readFile(paperPath, "utf8"));
+  const paper = await readJsonFileWithRecovery(paperPath);
   const upgradedArtifacts = upgradePaperArtifacts(paper);
   const upgradedContext = upgradePaperContextProfile(paper);
   if (upgradedArtifacts || upgradedContext) {
@@ -9511,7 +9652,7 @@ function inferStoredPageSize(paper, page) {
 
 async function savePaper(paper) {
   paper.updatedAt = new Date().toISOString();
-  await writeFile(getPaperPath(paper.id), JSON.stringify(paper, null, 2));
+  await writeJsonFileAtomic(getPaperPath(paper.id), paper);
 }
 
 function getPaperPath(paperId) {
