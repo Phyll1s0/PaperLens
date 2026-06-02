@@ -45,6 +45,8 @@ const SEGMENTATION_STRUCTURE_INPUT_LIMIT = 28_000;
 const SEGMENTATION_STRUCTURE_PAGE_LIMIT = 1800;
 const SEGMENTATION_ITEM_TEXT_LIMIT = 900;
 const SECTION_CONTEXT_TEXT_LIMIT = 900;
+const SEGMENTATION_PLAN_VERSION = 1;
+const SEGMENTATION_VALIDATION_VERSION = 1;
 const EXTRA_BIN_DIRS = [
   path.dirname(process.execPath),
   "/opt/homebrew/bin",
@@ -4550,13 +4552,18 @@ async function buildPaperStructureMapWithAi(paper, pages, settings, options = {}
         '    { "title": "Abstract", "startPage": 1, "endPage": 1 },',
         '    { "title": "Introduction", "startPage": 1, "endPage": 2 }',
         "  ],",
+        '  "segmentationPlan": [',
+        '    { "id": "planned_section_1", "title": "Abstract", "startPage": 1, "endPage": 1, "role": "abstract", "boundaryHint": "摘要正文，不含作者单位" },',
+        '    { "id": "planned_section_2", "title": "Introduction", "startPage": 1, "endPage": 2, "role": "background", "boundaryHint": "从 Introduction 标题开始，到下一章节标题前结束" }',
+        "  ],",
         '  "nonBodyZones": [',
         '    { "type": "authors", "label": "作者和单位", "startPage": 1, "endPage": 1, "description": "标题下方作者、邮箱和单位区域" },',
         '    { "type": "references", "label": "参考文献", "startPage": 12, "endPage": 14, "description": "References 之后的参考文献列表" }',
         "  ]",
         "}",
         "",
-        "注意：sections 只列正文结构标题，不要把作者、版权、DOI、图注、表格、参考文献条目列为章节。",
+        "注意：sections 和 segmentationPlan 只列正文阅读结构，不要把作者、版权、DOI、图注、表格、参考文献条目列为章节。",
+        "segmentationPlan 是后续局部分段必须遵守的全文章节计划；id 必须稳定、简短、唯一。",
         "",
         "页面文本:",
         pageOutline,
@@ -4664,6 +4671,12 @@ function normalizePaperStructureMap(parsed, paper, pages) {
       description: "References/Bibliography 之后的参考文献区域",
     });
   }
+  const segmentationPlan = normalizeSegmentationPlan(
+    data.segmentationPlan || data.sectionPlan || data.paragraphPlan,
+    sections,
+    firstPage,
+    lastPage,
+  );
 
   return {
     version: 1,
@@ -4673,6 +4686,8 @@ function normalizePaperStructureMap(parsed, paper, pages) {
     referencesStartPage,
     keywords: normalizeKeywordList(data.keywords || data.keyTerms).slice(0, 18),
     sections,
+    segmentationPlan,
+    segmentationPlanVersion: SEGMENTATION_PLAN_VERSION,
     nonBodyZones,
     updatedAt: new Date().toISOString(),
   };
@@ -4703,6 +4718,149 @@ function normalizeStructureSections(sections, firstPage, lastPage) {
       all.findIndex((item) => item.title.toLowerCase() === section.title.toLowerCase() &&
         item.startPage === section.startPage) === index)
     .slice(0, 32);
+}
+
+function normalizeSegmentationPlan(plan, sections, firstPage, lastPage) {
+  const sourcePlan = Array.isArray(plan) && plan.length
+    ? plan
+    : buildSegmentationPlanFromSections(sections, firstPage, lastPage);
+  const normalized = [];
+
+  for (const [index, entry] of sourcePlan.entries()) {
+    const matchedSection = findMatchingStructureSection(entry, sections);
+    const title = normalizeSectionTitleHint(
+      entry.title || entry.sectionTitle || entry.name || matchedSection?.title || "",
+    );
+    if (!title || isReferencesSectionTitle(title)) {
+      continue;
+    }
+
+    const startPage = normalizePageNumber(
+      entry.startPage || entry.pageNumber || matchedSection?.startPage,
+      firstPage,
+      lastPage,
+      matchedSection?.startPage || firstPage,
+    );
+    const endPage = normalizePageNumber(
+      entry.endPage || entry.pageEndNumber || matchedSection?.endPage,
+      firstPage,
+      lastPage,
+      matchedSection?.endPage || startPage,
+    );
+    const fallbackId = `planned_section_${normalized.length + 1}`;
+    const id = normalizeSegmentationPlanId(entry.id || entry.planId || fallbackId, fallbackId);
+
+    normalized.push({
+      id,
+      title,
+      startPage,
+      endPage: Math.max(startPage, endPage),
+      role: normalizeSegmentationRole(entry.role || entry.kind || inferSegmentationRoleFromTitle(title)),
+      boundaryHint: truncateText(normalizeParagraph(entry.boundaryHint || entry.description || entry.note || ""), 180),
+      order: normalized.length,
+    });
+  }
+
+  const deduped = [];
+  for (const section of normalized) {
+    const duplicate = deduped.some((item) =>
+      item.title.toLowerCase() === section.title.toLowerCase() && item.startPage === section.startPage);
+    if (!duplicate) {
+      const repeatedId = deduped.some((item) => item.id === section.id);
+      deduped.push({
+        ...section,
+        id: repeatedId
+          ? `planned_section_${deduped.length + 1}`
+          : normalizeSegmentationPlanId(section.id, `planned_section_${deduped.length + 1}`),
+        order: deduped.length,
+      });
+    }
+  }
+
+  return deduped.length ? deduped.slice(0, 32) : buildSegmentationPlanFromSections([], firstPage, lastPage);
+}
+
+function buildSegmentationPlanFromSections(sections, firstPage, lastPage) {
+  const validSections = Array.isArray(sections) ? sections.filter((section) => section?.title) : [];
+  if (!validSections.length) {
+    return [{
+      id: "planned_section_1",
+      title: "正文",
+      startPage: firstPage,
+      endPage: lastPage,
+      role: "",
+      boundaryHint: "按论文正文自然段阅读，不含作者、链接、图表和参考文献。",
+    }];
+  }
+
+  return validSections.map((section, index) => ({
+    id: `planned_section_${index + 1}`,
+    title: section.title,
+    startPage: section.startPage || firstPage,
+    endPage: section.endPage || section.startPage || lastPage,
+    role: inferSegmentationRoleFromTitle(section.title),
+    boundaryHint: "",
+  }));
+}
+
+function findMatchingStructureSection(entry, sections) {
+  if (!entry || !Array.isArray(sections) || !sections.length) {
+    return null;
+  }
+
+  const title = normalizeSectionTitleHint(entry.title || entry.sectionTitle || entry.name || "");
+  if (title) {
+    const matchedByTitle = sections.find((section) =>
+      section.title.toLowerCase() === title.toLowerCase());
+    if (matchedByTitle) {
+      return matchedByTitle;
+    }
+  }
+
+  const pageNumber = Number(entry.startPage || entry.pageNumber || 0);
+  if (Number.isFinite(pageNumber) && pageNumber > 0) {
+    return sections.find((section) =>
+      pageNumber >= Number(section.startPage || 0) &&
+      pageNumber <= Number(section.endPage || section.startPage || 0)) || null;
+  }
+
+  return null;
+}
+
+function normalizeSegmentationPlanId(value, fallback = "") {
+  const clean = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 48);
+  if (!clean || /^\d/.test(clean)) {
+    return fallback;
+  }
+  return clean;
+}
+
+function inferSegmentationRoleFromTitle(title) {
+  const clean = String(title || "").toLowerCase();
+  if (/abstract|摘要/.test(clean)) {
+    return "abstract";
+  }
+  if (/introduction|background|related work|motivation|背景|引言|相关/.test(clean)) {
+    return "background";
+  }
+  if (/method|approach|design|architecture|system|algorithm|方法|设计|架构|系统/.test(clean)) {
+    return "method";
+  }
+  if (/experiment|evaluation|result|analysis|实验|评估|结果|分析/.test(clean)) {
+    return "result";
+  }
+  if (/discussion|limitation|讨论|局限/.test(clean)) {
+    return "discussion";
+  }
+  if (/conclusion|future|总结|结论|未来/.test(clean)) {
+    return "conclusion";
+  }
+  return "";
 }
 
 function normalizeStructureZones(zones, firstPage, lastPage) {
@@ -4768,6 +4926,8 @@ function buildHeuristicPaperStructureMap(paper, pages) {
     referencesStartPage: null,
     keywords: [],
     sections: [],
+    segmentationPlan: buildSegmentationPlanFromSections([], firstPage, lastPage),
+    segmentationPlanVersion: SEGMENTATION_PLAN_VERSION,
     nonBodyZones: [],
     updatedAt: new Date().toISOString(),
   };
@@ -4803,14 +4963,18 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
     });
   }
 
-  const paragraphs = buildParagraphsFromSegmentItems(items, structureMap);
+  const validation = validateAndRepairSegmentedParagraphs(
+    buildParagraphsFromSegmentItems(items, structureMap),
+    structureMap,
+  );
+  const paragraphs = validation.paragraphs;
   const readingCount = paragraphs.filter((paragraph) => isReadingParagraph(paragraph)).length;
 
   if (readingCount < 3) {
     throw new Error("AI 分段结果太少，已保留基础分段。");
   }
 
-  const sections = inferSections(paragraphs);
+  const sections = inferSectionsFromSegmentationPlan(paragraphs, structureMap);
   enrichSectionsWithContext(sections, paragraphs, chunkSummaries);
   const segmented = {
     ...paper,
@@ -4818,6 +4982,21 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
     status: "ready",
     segmentationMode: "ai",
     structureMap,
+    segmentationPlan: structureMap.segmentationPlan || [],
+    segmentationValidation: validation.summary,
+    segmentationStages: {
+      version: 1,
+      plan: {
+        source: "structure-map",
+        version: structureMap.segmentationPlanVersion || SEGMENTATION_PLAN_VERSION,
+        sections: getSegmentationPlan(structureMap).length,
+      },
+      localSegmentation: {
+        chunks: chunks.length,
+        items: items.length,
+      },
+      validation: validation.summary,
+    },
     sections,
     paragraphs,
     contextProfile: buildPaperContextProfile(paragraphs, sections, chunkSummaries, structureMap),
@@ -4962,13 +5141,14 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
         windowContext,
         "",
         "请把下面页面文本切分为语义段落。",
+        "每个 heading/paragraph 都要尽量绑定全文分段计划里的 plannedSectionId；如果当前内容不属于任何计划章节，省略该项。",
         "输出格式必须是：",
         "{",
         '  "chunkSummary": "当前窗口的极简脉络摘要，中文，不超过 120 字",',
         '  "keywords": ["术语1", "术语2"],',
         '  "items": [',
-        '    { "kind": "heading", "pageNumber": 1, "pageEndNumber": 1, "sectionTitle": "章节标题", "sourceText": "章节标题" },',
-        '    { "kind": "paragraph", "pageNumber": 1, "pageEndNumber": 1, "sectionTitle": "所属章节", "continuesFromPrevious": false, "continuesToNext": false, "keywords": ["术语"], "sourceText": "自然段原文" }',
+        '    { "kind": "heading", "plannedSectionId": "planned_section_2", "pageNumber": 1, "pageEndNumber": 1, "sectionTitle": "章节标题", "sourceText": "章节标题" },',
+        '    { "kind": "paragraph", "plannedSectionId": "planned_section_2", "pageNumber": 1, "pageEndNumber": 1, "sectionTitle": "所属章节", "continuesFromPrevious": false, "continuesToNext": false, "keywords": ["术语"], "sourceText": "自然段原文" }',
         "  ]",
         "}",
         "",
@@ -4997,6 +5177,7 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
           continuesToNext: parseModelBoolean(item.continuesToNext),
           keywords: normalizeKeywordList(item.keywords || item.keyTerms).slice(0, 10),
           role: normalizeSegmentationRole(item.role || ""),
+          plannedSectionId: normalizeSegmentationPlanId(item.plannedSectionId || item.planId || ""),
           rawSourceText,
           sourceText: normalizeParagraph(rawSourceText),
         };
@@ -5010,12 +5191,15 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
 }
 
 function formatPaperStructureMapForPrompt(structureMap, pages) {
-  if (!structureMap || structureMap.version !== 1) {
+  if (!structureMap || !structureMap.version) {
     return "无。";
   }
 
   const { firstPage, lastPage } = getPageRangeBounds(pages);
   const sections = (structureMap.sections || [])
+    .filter((section) => rangesOverlap(section.startPage, section.endPage || section.startPage, firstPage, lastPage))
+    .slice(0, 10);
+  const plan = getSegmentationPlan(structureMap)
     .filter((section) => rangesOverlap(section.startPage, section.endPage || section.startPage, firstPage, lastPage))
     .slice(0, 10);
   const zones = (structureMap.nonBodyZones || [])
@@ -5028,6 +5212,11 @@ function formatPaperStructureMapForPrompt(structureMap, pages) {
     structureMap.referencesStartPage ? `References 起始页: p.${structureMap.referencesStartPage}` : "",
     sections.length
       ? `当前窗口相关章节: ${sections.map((section) => `${section.title} ${formatPageRange(section.startPage, section.endPage)}`).join("；")}`
+      : "",
+    plan.length
+      ? `当前窗口分段计划: ${plan.map((section) =>
+        `${section.id}=${section.title} ${formatPageRange(section.startPage, section.endPage)}${section.role ? ` role:${section.role}` : ""}${section.boundaryHint ? ` hint:${section.boundaryHint}` : ""}`)
+        .join("；")}`
       : "",
     zones.length
       ? `当前窗口非正文区域: ${zones.map((zone) => `${zone.label || zone.type} ${formatPageRange(zone.startPage, zone.endPage)} ${zone.description || ""}`.trim()).join("；")}`
@@ -5062,7 +5251,7 @@ function formatPageRange(startPage, endPage) {
 }
 
 function isNonReadingByStructureMap(item, structureMap) {
-  if (!structureMap || structureMap.version !== 1) {
+  if (!structureMap || !structureMap.version) {
     return false;
   }
 
@@ -5079,6 +5268,61 @@ function isNonReadingByStructureMap(item, structureMap) {
     zone.type === "references" &&
     pageNumber >= Number(zone.startPage || 0) &&
     pageNumber <= Number(zone.endPage || zone.startPage || 0));
+}
+
+function getSegmentationPlan(structureMap) {
+  return Array.isArray(structureMap?.segmentationPlan) ? structureMap.segmentationPlan : [];
+}
+
+function resolveSegmentationPlanSection(item, structureMap) {
+  const plan = getSegmentationPlan(structureMap);
+  if (!plan.length) {
+    return null;
+  }
+
+  const plannedSectionId = normalizeSegmentationPlanId(item?.plannedSectionId || "");
+  if (plannedSectionId) {
+    const matchedById = plan.find((section) => section.id === plannedSectionId);
+    if (matchedById) {
+      return matchedById;
+    }
+  }
+
+  const sectionTitle = normalizeSectionTitleHint(item?.sectionTitle || item?.sectionTitleHint || "");
+  if (sectionTitle) {
+    const matchedByTitle = plan.find((section) =>
+      section.title.toLowerCase() === sectionTitle.toLowerCase());
+    if (matchedByTitle) {
+      return matchedByTitle;
+    }
+  }
+
+  const pageNumber = Number(item?.pageNumber || 0);
+  const pageEndNumber = Number(item?.pageEndNumber || pageNumber);
+  if (Number.isFinite(pageNumber) && pageNumber > 0) {
+    const overlapping = plan.filter((section) =>
+      rangesOverlap(
+        Number(section.startPage || 0),
+        Number(section.endPage || section.startPage || 0),
+        pageNumber,
+        Number.isFinite(pageEndNumber) && pageEndNumber > 0 ? pageEndNumber : pageNumber,
+      ));
+    if (overlapping.length === 1) {
+      return overlapping[0];
+    }
+    if (overlapping.length > 1 && sectionTitle) {
+      return overlapping.find((section) =>
+        section.title.toLowerCase().includes(sectionTitle.toLowerCase()) ||
+        sectionTitle.toLowerCase().includes(section.title.toLowerCase())) || overlapping[0];
+    }
+
+    const previous = [...plan]
+      .reverse()
+      .find((section) => Number(section.startPage || 0) <= pageNumber);
+    return previous || plan[0];
+  }
+
+  return plan[0] || null;
 }
 
 function getSegmentationPageText(page) {
@@ -5118,6 +5362,8 @@ function buildParagraphsFromSegmentItems(items, structureMap = null) {
 
     const order = paragraphs.length;
     const kind = item.kind === "heading" || isLikelyHeading(clean) ? "heading" : "paragraph";
+    const plannedSection = resolveSegmentationPlanSection(item, structureMap);
+    const sectionTitleHint = normalizeSectionTitleHint(item.sectionTitle || plannedSection?.title || "");
     const paragraph = {
       id: `para_${order}_${randomUUID().slice(0, 8)}`,
       kind,
@@ -5127,8 +5373,9 @@ function buildParagraphsFromSegmentItems(items, structureMap = null) {
         ? item.pageEndNumber
         : Number.isFinite(item.pageNumber) && item.pageNumber > 0 ? item.pageNumber : 1,
       sectionId: "section_0",
-      sectionTitleHint: normalizeSectionTitleHint(item.sectionTitle || ""),
-      segmentationRole: normalizeSegmentationRole(item.role || ""),
+      sectionTitleHint,
+      plannedSectionId: plannedSection?.id || "",
+      segmentationRole: normalizeSegmentationRole(item.role || plannedSection?.role || ""),
       contextKeywords: normalizeKeywordList(item.keywords).slice(0, 10),
       continuesFromPrevious: Boolean(item.continuesFromPrevious),
       continuesToNext: Boolean(item.continuesToNext),
@@ -5150,6 +5397,194 @@ function buildParagraphsFromSegmentItems(items, structureMap = null) {
   });
 
   return paragraphs;
+}
+
+function validateAndRepairSegmentedParagraphs(paragraphs, structureMap = null) {
+  const repaired = [];
+  const seen = new Set();
+  const stats = {
+    version: SEGMENTATION_VALIDATION_VERSION,
+    inputParagraphs: Array.isArray(paragraphs) ? paragraphs.length : 0,
+    outputParagraphs: 0,
+    plannedSections: getSegmentationPlan(structureMap).length,
+    removedNonReading: 0,
+    removedDuplicates: 0,
+    mergedFragments: 0,
+    sectionAssignments: 0,
+    warnings: [],
+    updatedAt: new Date().toISOString(),
+  };
+
+  for (const paragraph of paragraphs || []) {
+    const clean = normalizeParagraph(paragraph.sourceText || "");
+    if (!clean || shouldDropParagraphDuringSegmentationValidation(paragraph, structureMap)) {
+      stats.removedNonReading += 1;
+      continue;
+    }
+
+    const dedupeKey = buildSegmentationValidationDedupeKey(paragraph, clean);
+    if (seen.has(dedupeKey)) {
+      stats.removedDuplicates += 1;
+      continue;
+    }
+    seen.add(dedupeKey);
+
+    const next = {
+      ...paragraph,
+      sourceText: clean,
+      pageNumber: normalizePositivePageNumber(paragraph.pageNumber, 1),
+      pageEndNumber: normalizePositivePageNumber(paragraph.pageEndNumber || paragraph.pageNumber, paragraph.pageNumber || 1),
+    };
+    if (next.pageEndNumber < next.pageNumber) {
+      next.pageEndNumber = next.pageNumber;
+    }
+
+    const plannedSection = resolveSegmentationPlanSection(next, structureMap);
+    if (plannedSection) {
+      if (next.plannedSectionId !== plannedSection.id || !next.sectionTitleHint) {
+        stats.sectionAssignments += 1;
+      }
+      next.plannedSectionId = plannedSection.id;
+      next.sectionTitleHint = normalizeSectionTitleHint(next.sectionTitleHint || plannedSection.title);
+      next.segmentationRole = normalizeSegmentationRole(next.segmentationRole || plannedSection.role || "");
+    }
+
+    const previous = repaired.at(-1);
+    if (shouldMergeDuringSegmentationValidation(previous, next)) {
+      mergeParagraphIntoPrevious(previous, next);
+      stats.mergedFragments += 1;
+      continue;
+    }
+
+    repaired.push(next);
+  }
+
+  repaired.forEach((paragraph, index) => {
+    paragraph.order = index;
+  });
+  stats.outputParagraphs = repaired.length;
+
+  const readingCount = repaired.filter((paragraph) => isReadingParagraph(paragraph)).length;
+  if (readingCount < 3) {
+    stats.warnings.push("reading-paragraph-count-low");
+  }
+  if (!stats.plannedSections) {
+    stats.warnings.push("segmentation-plan-empty");
+  }
+
+  return { paragraphs: repaired, summary: stats };
+}
+
+function shouldDropParagraphDuringSegmentationValidation(paragraph, structureMap) {
+  const text = normalizeParagraph(paragraph?.sourceText || "");
+  if (!text) {
+    return true;
+  }
+
+  const kind = paragraph.kind === "heading" || isLikelyHeading(text) ? "heading" : "paragraph";
+  if (isReferencesSectionTitle(text) || isReferencesSectionTitle(paragraph.sectionTitleHint)) {
+    return true;
+  }
+
+  if (kind !== "heading" && (
+    isNonReadingByStructureMap(paragraph, structureMap) ||
+    isLikelyNonReadingParagraphText(paragraph.rawSourceText || text, paragraph) ||
+    isLikelyNonReadingParagraphText(text, paragraph)
+  )) {
+    return true;
+  }
+
+  return kind !== "heading" && text.length < 20 && !isLikelyHeading(text);
+}
+
+function buildSegmentationValidationDedupeKey(paragraph, text) {
+  const pageNumber = normalizePositivePageNumber(paragraph.pageNumber, 1);
+  const normalized = text
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .slice(0, 220);
+  return `${paragraph.kind || "paragraph"}:${pageNumber}:${normalized}`;
+}
+
+function normalizePositivePageNumber(value, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) {
+    return Number(fallback) || 1;
+  }
+  return Math.trunc(number);
+}
+
+function shouldMergeDuringSegmentationValidation(previous, paragraph) {
+  if (!previous || previous.kind !== "paragraph" || paragraph.kind !== "paragraph") {
+    return false;
+  }
+
+  if (previous.plannedSectionId && paragraph.plannedSectionId &&
+    previous.plannedSectionId !== paragraph.plannedSectionId) {
+    return false;
+  }
+
+  if (previous.sectionTitleHint && paragraph.sectionTitleHint &&
+    previous.sectionTitleHint !== paragraph.sectionTitleHint) {
+    return false;
+  }
+
+  return shouldMergeAcrossPage(previous, paragraph);
+}
+
+function mergeParagraphIntoPrevious(previous, paragraph) {
+  previous.sourceText = mergeParagraphText(previous.sourceText, paragraph.sourceText);
+  previous.pageEndNumber = Math.max(
+    normalizePositivePageNumber(previous.pageEndNumber || previous.pageNumber, previous.pageNumber || 1),
+    normalizePositivePageNumber(paragraph.pageEndNumber || paragraph.pageNumber, paragraph.pageNumber || 1),
+  );
+  previous.continuesToNext = Boolean(paragraph.continuesToNext);
+  previous.contextKeywords = [
+    ...normalizeKeywordList(previous.contextKeywords),
+    ...normalizeKeywordList(paragraph.contextKeywords),
+  ].filter((term, index, all) => all.findIndex((item) => item.toLowerCase() === term.toLowerCase()) === index)
+    .slice(0, 12);
+  previous.plannedSectionId = previous.plannedSectionId || paragraph.plannedSectionId || "";
+  previous.segmentationRole = previous.segmentationRole || paragraph.segmentationRole || "";
+}
+
+function inferSectionsFromSegmentationPlan(paragraphs, structureMap = null) {
+  if (!getSegmentationPlan(structureMap).length) {
+    return inferSections(paragraphs);
+  }
+
+  const sections = [];
+  const sectionsByKey = new Map();
+  for (const paragraph of paragraphs) {
+    const plannedSection = resolveSegmentationPlanSection(paragraph, structureMap);
+    const hintedTitle = normalizeSectionTitleHint(
+      paragraph.sectionTitleHint || (paragraph.kind === "heading" ? paragraph.sourceText : ""),
+    );
+    const title = plannedSection?.title || hintedTitle || "正文";
+    const key = plannedSection?.id || `adhoc_${title.toLowerCase()}`;
+    let section = sectionsByKey.get(key);
+    if (!section) {
+      section = {
+        id: `section_${sections.length}`,
+        title,
+        level: 1,
+        order: sections.length,
+        summary: "",
+        source: plannedSection ? "segmentation-plan" : "ai-segmentation",
+        plannedSectionId: plannedSection?.id || "",
+      };
+      sectionsByKey.set(key, section);
+      sections.push(section);
+    }
+
+    paragraph.sectionId = section.id;
+    paragraph.sectionTitleHint = title === "正文" ? paragraph.sectionTitleHint || "" : title;
+    paragraph.plannedSectionId = plannedSection?.id || paragraph.plannedSectionId || "";
+  }
+
+  return sections.length ? sections : inferSections(paragraphs);
 }
 
 function attachParagraphArtifactLinks(paper) {
