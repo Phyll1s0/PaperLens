@@ -121,6 +121,10 @@ const server = http.createServer(async (req, res) => {
       return json(res, await listPapers(url.searchParams));
     }
 
+    if (req.method === "POST" && url.pathname === "/api/papers/visual-artifacts/rebuild") {
+      return await handleRebuildAllVisualArtifacts(res);
+    }
+
     const exportMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/export\.md$/);
     if (req.method === "GET" && exportMatch) {
       return await handleExportPaperMarkdown(req, res, exportMatch[1]);
@@ -134,6 +138,11 @@ const server = http.createServer(async (req, res) => {
     const artifactCropMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/artifacts\/([^/]+)\/crop\.svg$/);
     if (req.method === "GET" && artifactCropMatch) {
       return await handleArtifactCropSvg(req, res, artifactCropMatch[1], artifactCropMatch[2]);
+    }
+
+    const visualRebuildMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/visual-artifacts\/rebuild$/);
+    if (req.method === "POST" && visualRebuildMatch) {
+      return await handleRebuildVisualArtifacts(res, visualRebuildMatch[1]);
     }
 
     const segmentMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/segment$/);
@@ -325,6 +334,114 @@ async function handleArtifactCropSvg(req, res, paperId, artifactId) {
 
   res.writeHead(200, headers);
   res.end(svg);
+}
+
+async function handleRebuildVisualArtifacts(res, paperId) {
+  const paper = await loadPaper(paperId);
+  const result = rebuildPaperVisualArtifacts(paper, { force: true });
+  if (!result.changed) {
+    const status = result.reason === "missing-extraction-pages" ? 400 : 200;
+    return json(res, {
+      paper,
+      stats: result.stats,
+      message: result.reason === "missing-extraction-pages"
+        ? "这篇旧论文缺少原始页面结构，无法重建视觉结构。请重新上传 PDF。"
+        : "没有可重建的视觉结构。",
+    }, status);
+  }
+
+  paper.updatedAt = new Date().toISOString();
+  paper.maintenance = {
+    ...(paper.maintenance || {}),
+    visualArtifacts: {
+      rebuiltAt: paper.updatedAt,
+      stats: result.stats,
+    },
+  };
+  await savePaper(paper);
+  return json(res, {
+    paper,
+    stats: result.stats,
+    message: formatVisualRebuildMessage(result.stats),
+  });
+}
+
+async function handleRebuildAllVisualArtifacts(res) {
+  const files = await readdir(DATA_DIR).catch(() => []);
+  const summary = {
+    papers: 0,
+    rebuilt: 0,
+    skipped: 0,
+    failed: 0,
+    pages: 0,
+    artifacts: 0,
+    pixelRefined: 0,
+    lowConfidence: 0,
+  };
+  const results = [];
+
+  for (const file of files) {
+    if (!file.endsWith(".json") || file === "jobs.json" || file === "secrets.json") {
+      continue;
+    }
+
+    try {
+      const raw = JSON.parse(await readFile(path.join(DATA_DIR, file), "utf8"));
+      if (!raw.id || !Array.isArray(raw.paragraphs)) {
+        continue;
+      }
+
+      summary.papers += 1;
+      const paper = await loadPaper(raw.id);
+      const result = rebuildPaperVisualArtifacts(paper, { force: true });
+      if (!result.changed) {
+        summary.skipped += 1;
+        results.push({
+          id: raw.id,
+          title: raw.title || raw.filename || raw.id,
+          status: "skipped",
+          reason: result.reason,
+          stats: result.stats,
+        });
+        continue;
+      }
+
+      paper.updatedAt = new Date().toISOString();
+      paper.maintenance = {
+        ...(paper.maintenance || {}),
+        visualArtifacts: {
+          rebuiltAt: paper.updatedAt,
+          stats: result.stats,
+        },
+      };
+      await savePaper(paper);
+      summary.rebuilt += 1;
+      summary.pages += Number(result.stats.pages || 0);
+      summary.artifacts += Number(result.stats.artifacts || 0);
+      summary.pixelRefined += Number(result.stats.pixelRefined || 0);
+      summary.lowConfidence += Number(result.stats.lowConfidence || 0);
+      results.push({
+        id: paper.id,
+        title: paper.title || paper.filename || paper.id,
+        status: "rebuilt",
+        stats: result.stats,
+      });
+    } catch (error) {
+      summary.failed += 1;
+      results.push({
+        id: file.replace(/\.json$/i, ""),
+        title: file,
+        status: "failed",
+        error: error.message || "重建失败",
+      });
+    }
+  }
+
+  return json(res, {
+    summary,
+    results,
+    message: formatVisualRebuildAllMessage(summary),
+  });
 }
 
 async function handleSegmentPaper(req, res, paperId) {
@@ -6522,12 +6639,12 @@ function attachParagraphArtifactLinks(paper) {
     ? paper.pageArtifacts.filter((artifact) => artifact.type === "caption" && artifact.label)
     : [];
 
-  if (!artifacts.length || !Array.isArray(paper.paragraphs)) {
+  if (!Array.isArray(paper.paragraphs)) {
     return paper;
   }
 
   for (const paragraph of paper.paragraphs) {
-    if (!isReadingParagraphForPaper(paper, paragraph)) {
+    if (!artifacts.length || !isReadingParagraphForPaper(paper, paragraph)) {
       paragraph.relatedArtifactIds = [];
       continue;
     }
@@ -7660,8 +7777,14 @@ function upgradePaperContextProfile(paper) {
 }
 
 function upgradePaperArtifacts(paper) {
+  return rebuildPaperVisualArtifacts(paper).changed;
+}
+
+function rebuildPaperVisualArtifacts(paper, options = {}) {
+  const force = Boolean(options.force);
   const artifacts = Array.isArray(paper.pageArtifacts) ? paper.pageArtifacts : [];
   const extractionPages = Array.isArray(paper.extractionPages) ? paper.extractionPages : [];
+  const previousArtifactCount = artifacts.length;
   const needsVisualStructure = extractionPages.some((page) =>
     page.visualStructureVersion !== VISUAL_STRUCTURE_VERSION || !Array.isArray(page.visualRegions));
   const hasExtractableArtifacts = extractionPages.some((page) =>
@@ -7671,8 +7794,14 @@ function upgradePaperArtifacts(paper) {
     : artifacts.some((artifact) =>
       ["caption", "formula", "code", "figure-text"].includes(artifact.type) &&
         (artifact.cropVersion !== ARTIFACT_CROP_VERSION || !artifact.crop || !artifact.cropQuality));
-  if ((!needsUpgrade && !needsVisualStructure) || !Array.isArray(paper.extractionPages) || !paper.extractionPages.length) {
-    return false;
+  const emptyStats = buildVisualRebuildStats(paper, [], previousArtifactCount);
+
+  if (!Array.isArray(paper.extractionPages) || !paper.extractionPages.length) {
+    return { changed: false, reason: "missing-extraction-pages", stats: emptyStats };
+  }
+
+  if (!force && !needsUpgrade && !needsVisualStructure) {
+    return { changed: false, reason: "already-current", stats: emptyStats };
   }
 
   const pages = enhancePagesWithVisualStructure(paper.extractionPages.map((page) => {
@@ -7699,7 +7828,53 @@ function upgradePaperArtifacts(paper) {
   }));
   paper.pageArtifacts = extractPageArtifacts(pages);
   attachParagraphArtifactLinks(paper);
-  return true;
+  const stats = buildVisualRebuildStats(paper, pages, previousArtifactCount);
+  return { changed: true, reason: force ? "forced" : "upgraded", stats };
+}
+
+function buildVisualRebuildStats(paper, pages = [], previousArtifactCount = 0) {
+  const extractionPages = Array.isArray(paper.extractionPages) ? paper.extractionPages : [];
+  const pageImages = Array.isArray(paper.pageImages) ? paper.pageImages : [];
+  const sourcePages = pages.length ? pages : extractionPages;
+  const visualRegions = sourcePages.flatMap((page) => Array.isArray(page.visualRegions) ? page.visualRegions : []);
+  const artifacts = Array.isArray(paper.pageArtifacts) ? paper.pageArtifacts : [];
+  const byType = {};
+  for (const artifact of artifacts) {
+    byType[artifact.type || "unknown"] = (byType[artifact.type || "unknown"] || 0) + 1;
+  }
+
+  return {
+    pages: extractionPages.length,
+    pagesWithImages: pageImages.filter((page) => page.imagePath).length,
+    visualRegions: visualRegions.length,
+    artifacts: artifacts.length,
+    previousArtifacts: previousArtifactCount,
+    captions: byType.caption || 0,
+    formulas: byType.formula || 0,
+    codeBlocks: byType.code || 0,
+    figureText: byType["figure-text"] || 0,
+    pixelRefined: artifacts.filter((artifact) => artifact.crop?.pixelRefined).length,
+    lowConfidence: artifacts.filter((artifact) => artifact.cropQuality?.confidence === "low").length,
+    oversized: artifacts.filter((artifact) => artifact.cropQuality?.oversized).length,
+  };
+}
+
+function formatVisualRebuildMessage(stats = {}) {
+  return [
+    `已重建 ${stats.pages || 0} 页视觉结构`,
+    `图表/公式/代码 ${stats.artifacts || 0} 个`,
+    `像素收紧 ${stats.pixelRefined || 0} 个`,
+    `低置信 ${stats.lowConfidence || 0} 个`,
+  ].join(" · ");
+}
+
+function formatVisualRebuildAllMessage(summary = {}) {
+  return [
+    `已维护 ${summary.rebuilt || 0}/${summary.papers || 0} 篇论文`,
+    `页面 ${summary.pages || 0}`,
+    `图表/公式/代码 ${summary.artifacts || 0} 个`,
+    `失败 ${summary.failed || 0}`,
+  ].join(" · ");
 }
 
 function inferStoredPageSize(paper, page) {

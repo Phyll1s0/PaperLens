@@ -522,11 +522,11 @@ select:focus {
 
 .paper-library-controls {
   display: grid;
-  grid-template-columns: 38px minmax(180px, 1fr) auto;
+  grid-template-columns: 38px minmax(180px, 1fr) auto auto;
   gap: 8px;
   align-items: center;
   margin-top: 10px;
-  max-width: 560px;
+  max-width: 720px;
 }
 
 .paper-library-controls .secondary-button {

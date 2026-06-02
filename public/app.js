@@ -4,6 +4,7 @@ const state = {
   libraryQuery: "",
   favoriteOnly: false,
   analysisProfile: "quality",
+  maintenanceBusy: false,
   busyParagraphId: null,
   pipelineBusy: false,
   jobHistory: [],
@@ -49,6 +50,7 @@ const els = {
   statusText: document.querySelector("#statusText"),
   librarySearchInput: document.querySelector("#librarySearchInput"),
   favoriteOnlyInput: document.querySelector("#favoriteOnlyInput"),
+  rebuildAllVisualButton: document.querySelector("#rebuildAllVisualButton"),
   paperList: document.querySelector("#paperList"),
   paperMeta: document.querySelector("#paperMeta"),
   paperTitle: document.querySelector("#paperTitle"),
@@ -57,6 +59,7 @@ const els = {
   favoriteButton: document.querySelector("#favoriteButton"),
   tagInput: document.querySelector("#tagInput"),
   saveTagsButton: document.querySelector("#saveTagsButton"),
+  rebuildVisualButton: document.querySelector("#rebuildVisualButton"),
   emptyState: document.querySelector("#emptyState"),
   paragraphList: document.querySelector("#paragraphList"),
   outline: document.querySelector("#outline"),
@@ -157,6 +160,7 @@ function bindEvents() {
     state.favoriteOnly = els.favoriteOnlyInput.checked;
     loadRecentPapers();
   });
+  els.rebuildAllVisualButton.addEventListener("click", rebuildAllVisualArtifacts);
   els.qualityProfileButton.addEventListener("click", () => setAnalysisProfile("quality"));
   els.fastProfileButton.addEventListener("click", () => setAnalysisProfile("fast"));
   els.favoriteButton.addEventListener("click", () => {
@@ -165,6 +169,7 @@ function bindEvents() {
     }
   });
   els.saveTagsButton.addEventListener("click", savePaperTags);
+  els.rebuildVisualButton.addEventListener("click", rebuildVisualArtifacts);
   els.tagInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
@@ -900,6 +905,75 @@ function savePaperTags() {
     .map((tag) => tag.trim())
     .filter(Boolean);
   updatePaperMetadata({ tags });
+}
+
+async function rebuildVisualArtifacts() {
+  if (!state.paper || state.maintenanceBusy) {
+    return;
+  }
+
+  state.maintenanceBusy = true;
+  updateAutoButtons();
+  setStatus("正在重建视觉结构和图表裁剪");
+
+  try {
+    const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}/visual-artifacts/rebuild`, {
+      method: "POST",
+    }, "重建视觉结构");
+    const result = await readResponse(response);
+    state.paper = result.paper || state.paper;
+    renderPaper();
+    await loadRecentPapers();
+    setStatus(result.message || formatVisualRebuildStatus(result.stats));
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    state.maintenanceBusy = false;
+    updateAutoButtons();
+  }
+}
+
+async function rebuildAllVisualArtifacts() {
+  if (state.maintenanceBusy) {
+    return;
+  }
+
+  state.maintenanceBusy = true;
+  updateAutoButtons();
+  setStatus("正在批量重建本地论文库图表裁剪");
+
+  try {
+    const response = await apiFetch("/api/papers/visual-artifacts/rebuild", {
+      method: "POST",
+    }, "批量重建视觉结构");
+    const result = await readResponse(response);
+    if (state.paper) {
+      await refreshCurrentPaper();
+    }
+    await loadRecentPapers();
+    setStatus(result.message || formatVisualRebuildAllStatus(result.summary));
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    state.maintenanceBusy = false;
+    updateAutoButtons();
+  }
+}
+
+function formatVisualRebuildStatus(stats = {}) {
+  return [
+    `已重建 ${stats.pages || 0} 页`,
+    `图表 ${stats.artifacts || 0} 个`,
+    `像素收紧 ${stats.pixelRefined || 0} 个`,
+  ].join(" · ");
+}
+
+function formatVisualRebuildAllStatus(summary = {}) {
+  return [
+    `已维护 ${summary.rebuilt || 0}/${summary.papers || 0} 篇`,
+    `图表 ${summary.artifacts || 0} 个`,
+    `失败 ${summary.failed || 0}`,
+  ].join(" · ");
 }
 
 function scheduleReadingProgressSave() {
@@ -3175,7 +3249,7 @@ function updateAutoStatus() {
 }
 
 function updateAutoButtons() {
-  const busy = state.autoAnalyze.running || state.pipelineBusy;
+  const busy = state.autoAnalyze.running || state.pipelineBusy || state.maintenanceBusy;
   const missingCount = state.paper ? getMissingAnalysisCount(state.paper) : 0;
   els.qualityProfileButton.disabled = busy;
   els.fastProfileButton.disabled = busy;
@@ -3187,6 +3261,10 @@ function updateAutoButtons() {
   els.downloadNotesButton.disabled = !state.paper;
   els.downloadDocxButton.disabled = !state.paper;
   els.rerunAnalyzeButton.disabled = !state.paper || busy;
+  els.rebuildVisualButton.disabled = !state.paper || busy;
+  els.rebuildVisualButton.textContent = state.maintenanceBusy ? "重建中" : "重建图表";
+  els.rebuildAllVisualButton.disabled = busy;
+  els.rebuildAllVisualButton.textContent = state.maintenanceBusy ? "批量重建中" : "重建全部图表";
   els.stopAutoButton.classList.toggle("hidden", !state.autoAnalyze.running);
   els.stopAutoButton.disabled = !state.autoAnalyze.running || state.autoAnalyze.stopRequested;
   renderAnalysisDashboard();
@@ -3205,6 +3283,8 @@ function setBusy(isBusy) {
   els.pdfInput.disabled = isBusy;
   els.aiSegmentInput.disabled = isBusy;
   els.autoAnalyzeInput.disabled = isBusy;
+  els.rebuildAllVisualButton.disabled = isBusy || state.maintenanceBusy;
+  els.rebuildVisualButton.disabled = isBusy || state.maintenanceBusy || !state.paper;
 }
 
 function setStatus(text, isError = false) {
