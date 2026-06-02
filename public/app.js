@@ -46,6 +46,7 @@ const els = {
   autoAnalyzeButton: document.querySelector("#autoAnalyzeButton"),
   resumeAnalyzeButton: document.querySelector("#resumeAnalyzeButton"),
   downloadNotesButton: document.querySelector("#downloadNotesButton"),
+  downloadDocxButton: document.querySelector("#downloadDocxButton"),
   rerunAnalyzeButton: document.querySelector("#rerunAnalyzeButton"),
   stopAutoButton: document.querySelector("#stopAutoButton"),
   jobHistory: document.querySelector("#jobHistory"),
@@ -102,6 +103,7 @@ function bindEvents() {
   els.autoAnalyzeButton.addEventListener("click", () => startAutoAnalyze());
   els.resumeAnalyzeButton.addEventListener("click", resumeMissingAnalysis);
   els.downloadNotesButton.addEventListener("click", downloadPaperNotes);
+  els.downloadDocxButton.addEventListener("click", downloadPaperDocx);
   els.rerunAnalyzeButton.addEventListener("click", rerunFullPipeline);
   els.stopAutoButton.addEventListener("click", stopAutoAnalyze);
   els.providerSelect.addEventListener("change", () => {
@@ -563,6 +565,20 @@ function downloadPaperNotes() {
   link.click();
   link.remove();
   setStatus("正在下载 Markdown 笔记");
+}
+
+function downloadPaperDocx() {
+  if (!state.paper) {
+    return;
+  }
+
+  const link = document.createElement("a");
+  link.href = `/api/papers/${encodeURIComponent(state.paper.id)}/export.docx`;
+  link.download = "";
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setStatus("正在下载 Word 文档");
 }
 
 async function rerunFullPipeline() {
@@ -1996,6 +2012,7 @@ function updateAutoButtons() {
     ? `补跑未完成 ${missingCount}`
     : "补跑未完成";
   els.downloadNotesButton.disabled = !state.paper;
+  els.downloadDocxButton.disabled = !state.paper;
   els.rerunAnalyzeButton.disabled = !state.paper || busy;
   els.stopAutoButton.classList.toggle("hidden", !state.autoAnalyze.running);
   els.stopAutoButton.disabled = !state.autoAnalyze.running || state.autoAnalyze.stopRequested;
