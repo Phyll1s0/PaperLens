@@ -24,6 +24,7 @@ Updated: 2026-06-03
 
 ## Done
 
+- [x] 视觉材料人工校正：图片/表格/公式/代码 artifact 支持前端改类型、修正文本文字、隐藏/恢复；隐藏项会退出 AI 上下文、导出和段落图表引用，并在视觉重建时尽量保留人工修正。
 - [x] 文档同步：README、`.env.example` 和 setup 提示已更新到 Kimi Code Direct、真实论文跑通结果、碎片 LaTeX 修复、Docker/Claude CLI 关系和代理策略。
 - [x] 公式 artifact 识别收紧：过滤图表坐标轴标签、超参数表格行和极短无意义公式碎片，并合并同一裁剪区域的公式片段。
 - [x] 分段碎片与慢速退化修复：短续行合并放宽、PDF 图表/LaTeX 提取垃圾过滤，Kimi Code Direct 精读 batch 改为更稳的 4 段并避免 adaptiveBatchSize 永久退化到 1。

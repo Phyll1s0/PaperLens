@@ -10,6 +10,7 @@ const state = {
   maintenanceBusy: false,
   busyParagraphId: null,
   paragraphEditBusyId: null,
+  artifactEditBusyId: null,
   pipelineBusy: false,
   jobHistory: [],
   exportQa: null,
@@ -2970,7 +2971,12 @@ function getPageImage(paper, pageNumber) {
 function getPageArtifacts(paper, pageNumber) {
   return (paper.pageArtifacts || [])
     .filter((item) => item.pageNumber === pageNumber && item.type !== "figure-text")
-    .sort((a, b) => Number(a.y || 0) - Number(b.y || 0))
+    .sort((a, b) => {
+      if (Boolean(a.hidden) !== Boolean(b.hidden)) {
+        return a.hidden ? 1 : -1;
+      }
+      return Number(a.y || 0) - Number(b.y || 0);
+    })
     .slice(0, 8);
 }
 
@@ -3008,7 +3014,7 @@ function renderPagePreview(pageImage, artifacts = []) {
 
 function renderPageArtifact(artifact) {
   const card = document.createElement("div");
-  card.className = `page-artifact ${artifact.type}`;
+  card.className = `page-artifact ${artifact.type}${artifact.hidden ? " is-hidden" : ""}`;
   card.id = artifact.id;
 
   const header = document.createElement("div");
@@ -3016,9 +3022,10 @@ function renderPageArtifact(artifact) {
 
   const meta = document.createElement("div");
   meta.className = "page-artifact-meta";
-  meta.textContent = artifact.label
+  const labelText = artifact.label
     ? `${artifact.label} · ${getArtifactLabel(artifact.type, artifact.visualType)}`
     : getArtifactLabel(artifact.type, artifact.visualType);
+  meta.textContent = artifact.hidden ? `已隐藏 · ${labelText}` : labelText;
   header.append(meta, renderArtifactActions(artifact));
 
   const body = artifact.type === "code"
@@ -3047,9 +3054,38 @@ function renderArtifactActions(artifact) {
   const actions = document.createElement("div");
   actions.className = "page-artifact-actions";
 
-  if (!hasArtifactCrop(artifact)) {
-    return actions;
+  const typeSelect = document.createElement("select");
+  typeSelect.className = "artifact-type-select";
+  typeSelect.title = "修正视觉材料类型";
+  typeSelect.disabled = state.artifactEditBusyId === artifact.id;
+  for (const option of getArtifactTypeOptions()) {
+    const optionEl = document.createElement("option");
+    optionEl.value = option.value;
+    optionEl.textContent = option.label;
+    typeSelect.append(optionEl);
   }
+  typeSelect.value = getArtifactManualTypeValue(artifact);
+  typeSelect.addEventListener("change", () => {
+    editArtifact(artifact.id, { action: "set-type", type: typeSelect.value });
+  });
+
+  const textButton = document.createElement("button");
+  textButton.type = "button";
+  textButton.textContent = "文本";
+  textButton.title = "修正识别出来的公式、代码或图表说明文本";
+  textButton.disabled = state.artifactEditBusyId === artifact.id;
+  textButton.addEventListener("click", () => editArtifactText(artifact));
+
+  const visibilityButton = document.createElement("button");
+  visibilityButton.type = "button";
+  visibilityButton.textContent = artifact.hidden ? "恢复" : "隐藏";
+  visibilityButton.title = artifact.hidden ? "恢复到 AI 上下文和导出" : "从 AI 上下文和导出中排除";
+  visibilityButton.disabled = state.artifactEditBusyId === artifact.id;
+  visibilityButton.addEventListener("click", () => {
+    editArtifact(artifact.id, { action: artifact.hidden ? "restore" : "hide" });
+  });
+
+  actions.append(typeSelect, textButton, visibilityButton);
 
   const viewButton = document.createElement("button");
   viewButton.type = "button";
@@ -3069,8 +3105,81 @@ function renderArtifactActions(artifact) {
   downloadLink.textContent = "下载";
   downloadLink.title = "下载裁剪图";
 
-  actions.append(viewButton, locateButton, downloadLink);
+  if (hasArtifactCrop(artifact)) {
+    actions.append(viewButton, locateButton, downloadLink);
+  }
   return actions;
+}
+
+function getArtifactTypeOptions() {
+  return [
+    { value: "figure", label: "图片" },
+    { value: "table", label: "表格" },
+    { value: "formula", label: "公式" },
+    { value: "code", label: "代码" },
+  ];
+}
+
+function getArtifactManualTypeValue(artifact) {
+  if (artifact.type === "caption" && artifact.visualType === "table") {
+    return "table";
+  }
+  if (artifact.type === "caption") {
+    return "figure";
+  }
+  if (artifact.type === "formula") {
+    return "formula";
+  }
+  if (artifact.type === "code") {
+    return "code";
+  }
+  return "figure";
+}
+
+function editArtifactText(artifact) {
+  const current = String(artifact.text || "").trim();
+  const value = window.prompt("修正这块视觉材料的识别文本。", current);
+  if (value === null) {
+    return;
+  }
+
+  const text = value.trim();
+  if (!text) {
+    setStatus("更新失败：视觉材料文本不能为空。", true);
+    return;
+  }
+
+  editArtifact(artifact.id, { action: "set-text", text });
+}
+
+async function editArtifact(artifactId, payload) {
+  if (!state.paper || state.artifactEditBusyId) {
+    return;
+  }
+
+  state.artifactEditBusyId = artifactId;
+  setStatus("正在更新视觉材料");
+  renderPaper();
+
+  try {
+    const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}/artifacts/${encodeURIComponent(artifactId)}/edit`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    }, "更新视觉材料");
+    const result = await readResponse(response);
+    state.paper = result.paper || state.paper;
+    state.exportQa = null;
+    state.artifactEditBusyId = null;
+    renderPaper();
+    await loadRecentPapers();
+    setStatus(result.message || "视觉材料已更新。");
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    state.artifactEditBusyId = null;
+    renderPaper();
+  }
 }
 
 function renderArtifactCrop(artifact) {
@@ -3190,7 +3299,10 @@ function openArtifactViewer(artifact, options = {}) {
   if (artifact.type === "code") {
     caption.textContent = artifact.text;
   } else {
-    renderRichText(caption, artifact.text);
+    const captionText = artifact.type === "formula" && !hasMathDelimiters(artifact.text)
+      ? `\\[${artifact.text}\\]`
+      : artifact.text;
+    renderRichText(caption, captionText);
   }
 
   panel.append(header, viewerBody, caption);
@@ -3591,7 +3703,7 @@ async function editParagraph(paragraphId, payload) {
 }
 
 function getRelatedArtifactsForParagraph(paper, paragraph) {
-  const artifacts = paper?.pageArtifacts || [];
+  const artifacts = (paper?.pageArtifacts || []).filter((artifact) => !artifact.hidden);
   const ids = new Set(paragraph.relatedArtifactIds || []);
 
   for (const artifact of artifacts) {

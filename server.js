@@ -224,6 +224,11 @@ const server = http.createServer(async (req, res) => {
       return await handleExportPaperDocx(res, exportDocxMatch[1]);
     }
 
+    const artifactEditMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/artifacts\/([^/]+)\/edit$/);
+    if (req.method === "POST" && artifactEditMatch) {
+      return await handleEditPaperArtifact(req, res, artifactEditMatch[1], artifactEditMatch[2]);
+    }
+
     const artifactCropMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/artifacts\/([^/]+)\/crop\.svg$/);
     if (req.method === "GET" && artifactCropMatch) {
       return await handleArtifactCropSvg(req, res, artifactCropMatch[1], artifactCropMatch[2]);
@@ -705,6 +710,155 @@ async function handleEditPaperParagraph(req, res, paperId, paragraphId) {
   });
 
   return json(res, result);
+}
+
+async function handleEditPaperArtifact(req, res, paperId, artifactId) {
+  const payload = await readJson(req);
+  const result = await withPaperWriteLock(paperId, async () => {
+    const paper = await loadPaper(paperId);
+    const editResult = applyPaperArtifactEdit(paper, artifactId, payload);
+    attachParagraphArtifactLinks(paper);
+    await savePaper(paper);
+    return {
+      paper,
+      ...editResult,
+    };
+  });
+
+  return json(res, result);
+}
+
+function applyPaperArtifactEdit(paper, artifactId, payload = {}) {
+  if (!Array.isArray(paper.pageArtifacts)) {
+    throw badRequest("这篇论文没有可编辑的视觉材料。");
+  }
+
+  const artifact = paper.pageArtifacts.find((item) => item.id === artifactId);
+  if (!artifact) {
+    throw badRequest("找不到要编辑的视觉材料。");
+  }
+
+  const action = String(payload.action || "").trim();
+  const now = new Date().toISOString();
+  const previous = {
+    type: artifact.type || "",
+    visualType: artifact.visualType || "",
+    label: artifact.label || "",
+    text: artifact.text || "",
+    hidden: Boolean(artifact.hidden),
+  };
+  let message = "视觉材料已更新。";
+
+  if (action === "hide") {
+    artifact.hidden = true;
+    message = "已隐藏该视觉材料，后续 AI 上下文和导出会跳过它。";
+  } else if (action === "restore") {
+    artifact.hidden = false;
+    message = "已恢复该视觉材料。";
+  } else if (action === "set-type") {
+    const next = normalizeManualArtifactType(payload.type, payload.visualType);
+    artifact.type = next.type;
+    artifact.visualType = next.visualType;
+    if (Object.prototype.hasOwnProperty.call(payload, "label")) {
+      artifact.label = normalizeManualArtifactLabel(payload.label);
+    } else if (next.type === "formula") {
+      artifact.label = extractFormulaLabel(artifact.text || "");
+    }
+    artifact.hidden = false;
+    message = `已改为${formatManualArtifactTypeLabel(next)}。`;
+  } else if (action === "set-text") {
+    const nextText = normalizeManualArtifactText(payload.text);
+    artifact.text = nextText;
+    if (Object.prototype.hasOwnProperty.call(payload, "label")) {
+      artifact.label = normalizeManualArtifactLabel(payload.label);
+    } else if (artifact.type === "formula") {
+      artifact.label = extractFormulaLabel(nextText);
+    }
+    artifact.hidden = false;
+    message = "视觉材料文本已更新。";
+  } else if (action === "set-label") {
+    artifact.label = normalizeManualArtifactLabel(payload.label);
+    message = "视觉材料标签已更新。";
+  } else {
+    throw badRequest("不支持的视觉材料编辑操作。");
+  }
+
+  artifact.manualEditedAt = now;
+  artifact.manualArtifactOverride = {
+    action,
+    updatedAt: now,
+    previous,
+  };
+  paper.maintenance = {
+    ...(paper.maintenance || {}),
+    artifactEdits: {
+      updatedAt: now,
+      lastArtifactId: artifact.id,
+      count: Number(paper.maintenance?.artifactEdits?.count || 0) + 1,
+    },
+  };
+
+  return { artifact, message };
+}
+
+function normalizeManualArtifactType(type, visualType = "") {
+  const value = String(type || "").trim().toLowerCase();
+  if (value === "figure" || value === "image") {
+    return { type: "caption", visualType: "figure" };
+  }
+  if (value === "table") {
+    return { type: "caption", visualType: "table" };
+  }
+  if (value === "formula") {
+    return { type: "formula", visualType: "formula" };
+  }
+  if (value === "code") {
+    return { type: "code", visualType: "code" };
+  }
+  if (value === "caption") {
+    const normalizedVisualType = String(visualType || "").trim().toLowerCase();
+    return {
+      type: "caption",
+      visualType: normalizedVisualType === "table" ? "table" : "figure",
+    };
+  }
+
+  throw badRequest("视觉材料类型只能是图片、表格、公式或代码。");
+}
+
+function formatManualArtifactTypeLabel(artifactType) {
+  if (artifactType.type === "caption" && artifactType.visualType === "table") {
+    return "表格";
+  }
+  if (artifactType.type === "caption") {
+    return "图片";
+  }
+  if (artifactType.type === "formula") {
+    return "公式";
+  }
+  if (artifactType.type === "code") {
+    return "代码";
+  }
+  return "页面材料";
+}
+
+function normalizeManualArtifactText(text) {
+  const value = String(text || "").replace(/\r/g, "\n").trim();
+  if (!value) {
+    throw badRequest("视觉材料文本不能为空。");
+  }
+  if (value.length > 8000) {
+    throw badRequest("视觉材料文本过长，请缩短后再保存。");
+  }
+  return value;
+}
+
+function normalizeManualArtifactLabel(label) {
+  const value = String(label || "").replace(/\s+/g, " ").trim();
+  if (value.length > 120) {
+    throw badRequest("视觉材料标签过长，请控制在 120 个字符以内。");
+  }
+  return value;
 }
 
 function applyPaperParagraphEdit(paper, paragraphId, payload = {}) {
@@ -3660,6 +3814,16 @@ function getReadingParagraphs(paper) {
   return (paper.paragraphs || []).filter((paragraph) => isReadingParagraphForPaper(paper, paragraph));
 }
 
+function getVisiblePaperArtifacts(paper) {
+  return Array.isArray(paper?.pageArtifacts)
+    ? paper.pageArtifacts.filter(isVisiblePaperArtifact)
+    : [];
+}
+
+function isVisiblePaperArtifact(artifact) {
+  return !artifact?.hidden;
+}
+
 function needsParagraphAnalysis(paragraph) {
   return isReadingParagraph(paragraph) &&
     (
@@ -4109,7 +4273,7 @@ function buildFastNearbyContext(paper, paragraph) {
 
 function buildFastReferenceContext(paper, paragraph) {
   const relatedIds = new Set(Array.isArray(paragraph.relatedArtifactIds) ? paragraph.relatedArtifactIds : []);
-  const artifacts = Array.isArray(paper.pageArtifacts) ? paper.pageArtifacts : [];
+  const artifacts = getVisiblePaperArtifacts(paper);
   const related = artifacts
     .filter((artifact) => relatedIds.has(artifact.id) || (artifact.label && paragraphCanReferenceArtifact(paragraph, artifact)))
     .slice(0, 2);
@@ -4259,7 +4423,7 @@ function formatContextParagraph(paragraph, label) {
 
 function buildRelatedArtifactContext(paper, paragraph) {
   const relatedIds = new Set(Array.isArray(paragraph.relatedArtifactIds) ? paragraph.relatedArtifactIds : []);
-  const artifacts = Array.isArray(paper.pageArtifacts) ? paper.pageArtifacts : [];
+  const artifacts = getVisiblePaperArtifacts(paper);
   const directMatches = artifacts.filter((artifact) => relatedIds.has(artifact.id));
   const inferredMatches = artifacts.filter((artifact) => {
     if (!artifact.label || relatedIds.has(artifact.id)) {
@@ -4661,7 +4825,9 @@ function normalizePaperOcrStatus(paper) {
 
 function buildPaperExportQa(paper) {
   const readingParagraphs = getReadingParagraphs(paper);
-  const artifacts = Array.isArray(paper.pageArtifacts) ? paper.pageArtifacts : [];
+  const artifacts = getVisiblePaperArtifacts(paper);
+  const allArtifactsById = new Map((Array.isArray(paper.pageArtifacts) ? paper.pageArtifacts : [])
+    .map((artifact) => [artifact.id, artifact]));
   const artifactsById = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
   const issues = [];
   const checkedArtifactIds = new Set();
@@ -4705,6 +4871,11 @@ function buildPaperExportQa(paper) {
     for (const artifactId of Array.isArray(paragraph.relatedArtifactIds) ? paragraph.relatedArtifactIds : []) {
       const artifact = artifactsById.get(artifactId);
       if (!artifact) {
+        const hiddenArtifact = allArtifactsById.get(artifactId);
+        if (hiddenArtifact && !isVisiblePaperArtifact(hiddenArtifact)) {
+          continue;
+        }
+
         brokenArtifactRefs += 1;
         addExportQaIssue(issues, "error", "broken-artifact-reference", "段落引用的图表不存在，导出会丢失该图表链接。", {
           ...paragraphContext,
@@ -4821,6 +4992,10 @@ function auditExportArtifactForQa(paper, artifact, issues, trackers, paragraphCo
 }
 
 function isExportRelevantArtifact(artifact) {
+  if (!isVisiblePaperArtifact(artifact)) {
+    return false;
+  }
+
   const type = String(artifact?.type || "");
   const visualType = String(artifact?.visualType || "");
   return ["caption", "formula", "code"].includes(type) ||
@@ -4917,7 +5092,7 @@ function isEscapedAt(value, index) {
 function buildPaperMarkdownExport(paper, baseUrl = "") {
   const title = normalizeExportLine(paper.title || paper.filename || "PaperLens Notes");
   const sectionsById = new Map((paper.sections || []).map((section) => [section.id, section]));
-  const artifactsById = new Map((paper.pageArtifacts || []).map((artifact) => [artifact.id, artifact]));
+  const artifactsById = new Map(getVisiblePaperArtifacts(paper).map((artifact) => [artifact.id, artifact]));
   const lines = [
     `# ${escapeMarkdownHeading(title)}`,
     "",
@@ -4989,7 +5164,7 @@ function buildPaperMarkdownExport(paper, baseUrl = "") {
 async function buildPaperDocxExport(paper) {
   const title = normalizeExportLine(paper.title || paper.filename || "PaperLens Notes");
   const sectionsById = new Map((paper.sections || []).map((section) => [section.id, section]));
-  const artifactsById = new Map((paper.pageArtifacts || []).map((artifact) => [artifact.id, artifact]));
+  const artifactsById = new Map(getVisiblePaperArtifacts(paper).map((artifact) => [artifact.id, artifact]));
   const media = await collectDocxMedia(paper);
   const rels = [
     '<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>',
@@ -5068,7 +5243,7 @@ async function buildPaperDocxExport(paper) {
 }
 
 async function collectDocxMedia(paper) {
-  const artifacts = Array.isArray(paper.pageArtifacts) ? paper.pageArtifacts : [];
+  const artifacts = getVisiblePaperArtifacts(paper);
   const imagePaths = [...new Set(artifacts
     .filter((artifact) => artifact?.crop && artifact.imagePath)
     .map((artifact) => artifact.imagePath))];
@@ -9258,7 +9433,7 @@ function inferSectionsFromSegmentationPlan(paragraphs, structureMap = null) {
 
 function attachParagraphArtifactLinks(paper) {
   const artifacts = Array.isArray(paper.pageArtifacts)
-    ? paper.pageArtifacts.filter((artifact) => artifact.type === "caption" && artifact.label)
+    ? paper.pageArtifacts.filter((artifact) => isVisiblePaperArtifact(artifact) && artifact.type === "caption" && artifact.label)
     : [];
 
   if (!Array.isArray(paper.paragraphs)) {
@@ -11227,6 +11402,7 @@ function upgradePaperArtifacts(paper) {
 function rebuildPaperVisualArtifacts(paper, options = {}) {
   const force = Boolean(options.force);
   const artifacts = Array.isArray(paper.pageArtifacts) ? paper.pageArtifacts : [];
+  const manualArtifactOverrides = collectManualArtifactOverrides(artifacts);
   const extractionPages = Array.isArray(paper.extractionPages) ? paper.extractionPages : [];
   const previousArtifactCount = artifacts.length;
   const needsVisualStructure = extractionPages.some((page) =>
@@ -11270,10 +11446,55 @@ function rebuildPaperVisualArtifacts(paper, options = {}) {
     width: page.width || null,
     height: page.height || null,
   }));
-  paper.pageArtifacts = extractPageArtifacts(pages);
+  paper.pageArtifacts = applyManualArtifactOverrides(extractPageArtifacts(pages), manualArtifactOverrides);
   attachParagraphArtifactLinks(paper);
   const stats = buildVisualRebuildStats(paper, pages, previousArtifactCount);
   return { changed: true, reason: force ? "forced" : "upgraded", stats };
+}
+
+function collectManualArtifactOverrides(artifacts = []) {
+  const overrides = new Map();
+  for (const artifact of artifacts) {
+    if (!artifact?.id || (!artifact.manualArtifactOverride && !artifact.manualEditedAt && !artifact.hidden)) {
+      continue;
+    }
+
+    overrides.set(artifact.id, {
+      type: artifact.type || "",
+      visualType: artifact.visualType || "",
+      label: artifact.label || "",
+      text: artifact.text || "",
+      hidden: Boolean(artifact.hidden),
+      manualEditedAt: artifact.manualEditedAt || "",
+      manualArtifactOverride: artifact.manualArtifactOverride || null,
+    });
+  }
+
+  return overrides;
+}
+
+function applyManualArtifactOverrides(artifacts = [], overrides = new Map()) {
+  if (!overrides.size) {
+    return artifacts;
+  }
+
+  return artifacts.map((artifact) => {
+    const override = overrides.get(artifact.id);
+    if (!override) {
+      return artifact;
+    }
+
+    return {
+      ...artifact,
+      type: override.type || artifact.type,
+      visualType: override.visualType || artifact.visualType,
+      label: override.label,
+      text: override.text || artifact.text,
+      hidden: override.hidden,
+      manualEditedAt: override.manualEditedAt || artifact.manualEditedAt || "",
+      manualArtifactOverride: override.manualArtifactOverride || artifact.manualArtifactOverride || null,
+    };
+  });
 }
 
 function buildVisualRebuildStats(paper, pages = [], previousArtifactCount = 0) {
@@ -11281,7 +11502,8 @@ function buildVisualRebuildStats(paper, pages = [], previousArtifactCount = 0) {
   const pageImages = Array.isArray(paper.pageImages) ? paper.pageImages : [];
   const sourcePages = pages.length ? pages : extractionPages;
   const visualRegions = sourcePages.flatMap((page) => Array.isArray(page.visualRegions) ? page.visualRegions : []);
-  const artifacts = Array.isArray(paper.pageArtifacts) ? paper.pageArtifacts : [];
+  const allArtifacts = Array.isArray(paper.pageArtifacts) ? paper.pageArtifacts : [];
+  const artifacts = allArtifacts.filter(isVisiblePaperArtifact);
   const byType = {};
   for (const artifact of artifacts) {
     byType[artifact.type || "unknown"] = (byType[artifact.type || "unknown"] || 0) + 1;
@@ -11292,6 +11514,7 @@ function buildVisualRebuildStats(paper, pages = [], previousArtifactCount = 0) {
     pagesWithImages: pageImages.filter((page) => page.imagePath).length,
     visualRegions: visualRegions.length,
     artifacts: artifacts.length,
+    hiddenArtifacts: allArtifacts.length - artifacts.length,
     previousArtifacts: previousArtifactCount,
     captions: byType.caption || 0,
     formulas: byType.formula || 0,
