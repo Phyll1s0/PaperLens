@@ -34,6 +34,12 @@ import {
   extractAnthropicTextContent,
 } from "./lib/kimi-code-direct.js";
 import {
+  isActiveJobStatus,
+  normalizeLoadedJobItemStatus,
+  normalizeLoadedJobStatus,
+  recoverInterruptedJobsForRuntime,
+} from "./lib/job-recovery.js";
+import {
   buildOpenAiCompatibleProviderRequest,
   extractChatCompletionTextContent,
   formatModelError,
@@ -2195,54 +2201,12 @@ function normalizeLoadedOcrJob(job) {
   };
 }
 
-function normalizeLoadedJobStatus(status) {
-  if (status === "done" || status === "error" || status === "canceled") {
-    return status;
-  }
-
-  if (status === "canceling") {
-    return "canceled";
-  }
-
-  return "queued";
-}
-
-function normalizeLoadedJobItemStatus(status) {
-  if (status === "done" || status === "error" || status === "canceled") {
-    return status;
-  }
-
-  return "queued";
-}
-
 async function recoverInterruptedJobs() {
   const owner = await readJobWorkerLockOwner();
   const hasLiveExternalWorker = Boolean(owner?.pid && Number(owner.pid) !== process.pid && isProcessAlive(owner.pid));
-  let changed = false;
+  const result = recoverInterruptedJobsForRuntime(jobStore.jobs.values(), { hasLiveExternalWorker });
 
-  for (const job of jobStore.jobs.values()) {
-    if (!isActiveJobStatus(job.status)) {
-      continue;
-    }
-
-    if (hasLiveExternalWorker && (job.status === "running" || job.status === "canceling")) {
-      continue;
-    }
-
-    job.status = "queued";
-    job.currentParagraphId = "";
-    job.currentBatchSize = 0;
-    job.updatedAt = new Date().toISOString();
-    changed = true;
-    for (const item of job.items) {
-      if (item.status === "running") {
-        item.status = "queued";
-        item.error = "";
-      }
-    }
-  }
-
-  if (changed) {
+  if (result.changed) {
     await persistJobs();
   }
 }
@@ -2387,10 +2351,6 @@ function findActiveOcrJobForPaper(paperId) {
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
 
   return jobs[0] || null;
-}
-
-function isActiveJobStatus(status) {
-  return status === "queued" || status === "running" || status === "canceling";
 }
 
 function serializeJob(job) {
