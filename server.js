@@ -65,6 +65,10 @@ const ANALYSIS_CONCURRENCY = readIntegerEnv("PAPERLENS_ANALYSIS_CONCURRENCY", 3,
 const CLAUDE_AGENT_ANALYSIS_CONCURRENCY = readIntegerEnv("PAPERLENS_AGENT_ANALYSIS_CONCURRENCY", 2, 1, 3);
 const ANALYSIS_FAILED_RETRY_BATCH_SIZE = readIntegerEnv("PAPERLENS_ANALYSIS_FAILED_RETRY_BATCH_SIZE", 2, 1, 8);
 const ANALYSIS_TARGET_MINUTES = readIntegerEnv("PAPERLENS_ANALYSIS_TARGET_MINUTES", 20, 5, 240);
+const KIMI_CODE_USE_CLAUDE_CLI = /^(1|true|yes|on)$/i
+  .test(String(process.env.PAPERLENS_KIMI_CODE_USE_CLAUDE_CLI || ""));
+const KIMI_CODE_ANTHROPIC_ENDPOINT = "https://api.kimi.com/coding/v1/messages";
+const KIMI_CODE_DIRECT_MAX_TOKENS = readIntegerEnv("PAPERLENS_KIMI_CODE_MAX_TOKENS", 12_000, 1024, 64_000);
 const ANALYSIS_CACHE_VERSION = 1;
 const ANALYSIS_CACHE_MAX_ENTRIES = 800;
 const ANALYSIS_CONTEXT_TEXT_LIMIT = 900;
@@ -77,9 +81,14 @@ const SEGMENTATION_STRUCTURE_INPUT_LIMIT = 28_000;
 const CLAUDE_SEGMENTATION_STRUCTURE_INPUT_LIMIT = 14_000;
 const CLAUDE_SEGMENTATION_STRUCTURE_SCAN = /^(1|true|yes|on)$/i
   .test(String(process.env.PAPERLENS_CLAUDE_SEGMENTATION_STRUCTURE_SCAN || ""));
+const CLAUDE_AGENT_AI_SEGMENTATION = /^(1|true|yes|on)$/i
+  .test(String(process.env.PAPERLENS_CLAUDE_AGENT_AI_SEGMENTATION || ""));
 const SEGMENTATION_STRUCTURE_PAGE_LIMIT = 1800;
 const SEGMENTATION_STRUCTURE_TIMEOUT_MS = readIntegerEnv("PAPERLENS_SEGMENTATION_STRUCTURE_TIMEOUT_SECONDS", 300, 60, 1800) * 1000;
 const SEGMENTATION_CHUNK_TIMEOUT_MS = readIntegerEnv("PAPERLENS_SEGMENTATION_CHUNK_TIMEOUT_SECONDS", 240, 60, 1200) * 1000;
+const CLAUDE_SEGMENTATION_CHUNK_TIMEOUT_MS = readIntegerEnv("PAPERLENS_CLAUDE_SEGMENTATION_CHUNK_TIMEOUT_SECONDS", 90, 30, 600) * 1000;
+const CLAUDE_SEGMENTATION_CHUNK_MAX_PAGES = readIntegerEnv("PAPERLENS_CLAUDE_SEGMENTATION_CHUNK_MAX_PAGES", 1, 1, 3);
+const CLAUDE_SEGMENTATION_CHUNK_MAX_CHARS = readIntegerEnv("PAPERLENS_CLAUDE_SEGMENTATION_CHUNK_MAX_CHARS", 4200, 1800, 12000);
 const SEGMENTATION_ITEM_TEXT_LIMIT = 900;
 const SECTION_CONTEXT_TEXT_LIMIT = 900;
 const SEGMENTATION_PLAN_VERSION = 1;
@@ -581,14 +590,18 @@ async function handleSegmentPaper(req, res, paperId) {
   if (!pages.length) {
     return json(res, { error: "这篇论文缺少原始页面文本，无法重新 AI 分段。请重新上传 PDF。" }, 400);
   }
-  enforcePageResourceLimit({
-    label: "AI 分段",
-    pageCount: pages.length,
-    limit: MAX_AI_SEGMENTATION_PAGES,
-    envName: "PAPERLENS_MAX_AI_SEGMENTATION_PAGES",
-  });
   const settings = await secureSettingsForJob(payload.settings || {});
   const force = Boolean(payload.force);
+  const useLocalFirstSegmentation = shouldUseLocalFirstSegmentation(settings);
+  if (!useLocalFirstSegmentation) {
+    enforcePageResourceLimit({
+      label: "AI 分段",
+      pageCount: pages.length,
+      limit: MAX_AI_SEGMENTATION_PAGES,
+      envName: "PAPERLENS_MAX_AI_SEGMENTATION_PAGES",
+    });
+  }
+
   await syncJobsFromDisk();
   const existing = findActiveSegmentationJobForPaper(paperId);
   if (existing && !force) {
@@ -602,6 +615,17 @@ async function handleSegmentPaper(req, res, paperId) {
 
   if (existing && force) {
     await cancelJob(existing.id);
+  }
+
+  if (useLocalFirstSegmentation) {
+    const segmented = segmentPaperLocally(paper, "claude-agent-local-first");
+    await savePaper(segmented);
+    return json(res, {
+      job: null,
+      paper: segmented,
+      settings: serializeClientSettings(settings),
+      message: "Claude Agent 通道较慢，已使用本地视觉分段；可以直接开始翻译讲解。",
+    });
   }
 
   const job = createSegmentationJob({ paper, settings });
@@ -2042,7 +2066,7 @@ function createAnalysisJob({ paper, paragraphIds, settings, rerunAll, cacheHits 
 
 function createSegmentationJob({ paper, settings }) {
   const now = new Date().toISOString();
-  const chunks = chunkPagesForSegmentation(paper.extractionPages || []);
+  const chunks = chunkPagesForSegmentation(paper.extractionPages || [], getSegmentationChunkOptions(settings));
   return {
     id: `seg_${Date.now()}_${randomUUID().slice(0, 8)}`,
     type: "segmentation",
@@ -3030,7 +3054,8 @@ function getAnalysisProviderStrategy(settings = {}, job = null) {
   const baseUrl = String(settings.baseUrl || "").toLowerCase();
   const model = String(settings.model || "").toLowerCase();
   const profile = normalizeAnalysisProfile(settings.analysisProfile);
-  const agentLike = provider.startsWith("claude") || baseUrl.startsWith("local:claude");
+  const kimiCodeDirectLike = shouldUseKimiCodeDirectApi(settings);
+  const agentLike = !kimiCodeDirectLike && (provider.startsWith("claude") || baseUrl.startsWith("local:claude"));
   const deepseekLike = provider.includes("deepseek") || baseUrl.includes("deepseek") || model.includes("deepseek");
   const kimiDirectLike = provider.includes("kimi") || baseUrl.includes("moonshot") || baseUrl.includes("api.kimi.com");
 
@@ -3066,6 +3091,20 @@ function getAnalysisProviderStrategy(settings = {}, job = null) {
     strategy.maxBatchSize = 20;
     strategy.expectedBatchSeconds = 42;
     strategy.failedRetryBatchSize = ANALYSIS_FAILED_RETRY_BATCH_SIZE;
+  }
+
+  if (kimiCodeDirectLike) {
+    strategy.name = "kimi-code-direct";
+    strategy.label = `Kimi Code Direct/${getAnalysisProfileLabel(profile)}`;
+    strategy.agentLike = false;
+    strategy.batchSize = Math.max(8, ANALYSIS_BATCH_SIZE);
+    strategy.concurrency = Math.min(ANALYSIS_CONCURRENCY, 3);
+    strategy.maxBatchSize = 20;
+    strategy.expectedBatchSeconds = 38;
+    strategy.failedRetryBatchSize = ANALYSIS_FAILED_RETRY_BATCH_SIZE;
+    strategy.timeoutBaseMs = 75_000;
+    strategy.timeoutPerParagraphMs = 8_000;
+    strategy.timeoutMaxMs = 240_000;
   }
 
   if (agentLike) {
@@ -7868,14 +7907,86 @@ function buildHeuristicPaperStructureMap(paper, pages) {
   };
 }
 
+function shouldUseLocalFirstSegmentation(settings = {}) {
+  return isClaudeAgentSettings(settings) && !CLAUDE_AGENT_AI_SEGMENTATION;
+}
+
+function segmentPaperLocally(paper, reason = "local-layout") {
+  const pages = Array.isArray(paper.extractionPages) ? paper.extractionPages : [];
+  const structureMap = {
+    ...buildHeuristicPaperStructureMap(paper, pages),
+    fallbackReason: reason,
+  };
+  const initialParagraphs = splitIntoParagraphs(pages);
+  const validation = validateAndRepairSegmentedParagraphs(initialParagraphs, structureMap);
+  const validationSummary = {
+    ...validation.summary,
+    warnings: [...new Set([...(validation.summary.warnings || []), reason])],
+    updatedAt: new Date().toISOString(),
+  };
+  const paragraphs = validation.paragraphs;
+  const segmentationQualityAudit = {
+    ...(validationSummary.qualityAudit || createSegmentationAuditStats(initialParagraphs.length)),
+    updatedAt: validationSummary.updatedAt,
+  };
+  const sections = inferSectionsFromSegmentationPlan(paragraphs, structureMap);
+  enrichSectionsWithContext(sections, paragraphs, []);
+  const segmented = {
+    ...paper,
+    title: inferTitle(paragraphs, paper.filename),
+    status: "ready",
+    segmentationMode: pages.some((page) => Array.isArray(page.blocks) && page.blocks.length) ? "layout" : "heuristic",
+    structureMap,
+    segmentationPlan: structureMap.segmentationPlan || [],
+    segmentationValidation: validationSummary,
+    segmentationQualityAudit,
+    segmentationStages: {
+      version: 1,
+      plan: {
+        source: "heuristic",
+        version: structureMap.segmentationPlanVersion || SEGMENTATION_PLAN_VERSION,
+        sections: getSegmentationPlan(structureMap).length,
+      },
+      localSegmentation: {
+        source: "local-layout",
+        reason,
+        pages: pages.length,
+        items: paragraphs.length,
+      },
+      fallback: {
+        strategy: "local-layout",
+        reason,
+      },
+      validation: validationSummary,
+      qualityAudit: segmentationQualityAudit,
+    },
+    sections,
+    paragraphs,
+    contextProfile: buildPaperContextProfile(paragraphs, sections, [], structureMap),
+    segmentationJob: {
+      status: "done",
+      phase: "local",
+      message: "已使用本地视觉分段。",
+      updatedAt: new Date().toISOString(),
+    },
+    updatedAt: new Date().toISOString(),
+  };
+
+  attachParagraphArtifactLinks(segmented);
+  return segmented;
+}
+
 async function segmentPaperWithAi(paper, settings, options = {}) {
   const pages = paper.extractionPages || [];
   await options.onProgress?.({ phase: "structure-start" });
   const structureMap = await buildPaperStructureMapWithAi(paper, pages, settings, { signal: options.signal });
-  const chunks = chunkPagesForSegmentation(pages);
+  const chunkOptions = getSegmentationChunkOptions(settings);
+  const chunks = chunkPagesForSegmentation(pages, chunkOptions);
   const items = [];
   const chunkSummaries = [];
+  const fallbackChunks = [];
   const windowState = createSegmentationWindowState();
+  let forceLocalFallback = false;
   await options.onProgress?.({
     phase: "structure-done",
     totalChunks: chunks.length,
@@ -7888,12 +7999,14 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
       totalChunks: chunks.length,
       pageRange: getPageRangeLabel(chunk),
     });
-    const result = await segmentPageChunkWithAi(paper, chunk, settings, {
+    const result = await segmentPageChunkResiliently(paper, chunk, settings, {
       signal: options.signal,
       chunkIndex: index,
       totalChunks: chunks.length,
       windowContext: buildSegmentationWindowContext(windowState),
       structureMap,
+      chunkOptions,
+      forceLocalFallback,
     });
     const chunkItems = result.items.map((item) => ({
       ...item,
@@ -7906,7 +8019,19 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
       summary: normalizeParagraph(result.chunkSummary || ""),
       keywords: normalizeKeywordList(result.keywords).slice(0, 12),
       activeSectionTitle: windowState.activeSectionTitle,
+      fallback: Boolean(result.fallback),
+      fallbackReason: result.fallbackReason || "",
     });
+    if (result.fallback) {
+      fallbackChunks.push({
+        index,
+        pages: getPageRangeLabel(chunk),
+        reason: truncateText(result.fallbackReason || "fallback", 180),
+      });
+      if (isClaudeAgentSettings(settings) && isClaudeSegmentationTimeoutFallback(result.fallbackReason)) {
+        forceLocalFallback = true;
+      }
+    }
     await options.onProgress?.({
       phase: "chunk-done",
       chunkIndex: index,
@@ -7953,7 +8078,12 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
       localSegmentation: {
         chunks: chunks.length,
         items: items.length,
+        fallbackChunks: fallbackChunks.length,
       },
+      fallback: fallbackChunks.length ? {
+        chunks: fallbackChunks,
+        strategy: "local-layout",
+      } : null,
       validation: validation.summary,
       qualityAudit: segmentationQualityAudit,
     },
@@ -7967,12 +8097,26 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
   return segmented;
 }
 
-function chunkPagesForSegmentation(pages) {
+function getSegmentationChunkOptions(settings = {}) {
+  if (isClaudeAgentSettings(settings)) {
+    return {
+      maxPages: CLAUDE_SEGMENTATION_CHUNK_MAX_PAGES,
+      maxChars: CLAUDE_SEGMENTATION_CHUNK_MAX_CHARS,
+    };
+  }
+
+  return {
+    maxPages: 3,
+    maxChars: 8500,
+  };
+}
+
+function chunkPagesForSegmentation(pages, options = {}) {
   const chunks = [];
   let current = [];
   let currentChars = 0;
-  const maxChars = 8500;
-  const maxPages = 3;
+  const maxChars = Number(options.maxChars || 8500);
+  const maxPages = Number(options.maxPages || 3);
 
   for (const page of pages) {
     const textLength = getSegmentationPageText(page).length;
@@ -7991,6 +8135,136 @@ function chunkPagesForSegmentation(pages) {
   }
 
   return chunks;
+}
+
+async function segmentPageChunkResiliently(paper, pages, settings, options = {}) {
+  if (options.forceLocalFallback) {
+    return buildLocalSegmentationChunkResult(pages, options.structureMap, {
+      message: "previous-claude-timeout",
+    });
+  }
+
+  try {
+    return await segmentPageChunkWithAi(paper, pages, settings, options);
+  } catch (error) {
+    if (options.signal?.aborted || error.statusCode === 499 || isFatalModelConfigurationError(error)) {
+      throw error;
+    }
+
+    if (!isRecoverableSegmentationChunkError(error)) {
+      throw error;
+    }
+
+    if (pages.length > 1) {
+      const nestedItems = [];
+      const summaries = [];
+      const keywords = [];
+      let usedFallback = false;
+      const reasons = [];
+
+      for (const [offset, page] of pages.entries()) {
+        const result = await segmentPageChunkResiliently(paper, [page], settings, {
+          ...options,
+          chunkIndex: `${options.chunkIndex ?? 0}.${offset}`,
+        });
+        nestedItems.push(...result.items);
+        if (result.chunkSummary) {
+          summaries.push(result.chunkSummary);
+        }
+        for (const keyword of normalizeKeywordList(result.keywords)) {
+          pushUnique(keywords, keyword);
+        }
+        if (result.fallback) {
+          usedFallback = true;
+          reasons.push(result.fallbackReason || "fallback");
+        }
+      }
+
+      return {
+        chunkSummary: summaries.length ? truncateText(summaries.join(" / "), 160) : "",
+        keywords: keywords.slice(0, 16),
+        items: nestedItems,
+        fallback: usedFallback,
+        fallbackReason: usedFallback ? truncateText(reasons.filter(Boolean).join("; "), 220) : "",
+      };
+    }
+
+    return buildLocalSegmentationChunkResult(pages, options.structureMap, error);
+  }
+}
+
+function isRecoverableSegmentationChunkError(error) {
+  const message = String(error?.message || "");
+  return /超时|timeout|timed out|没有返回可解析|JSON|Unexpected|parse|格式|fetch failed|ECONN|ETIMEDOUT/i.test(message);
+}
+
+function isClaudeSegmentationTimeoutFallback(reason = "") {
+  return /claude|超时|timeout|timed out|previous-claude-timeout/i.test(String(reason || ""));
+}
+
+function buildLocalSegmentationChunkResult(pages, structureMap = null, error = null) {
+  const items = [];
+  const keywords = [];
+  for (const page of pages || []) {
+    const pageItems = buildLocalSegmentItemsForPage(page, structureMap);
+    items.push(...pageItems);
+    for (const item of pageItems) {
+      for (const keyword of normalizeKeywordList(item.keywords)) {
+        pushUnique(keywords, keyword);
+      }
+    }
+  }
+
+  const reason = error?.message ? `local-fallback:${truncateText(error.message, 180)}` : "local-fallback";
+  return {
+    chunkSummary: `${getPageRangeLabel(pages)} 使用本地版面分段兜底。`,
+    keywords: keywords.slice(0, 16),
+    items,
+    fallback: true,
+    fallbackReason: reason,
+  };
+}
+
+function buildLocalSegmentItemsForPage(page, structureMap = null) {
+  const blocks = getReadablePageBlocks(page);
+  const items = [];
+  for (const block of blocks) {
+    const rawSourceText = String(typeof block === "string" ? block : block.text || "");
+    const sourceText = normalizeParagraph(rawSourceText);
+    if (!sourceText || (sourceText.length < 20 && !isLikelyHeading(sourceText))) {
+      continue;
+    }
+
+    const item = {
+      kind: isLikelyHeading(sourceText) ? "heading" : "paragraph",
+      pageNumber: Number(page.pageNumber || 1),
+      pageEndNumber: Number(page.pageNumber || 1),
+      sectionTitle: "",
+      continuesFromPrevious: false,
+      continuesToNext: false,
+      keywords: [],
+      role: "",
+      plannedSectionId: "",
+      rawSourceText,
+      sourceText,
+    };
+    const plannedSection = resolveSegmentationPlanSection(item, structureMap);
+    if (plannedSection) {
+      item.sectionTitle = normalizeSectionTitleHint(plannedSection.title || "");
+      item.plannedSectionId = plannedSection.id || "";
+      item.role = normalizeSegmentationRole(plannedSection.role || "");
+    }
+    if (item.kind !== "heading" && (
+      isNonReadingByStructureMap(item, structureMap) ||
+      isLikelyNonReadingParagraphText(rawSourceText, item) ||
+      isLikelyNonReadingParagraphText(sourceText, item)
+    )) {
+      continue;
+    }
+    items.push(item);
+  }
+
+  return items;
 }
 
 function createSegmentationWindowState() {
@@ -8121,7 +8395,7 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
   const content = await callModel(settings, messages, {
     maxTokens: 6000,
     signal: options.signal,
-    timeoutMs: SEGMENTATION_CHUNK_TIMEOUT_MS,
+    timeoutMs: isClaudeAgentSettings(settings) ? CLAUDE_SEGMENTATION_CHUNK_TIMEOUT_MS : SEGMENTATION_CHUNK_TIMEOUT_MS,
   });
   const parsed = parseModelJson(content);
   const rawItems = Array.isArray(parsed.items) ? parsed.items : [];
@@ -9290,9 +9564,18 @@ function isClaudeAgentSettings(settings = {}) {
     provider.startsWith("claude");
 }
 
+function shouldUseKimiCodeDirectApi(settings = {}) {
+  const cleanSettings = resolveSettingsForModel(settings);
+  return cleanSettings.baseUrl === "local:claude-kimi" && !KIMI_CODE_USE_CLAUDE_CLI;
+}
+
 async function callModel(settings, messages, options = {}) {
   const cleanSettings = resolveSettingsForModel(settings);
   if (cleanSettings.baseUrl === "local:claude-kimi") {
+    if (shouldUseKimiCodeDirectApi(cleanSettings)) {
+      return callKimiCodeAnthropicDirect(cleanSettings, messages, options);
+    }
+
     return callClaudeAgent(cleanSettings, messages, {
       usePageKimiKey: true,
       signal: options.signal,
@@ -9365,8 +9648,136 @@ async function callModel(settings, messages, options = {}) {
   }
 }
 
+async function callKimiCodeAnthropicDirect(settings, messages, options = {}) {
+  const controller = new AbortController();
+  const abortFromExternalSignal = () => controller.abort();
+  if (options.signal) {
+    if (options.signal.aborted) {
+      controller.abort();
+    } else {
+      options.signal.addEventListener("abort", abortFromExternalSignal, { once: true });
+    }
+  }
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 90_000);
+  const { system, anthropicMessages } = buildAnthropicMessages(messages);
+
+  try {
+    const requestBody = {
+      model: settings.model || "kimi-for-coding",
+      max_tokens: Number(options.maxTokens || KIMI_CODE_DIRECT_MAX_TOKENS),
+      temperature: 0.2,
+      system,
+      messages: anthropicMessages,
+    };
+    let response;
+    try {
+      response = await requestModelEndpoint(KIMI_CODE_ANTHROPIC_ENDPOINT, {
+        apiKey: settings.apiKey,
+        body: requestBody,
+        proxyUrl: settings.proxyUrl,
+        signal: controller.signal,
+        headers: {
+          "anthropic-version": "2023-06-01",
+          "x-api-key": settings.apiKey,
+        },
+      });
+    } catch (error) {
+      if (error.name === "AbortError") {
+        throw options.signal?.aborted
+          ? requestCanceledError()
+          : new Error("Kimi Code 直连请求超时，请稍后重试。");
+      }
+
+      throw new Error(formatModelNetworkError(error, {
+        ...settings,
+        endpoint: KIMI_CODE_ANTHROPIC_ENDPOINT,
+      }));
+    }
+
+    const text = response.text;
+    if (!response.ok) {
+      throw new Error(formatModelError(response.status, text));
+    }
+
+    const data = JSON.parse(text);
+    const content = extractAnthropicTextContent(data);
+    if (!content) {
+      throw new Error("Kimi Code response did not include message content.");
+    }
+
+    return content.trim();
+  } finally {
+    options.signal?.removeEventListener("abort", abortFromExternalSignal);
+    clearTimeout(timeout);
+  }
+}
+
+function buildAnthropicMessages(messages = []) {
+  const systemParts = [];
+  const anthropicMessages = [];
+
+  for (const message of messages) {
+    const role = String(message?.role || "user").toLowerCase();
+    const content = String(message?.content || "");
+    if (!content) {
+      continue;
+    }
+
+    if (role === "system") {
+      systemParts.push(content);
+      continue;
+    }
+
+    const normalizedRole = role === "assistant" ? "assistant" : "user";
+    const previous = anthropicMessages.at(-1);
+    if (previous?.role === normalizedRole) {
+      previous.content = `${previous.content}\n\n${content}`;
+    } else {
+      anthropicMessages.push({
+        role: normalizedRole,
+        content,
+      });
+    }
+  }
+
+  if (!anthropicMessages.length) {
+    anthropicMessages.push({
+      role: "user",
+      content: "请继续。",
+    });
+  }
+
+  return {
+    system: systemParts.join("\n\n") || undefined,
+    anthropicMessages,
+  };
+}
+
+function extractAnthropicTextContent(data) {
+  if (typeof data?.content === "string") {
+    return data.content;
+  }
+
+  if (Array.isArray(data?.content)) {
+    return data.content
+      .map((block) => {
+        if (typeof block === "string") {
+          return block;
+        }
+        return block?.text || block?.content || "";
+      })
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+  }
+
+  const message = data?.choices?.[0]?.message;
+  return message?.content || message?.reasoning_content || data?.result || "";
+}
+
 function formatModelNetworkError(error, settings) {
-  const proxyUrl = getEffectiveProxyUrl(settings.proxyUrl, getChatCompletionsEndpoint(settings.baseUrl));
+  const endpoint = settings.endpoint || getChatCompletionsEndpoint(settings.baseUrl);
+  const proxyUrl = getEffectiveProxyUrl(settings.proxyUrl, endpoint);
   const proxyHint = proxyUrl
     ? `已通过 PaperLens 代理传输尝试连接：${redactProxyUrl(proxyUrl)}。请确认代理地址、端口和 Docker/宿主机地址是否正确。`
     : "如果你的网络需要代理，请在网页 Proxy URL 或 .env 的 PAPERLENS_PROXY_URL 中填写代理地址。";
@@ -9379,6 +9790,7 @@ async function requestModelEndpoint(endpoint, options = {}) {
   const headers = {
     "content-type": "application/json",
     "authorization": `Bearer ${options.apiKey}`,
+    ...(options.headers || {}),
   };
   const body = JSON.stringify(options.body || {});
 
@@ -10265,13 +10677,14 @@ function getSettingsDiagnostics(settings = {}) {
   }
   const keyPrefix = apiKey ? getApiKeyPrefix(apiKey) : savedKey?.keyPrefix || "missing";
   const keyLength = apiKey ? apiKey.length : savedKey?.keyLength || 0;
-  const isClaudeProvider = baseUrl === "local:claude-kimi" || baseUrl === "local:claude-config";
+  const usesKimiCodeDirect = baseUrl === "local:claude-kimi" && !KIMI_CODE_USE_CLAUDE_CLI;
+  const isClaudeProvider = baseUrl === "local:claude-config" || (baseUrl === "local:claude-kimi" && !usesKimiCodeDirect);
   const commandPath = isClaudeProvider ? buildCommandPath() : "";
   const claudeCommand = isClaudeProvider
     ? getClaudeCommandDiagnostics(commandPath)
     : { command: "", source: "none", available: false };
   const endpoint = baseUrl === "local:claude-kimi"
-    ? "https://api.kimi.com/coding/"
+    ? KIMI_CODE_ANTHROPIC_ENDPOINT
     : baseUrl === "local:claude-config"
       ? ""
       : getChatCompletionsEndpoint(baseUrl);
@@ -10281,7 +10694,9 @@ function getSettingsDiagnostics(settings = {}) {
   return {
     provider,
     endpoint: baseUrl === "local:claude-kimi"
-      ? "local claude CLI + page Kimi key -> https://api.kimi.com/coding/"
+      ? usesKimiCodeDirect
+        ? KIMI_CODE_ANTHROPIC_ENDPOINT
+        : "local claude CLI + page Kimi key -> https://api.kimi.com/coding/"
       : baseUrl === "local:claude-config"
         ? "local claude CLI configured auth"
       : endpoint,
@@ -10317,7 +10732,8 @@ function buildModelDiagnosticReport(settings = {}) {
   const apiKeyRef = String(settings.apiKeyRef || "").trim();
   const savedKey = apiKeyRef ? secretStore.keys.get(apiKeyRef) : null;
   const diagnostics = getSettingsDiagnostics(settings);
-  const isClaudeProvider = baseUrl === "local:claude-kimi" || baseUrl === "local:claude-config";
+  const usesKimiCodeDirect = baseUrl === "local:claude-kimi" && !KIMI_CODE_USE_CLAUDE_CLI;
+  const isClaudeProvider = baseUrl === "local:claude-config" || (baseUrl === "local:claude-kimi" && !usesKimiCodeDirect);
   const commandPath = isClaudeProvider ? buildCommandPath() : process.env.PATH || "";
   const keyRefMatches = savedKey
     ? savedKey.provider === provider && savedKey.baseUrl === baseUrl
@@ -10363,7 +10779,9 @@ function buildModelDiagnosticReport(settings = {}) {
       cliMaxBudgetUsd: Number(settings.agentBudgetUsd || 500),
       note: isClaudeProvider
         ? "Claude Code CLI 会收到 --max-budget-usd；如果错误仍提示旧预算，通常是 CLI 读取了其他认证/配置或供应商账户预算。"
-        : "普通 OpenAI-compatible Provider 不使用 Claude Code CLI 的 --max-budget-usd。",
+        : usesKimiCodeDirect
+          ? "Kimi Code Direct 走 HTTP Anthropic 协议，不使用 Claude Code CLI 的 --max-budget-usd。"
+          : "普通 OpenAI-compatible Provider 不使用 Claude Code CLI 的 --max-budget-usd。",
     },
     diagnostics,
   };
@@ -10449,7 +10867,7 @@ function buildModelDiagnosticRecommendations(report) {
   }
 
   if (provider === "kimi-code") {
-    items.push("Kimi Code Key 常见情况是认证成功但普通 Chat Completion 受限；论文阅读建议改用 Kimi 开放平台或 Claude Code + Kimi Code Key。");
+    items.push("Kimi Code Key 如果在普通 Chat Completion 受限，论文阅读建议改用 Kimi Code Direct 或 Kimi 开放平台。");
   }
 
   if (!items.length) {

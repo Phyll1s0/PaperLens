@@ -133,10 +133,10 @@ const PROVIDERS = {
     hint: "DeepSeek OpenAI-compatible API。可改用 deepseek-v4-pro 获得更强模型。",
   },
   "claude-kimi-agent": {
-    label: "Claude Code + Kimi Code Key",
+    label: "Kimi Code Direct",
     baseUrl: "local:claude-kimi",
     model: "kimi-for-coding",
-    hint: "通过本机 Claude Code CLI 调用页面输入的 Kimi Code Key，并隔离 Claude 用户级 settings，避免被本机 OpenSSI 等配置覆盖。",
+    hint: "使用页面输入的 Kimi Code Key 直连 Kimi Code Anthropic API。默认不依赖本机 Claude CLI，Docker 和别人电脑也更容易使用。",
   },
   "claude-local": {
     label: "Claude Code 本机配置",
@@ -180,6 +180,7 @@ const CLIENT_ANALYSIS_DEFAULTS = {
   deepseek: { batchSize: 12, concurrency: 3, maxBatchSize: 24, expectedBatchSeconds: 34, failedRetryBatchSize: 3 },
   "kimi-direct": { batchSize: 12, concurrency: 3, maxBatchSize: 20, expectedBatchSeconds: 42, failedRetryBatchSize: 2 },
   "claude-agent": { batchSize: 8, concurrency: 2, maxBatchSize: 20, expectedBatchSeconds: 75, failedRetryBatchSize: 2 },
+  "kimi-code-direct": { batchSize: 12, concurrency: 3, maxBatchSize: 20, expectedBatchSeconds: 38, failedRetryBatchSize: 2 },
 };
 
 loadSettings();
@@ -531,7 +532,7 @@ function updateModelDiagnostics(remoteDiagnostics) {
   const settings = getSettings();
   const endpoint = getChatEndpoint(settings.baseUrl);
   const savedKey = settings.apiKey ? null : getStoredKeyInfo();
-  const isClaudeProvider = settings.baseUrl === "local:claude-kimi" || settings.baseUrl === "local:claude-config";
+  const isClaudeProvider = settings.baseUrl === "local:claude-config";
   const keyPrefix = settings.apiKey.startsWith("sk-kimi-")
     ? "sk-kimi"
     : settings.apiKey.startsWith("sk-")
@@ -552,8 +553,8 @@ function updateModelDiagnostics(remoteDiagnostics) {
     proxyAppliedToAgent: isClaudeProvider,
     proxyTransport: {
       present: Boolean(settings.proxyUrl),
-      applied: isClaudeProvider && Boolean(settings.proxyUrl),
-      mode: isClaudeProvider ? "cli-env" : "direct",
+      applied: Boolean(settings.proxyUrl),
+      mode: isClaudeProvider ? "cli-env" : settings.proxyUrl ? "http-connect" : "direct",
       protocol: settings.proxyUrl ? settings.proxyUrl.split(":")[0] : "",
       supported: true,
       effectiveProxy: settings.proxyUrl,
@@ -783,7 +784,7 @@ function getProxyGuideStatus(settings, diagnostics) {
 
 function getProviderGuideSummary(settings, diagnostics) {
   if (settings.provider === "claude-kimi-agent") {
-    return "页面 Kimi Code Key 会注入到本机 Claude Code CLI，适合 Kimi Code Key 不能直接 Chat Completion 的情况。";
+    return "页面 Kimi Code Key 会直连 Kimi Code Anthropic API；默认不需要本机 Claude CLI。";
   }
 
   if (settings.provider === "claude-local") {
@@ -791,7 +792,7 @@ function getProviderGuideSummary(settings, diagnostics) {
   }
 
   if (settings.provider === "kimi-code") {
-    return "只用于验证 Kimi Code endpoint；若提示访问受限，切到 Claude Code + Kimi Code Key。";
+    return "只用于验证 Kimi Code OpenAI endpoint；若提示访问受限，切到 Kimi Code Direct。";
   }
 
   if (settings.provider === "kimi-platform") {
@@ -810,14 +811,12 @@ function getProviderSpecificGuideItems(settings, diagnostics, context) {
 
   if (settings.provider === "claude-kimi-agent") {
     items.push({
-      status: diagnostics.runtime?.isDocker ? "warn" : "ok",
-      text: diagnostics.runtime?.isDocker
-        ? "当前在 Docker 内运行；页面 Key 能传给容器内 CLI，但不会读取宿主机 ~/.claude。"
-        : "当前在本机进程运行；会使用页面输入的 Kimi Code Key，并隔离用户级 Claude settings。",
+      status: "ok",
+      text: "当前通道直接请求 Kimi Code Anthropic endpoint，不读取宿主机 ~/.claude，也不依赖容器内安装 claude CLI。",
     });
     items.push({
       status: "neutral",
-      text: "如果出现 Budget has been exceeded，说明已走到 Claude Code/Kimi 认证链路，下一步应检查 CLI 实际使用的账户、Key 和预算来源。",
+      text: "如果出现额度或频率限制，请在 Kimi Code 控制台检查会员权益、5 小时频率窗口和 Key 状态。",
     });
   } else if (settings.provider === "claude-local") {
     items.push({
@@ -829,7 +828,7 @@ function getProviderSpecificGuideItems(settings, diagnostics, context) {
   } else if (settings.provider === "kimi-code") {
     items.push({
       status: "warn",
-      text: "Kimi Code Key 常见现象是认证成功但普通 Chat Completion 被拒绝；论文阅读建议优先用 Kimi 开放平台或 Claude Code + Kimi Code Key。",
+      text: "Kimi Code Key 如果在普通 Chat Completion 被拒绝，论文阅读建议优先用 Kimi Code Direct 或 Kimi 开放平台。",
     });
   } else if (settings.provider === "kimi-platform") {
     items.push({
@@ -860,7 +859,7 @@ function getProviderSpecificGuideItems(settings, diagnostics, context) {
 
 function getChatEndpoint(baseUrl) {
   if (baseUrl === "local:claude-kimi") {
-    return "local claude CLI + page Kimi key -> https://api.kimi.com/coding/";
+    return "https://api.kimi.com/coding/v1/messages";
   }
 
   if (baseUrl === "local:claude-config") {
@@ -4514,11 +4513,14 @@ function getClientAnalysisStrategy(settings, paper) {
   const provider = String(settings.provider || "").toLowerCase();
   const baseUrl = String(settings.baseUrl || "").toLowerCase();
   const model = String(settings.model || "").toLowerCase();
-  const agentLike = provider.startsWith("claude") || baseUrl.startsWith("local:claude");
+  const kimiCodeDirectLike = baseUrl === "local:claude-kimi";
+  const agentLike = !kimiCodeDirectLike && (provider.startsWith("claude") || baseUrl.startsWith("local:claude"));
   const deepseekLike = provider.includes("deepseek") || baseUrl.includes("deepseek") || model.includes("deepseek");
   const kimiDirectLike = provider.includes("kimi") || baseUrl.includes("moonshot") || baseUrl.includes("api.kimi.com");
   const profile = normalizeAnalysisProfile(settings.analysisProfile);
-  const base = agentLike
+  const base = kimiCodeDirectLike
+    ? CLIENT_ANALYSIS_DEFAULTS["kimi-code-direct"]
+    : agentLike
     ? CLIENT_ANALYSIS_DEFAULTS["claude-agent"]
     : deepseekLike
       ? CLIENT_ANALYSIS_DEFAULTS.deepseek
@@ -4527,7 +4529,9 @@ function getClientAnalysisStrategy(settings, paper) {
         : CLIENT_ANALYSIS_DEFAULTS.general;
   const strategy = {
     ...base,
-    name: agentLike ? "claude-agent" : deepseekLike ? "deepseek" : kimiDirectLike ? "kimi-direct" : "openai-compatible",
+    name: kimiCodeDirectLike
+      ? "kimi-code-direct"
+      : agentLike ? "claude-agent" : deepseekLike ? "deepseek" : kimiDirectLike ? "kimi-direct" : "openai-compatible",
     profile,
     targetMinutes: profile === "fast" ? 12 : 20,
   };
@@ -4585,6 +4589,7 @@ function getAnalysisStrategyLabel(strategy = {}) {
     "claude-agent": "Claude Agent",
     deepseek: "DeepSeek",
     "kimi-direct": "Kimi Direct",
+    "kimi-code-direct": "Kimi Code Direct",
     "openai-compatible": "OpenAI兼容",
   }[strategy.name] || strategy.name || "默认";
   return `${providerLabel}/${ANALYSIS_PROFILE_LABELS[normalizeAnalysisProfile(strategy.profile)]}`;
