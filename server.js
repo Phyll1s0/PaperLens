@@ -9,6 +9,12 @@ import { mkdir, readFile, readdir, rename, rm, unlink, writeFile, stat } from "n
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { inflateSync } from "node:zlib";
+import {
+  KIMI_CODE_ANTHROPIC_ENDPOINT,
+  buildKimiCodeAnthropicHeaders,
+  buildKimiCodeAnthropicRequestBody,
+  extractAnthropicTextContent,
+} from "./lib/kimi-code-direct.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -67,7 +73,6 @@ const ANALYSIS_FAILED_RETRY_BATCH_SIZE = readIntegerEnv("PAPERLENS_ANALYSIS_FAIL
 const ANALYSIS_TARGET_MINUTES = readIntegerEnv("PAPERLENS_ANALYSIS_TARGET_MINUTES", 20, 5, 240);
 const KIMI_CODE_USE_CLAUDE_CLI = /^(1|true|yes|on)$/i
   .test(String(process.env.PAPERLENS_KIMI_CODE_USE_CLAUDE_CLI || ""));
-const KIMI_CODE_ANTHROPIC_ENDPOINT = "https://api.kimi.com/coding/v1/messages";
 const KIMI_CODE_DIRECT_MAX_TOKENS = readIntegerEnv("PAPERLENS_KIMI_CODE_MAX_TOKENS", 12_000, 1024, 64_000);
 const ANALYSIS_CACHE_VERSION = 1;
 const ANALYSIS_CACHE_MAX_ENTRIES = 800;
@@ -9659,16 +9664,11 @@ async function callKimiCodeAnthropicDirect(settings, messages, options = {}) {
     }
   }
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 90_000);
-  const { system, anthropicMessages } = buildAnthropicMessages(messages);
 
   try {
-    const requestBody = {
-      model: settings.model || "kimi-for-coding",
-      max_tokens: Number(options.maxTokens || KIMI_CODE_DIRECT_MAX_TOKENS),
-      temperature: 0.2,
-      system,
-      messages: anthropicMessages,
-    };
+    const requestBody = buildKimiCodeAnthropicRequestBody(settings, messages, {
+      maxTokens: options.maxTokens || KIMI_CODE_DIRECT_MAX_TOKENS,
+    });
     let response;
     try {
       response = await requestModelEndpoint(KIMI_CODE_ANTHROPIC_ENDPOINT, {
@@ -9676,10 +9676,7 @@ async function callKimiCodeAnthropicDirect(settings, messages, options = {}) {
         body: requestBody,
         proxyUrl: settings.proxyUrl,
         signal: controller.signal,
-        headers: {
-          "anthropic-version": "2023-06-01",
-          "x-api-key": settings.apiKey,
-        },
+        headers: buildKimiCodeAnthropicHeaders(settings.apiKey),
       });
     } catch (error) {
       if (error.name === "AbortError") {
@@ -9710,69 +9707,6 @@ async function callKimiCodeAnthropicDirect(settings, messages, options = {}) {
     options.signal?.removeEventListener("abort", abortFromExternalSignal);
     clearTimeout(timeout);
   }
-}
-
-function buildAnthropicMessages(messages = []) {
-  const systemParts = [];
-  const anthropicMessages = [];
-
-  for (const message of messages) {
-    const role = String(message?.role || "user").toLowerCase();
-    const content = String(message?.content || "");
-    if (!content) {
-      continue;
-    }
-
-    if (role === "system") {
-      systemParts.push(content);
-      continue;
-    }
-
-    const normalizedRole = role === "assistant" ? "assistant" : "user";
-    const previous = anthropicMessages.at(-1);
-    if (previous?.role === normalizedRole) {
-      previous.content = `${previous.content}\n\n${content}`;
-    } else {
-      anthropicMessages.push({
-        role: normalizedRole,
-        content,
-      });
-    }
-  }
-
-  if (!anthropicMessages.length) {
-    anthropicMessages.push({
-      role: "user",
-      content: "请继续。",
-    });
-  }
-
-  return {
-    system: systemParts.join("\n\n") || undefined,
-    anthropicMessages,
-  };
-}
-
-function extractAnthropicTextContent(data) {
-  if (typeof data?.content === "string") {
-    return data.content;
-  }
-
-  if (Array.isArray(data?.content)) {
-    return data.content
-      .map((block) => {
-        if (typeof block === "string") {
-          return block;
-        }
-        return block?.text || block?.content || "";
-      })
-      .filter(Boolean)
-      .join("\n")
-      .trim();
-  }
-
-  const message = data?.choices?.[0]?.message;
-  return message?.content || message?.reasoning_content || data?.result || "";
 }
 
 function formatModelNetworkError(error, settings) {
