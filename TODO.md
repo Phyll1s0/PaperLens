@@ -24,6 +24,7 @@ Updated: 2026-06-03
 
 ## Done
 
+- [x] Markdown 表格与公式展示升级：问答/讲解中的 Markdown 表格会渲染为真实表格，并兼容模型把表格行压成一行的情况；公式 artifact 展示层增加 LaTeX 化归一，优先用 display math 呈现。
 - [x] Markdown 阅读块统一：原文、翻译、讲解、追问问答、视觉材料说明统一走块级 Markdown 渲染，支持标题、段落、列表、引用、分隔线、代码围栏和公式块；局部刷新会保留当前视口，避免提问后跳回顶部。
 - [x] 视觉材料人工校正：图片/表格/公式/代码 artifact 支持前端改类型、修正文本文字、隐藏/恢复；隐藏项会退出 AI 上下文、导出和段落图表引用，并在视觉重建时尽量保留人工修正。
 - [x] 文档同步：README、`.env.example` 和 setup 提示已更新到 Kimi Code Direct、真实论文跑通结果、碎片 LaTeX 修复、Docker/Claude CLI 关系和代理策略。

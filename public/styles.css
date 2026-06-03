@@ -1726,6 +1726,45 @@ select:focus {
   background: #dfe7e2;
 }
 
+.markdown-table-wrap {
+  max-width: 100%;
+  margin: 0 0 0.9em;
+  overflow-x: auto;
+  border: 1px solid #dfe7e2;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.markdown-table {
+  width: 100%;
+  min-width: 520px;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.markdown-table th,
+.markdown-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #e7ece8;
+  border-left: 1px solid #edf1ee;
+  vertical-align: top;
+}
+
+.markdown-table th:first-child,
+.markdown-table td:first-child {
+  border-left: 0;
+}
+
+.markdown-table th {
+  background: #f6f8f5;
+  color: #1e2d2a;
+  font-weight: 780;
+}
+
+.markdown-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
 .markdown-code-block {
   margin: 0 0 0.86em;
   overflow: auto;

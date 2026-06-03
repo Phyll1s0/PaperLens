@@ -3123,10 +3123,7 @@ function renderPageArtifact(artifact) {
   if (artifact.type === "code") {
     body.append(renderMarkdownCodeBlock(artifact.text || ""));
   } else {
-    const text = artifact.type === "formula" && !hasMathDelimiters(artifact.text)
-      ? `\\[${artifact.text}\\]`
-      : artifact.text;
-    renderMarkdownBlock(body, text);
+    renderMarkdownBlock(body, getArtifactDisplayMarkdown(artifact));
   }
 
   const crop = renderArtifactCrop(artifact);
@@ -3160,6 +3157,49 @@ function renderPageArtifactCompactBody(artifact) {
   body.textContent = text;
   body.title = text;
   return body;
+}
+
+function getArtifactDisplayMarkdown(artifact) {
+  if (artifact?.type !== "formula") {
+    return artifact?.text || "";
+  }
+
+  const source = String(artifact.latex || artifact.text || "").trim();
+  if (!source) {
+    return "";
+  }
+
+  if (hasMathDelimiters(source)) {
+    return source;
+  }
+
+  return `\\[${normalizeFormulaArtifactLatex(source)}\\]`;
+}
+
+function normalizeFormulaArtifactLatex(source) {
+  return String(source || "")
+    .replace(/\s+/g, " ")
+    .replace(/−/g, "-")
+    .replace(/ℓ/g, "\\ell")
+    .replace(/θ/g, "\\theta")
+    .replace(/α/g, "\\alpha")
+    .replace(/β/g, "\\beta")
+    .replace(/γ/g, "\\gamma")
+    .replace(/σ/g, "\\sigma")
+    .replace(/μ/g, "\\mu")
+    .replace(/λ/g, "\\lambda")
+    .replace(/η/g, "\\eta")
+    .replace(/Ω/g, "\\Omega")
+    .replace(/Δ/g, "\\Delta")
+    .replace(/\b(log|exp|min|max|softmax|argmin|argmax)\b/g, "\\$1")
+    .replace(/\b(WQL|MASE|CRPS|NLL|RMSE|MSE|QL)\b/g, "\\mathrm{$1}")
+    .replace(/\b([A-Za-z])([A-Z]\s*[+\-]\s*[A-Za-z0-9]+(?:\s*[+\-]\s*[A-Za-z0-9]+)*)\b/g, "$1_{$2}")
+    .replace(/\b([A-Za-z])(\d+(?::[A-Za-z0-9+\-]+)?(?:[+\-][A-Za-z0-9]+)*)\b/g, "$1_{$2}")
+    .replace(/p_?\{?\\theta\}?/g, "p_{\\theta}")
+    .replace(/\s*([=<>≤≥≠≈+\-*/→←↔±×÷])\s*/g, "$1")
+    .replace(/\s*,\s*/g, ",")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function isVisualCaptionArtifact(artifact) {
@@ -3440,10 +3480,7 @@ function openArtifactViewer(artifact, options = {}) {
   if (artifact.type === "code") {
     caption.append(renderMarkdownCodeBlock(artifact.text || ""));
   } else {
-    const captionText = artifact.type === "formula" && !hasMathDelimiters(artifact.text)
-      ? `\\[${artifact.text}\\]`
-      : artifact.text;
-    renderMarkdownBlock(caption, captionText);
+    renderMarkdownBlock(caption, getArtifactDisplayMarkdown(artifact));
   }
 
   panel.append(header, viewerBody, caption);
@@ -4007,7 +4044,32 @@ function renderRichText(element, text) {
 }
 
 function renderMarkdownBlock(element, text) {
-  element.replaceChildren(createMarkdownBlockFragment(normalizeRichTextSource(text)));
+  element.replaceChildren(createMarkdownBlockFragment(normalizeMarkdownBlockSource(text)));
+}
+
+function normalizeMarkdownBlockSource(text) {
+  return expandCompactMarkdownTableRows(normalizeRichTextSource(text));
+}
+
+function expandCompactMarkdownTableRows(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .flatMap((line) => {
+      if (!isCompactMarkdownTableLine(line)) {
+        return [line];
+      }
+
+      return line
+        .replace(/\|\s+(?=\|)/g, "|\n")
+        .split("\n");
+    })
+    .join("\n");
+}
+
+function isCompactMarkdownTableLine(line) {
+  const value = String(line || "");
+  const pipeCount = (value.match(/\|/g) || []).length;
+  return pipeCount >= 8 && /\|\s+\|/.test(value) && /\|?\s*:?-{3,}:?\s*\|/.test(value);
 }
 
 function createMarkdownBlockFragment(text) {
@@ -4034,6 +4096,13 @@ function createMarkdownBlockFragment(text) {
         index += 1;
       }
       fragment.append(renderMarkdownCodeBlock(codeLines.join("\n"), fence[1] || ""));
+      continue;
+    }
+
+    if (isMarkdownTableStart(lines, index)) {
+      const table = readMarkdownTable(lines, index);
+      fragment.append(renderMarkdownTable(table));
+      index = table.nextIndex;
       continue;
     }
 
@@ -4101,7 +4170,7 @@ function createMarkdownBlockFragment(text) {
 
     const paragraphLines = [line.trim()];
     index += 1;
-    while (index < lines.length && lines[index].trim() && !isMarkdownBlockStart(lines[index])) {
+    while (index < lines.length && lines[index].trim() && !isMarkdownBlockStartAt(lines, index)) {
       paragraphLines.push(lines[index].trim());
       index += 1;
     }
@@ -4118,6 +4187,109 @@ function isMarkdownBlockStart(line) {
   return /^\s*```/.test(line) ||
     /^\s*(?:#{1,4}\s+|>\s?|[-*+]\s+|\d+[.)]\s+|(?:-{3,}|\*{3,}|_{3,})\s*$)/.test(line) ||
     /^\s*(?:\$\$|\\\[)/.test(line);
+}
+
+function isMarkdownBlockStartAt(lines, index) {
+  return isMarkdownBlockStart(lines[index] || "") || isMarkdownTableStart(lines, index);
+}
+
+function isMarkdownTableStart(lines, index) {
+  const header = lines[index] || "";
+  const delimiter = lines[index + 1] || "";
+  return isMarkdownTableRow(header) && isMarkdownTableDelimiterRow(delimiter) &&
+    splitMarkdownTableRow(header).length >= 2;
+}
+
+function readMarkdownTable(lines, startIndex) {
+  const headers = splitMarkdownTableRow(lines[startIndex]);
+  const aligns = splitMarkdownTableRow(lines[startIndex + 1])
+    .map((cell) => getMarkdownTableAlign(cell));
+  const rows = [];
+  let index = startIndex + 2;
+
+  while (index < lines.length && isMarkdownTableRow(lines[index]) && !isMarkdownTableDelimiterRow(lines[index])) {
+    rows.push(splitMarkdownTableRow(lines[index]));
+    index += 1;
+  }
+
+  return {
+    headers,
+    aligns,
+    rows,
+    nextIndex: index,
+  };
+}
+
+function renderMarkdownTable(table) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "markdown-table-wrap";
+  const element = document.createElement("table");
+  element.className = "markdown-table";
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+
+  for (let index = 0; index < table.headers.length; index += 1) {
+    const cell = document.createElement("th");
+    setMarkdownTableCellAlign(cell, table.aligns[index]);
+    cell.append(createRichTextFragment(table.headers[index]));
+    headRow.append(cell);
+  }
+  thead.append(headRow);
+  element.append(thead);
+
+  const tbody = document.createElement("tbody");
+  for (const row of table.rows) {
+    const tableRow = document.createElement("tr");
+    for (let index = 0; index < table.headers.length; index += 1) {
+      const cell = document.createElement("td");
+      setMarkdownTableCellAlign(cell, table.aligns[index]);
+      cell.append(createRichTextFragment(row[index] || ""));
+      tableRow.append(cell);
+    }
+    tbody.append(tableRow);
+  }
+  element.append(tbody);
+  wrapper.append(element);
+  return wrapper;
+}
+
+function isMarkdownTableRow(line) {
+  const value = String(line || "").trim();
+  return value.includes("|") && splitMarkdownTableRow(value).length >= 2;
+}
+
+function isMarkdownTableDelimiterRow(line) {
+  const cells = splitMarkdownTableRow(line);
+  return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s+/g, "")));
+}
+
+function splitMarkdownTableRow(line) {
+  let value = String(line || "").trim();
+  if (value.startsWith("|")) {
+    value = value.slice(1);
+  }
+  if (value.endsWith("|")) {
+    value = value.slice(0, -1);
+  }
+
+  return value.split("|").map((cell) => cell.trim());
+}
+
+function getMarkdownTableAlign(cell) {
+  const value = String(cell || "").replace(/\s+/g, "");
+  if (value.startsWith(":") && value.endsWith(":")) {
+    return "center";
+  }
+  if (value.endsWith(":")) {
+    return "right";
+  }
+  return "";
+}
+
+function setMarkdownTableCellAlign(cell, align) {
+  if (align) {
+    cell.style.textAlign = align;
+  }
 }
 
 function readMarkdownDisplayMathBlock(lines, startIndex) {
