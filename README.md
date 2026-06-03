@@ -25,6 +25,12 @@ http://127.0.0.1:3000
 npm run setup -- --check
 ```
 
+运行最小回归测试：
+
+```bash
+npm test
+```
+
 Docker 运行：
 
 ```bash

@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "setup": "node scripts/setup.mjs",
+    "test": "node scripts/test.mjs",
     "dev": "node scripts/dev.mjs",
     "start": "node server.js",
     "health": "node scripts/healthcheck.mjs",

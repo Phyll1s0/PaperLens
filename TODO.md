@@ -10,7 +10,7 @@ Updated: 2026-06-03
 
 ## Next
 
-1. [ ] 自动化测试基础层：补最小 PDF fixture、Provider mock、Kimi Direct mock、碎片 LaTeX 渲染、导出 QA、Markdown/Word 导出和 Job Queue 恢复测试。
+1. [ ] 自动化测试扩展：补最小 PDF fixture、Provider mock、Kimi Direct mock、导出 QA、Markdown/Word 导出和 Job Queue 恢复测试。
 2. [ ] 长任务预算保护：每篇论文显示预计 token、预计时长、预计费用/额度，支持任务级最大预算，超限前提示。
 3. [ ] 视觉裁剪编辑器：允许用户点击页面图像后手动框选/调整图片、公式、代码块，并重建相关段落引用。
 
@@ -25,6 +25,7 @@ Updated: 2026-06-03
 ## Done
 
 - [x] 文档同步：README、`.env.example` 和 setup 提示已更新到 Kimi Code Direct、真实论文跑通结果、碎片 LaTeX 修复、Docker/Claude CLI 关系和代理策略。
+- [x] 自动化测试基础入口：新增 `npm test`、`scripts/test.mjs` 和首个碎片 LaTeX 回归测试，后续测试统一接入 `tests/*.test.mjs`。
 - [x] Kimi Code Direct 通道：页面 Kimi Code Key 默认直连 `https://api.kimi.com/coding/v1/messages`，不依赖本机 `claude` CLI；Claude CLI 只保留为本机配置/可选后备。
 - [x] 整篇论文真实跑通：TimesFM 论文使用 Kimi Code Direct 精读完成 `125/125` 段，失败 `0`，导出 QA 为 `ok`。
 - [x] 碎片 LaTeX 渲染修复：展示前自动合并被换行拆碎的公式 token，例如 `y 1:L := \{ y 1, ⋯, y L \}` 会归一化为可渲染的 `$y_{1:L}:=\{y_{1},⋯,y_{L}\}$`。
