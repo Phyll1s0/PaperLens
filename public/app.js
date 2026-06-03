@@ -3195,7 +3195,7 @@ function renderArtifactCrop(artifact) {
   frame.style.aspectRatio = `${crop.width} / ${crop.height}`;
   frame.addEventListener("click", () => openArtifactViewer(artifact));
 
-  frame.append(renderCropImage(artifact, { preferCropUrl: true }));
+  frame.append(renderCropImage(artifact));
   return frame;
 }
 
