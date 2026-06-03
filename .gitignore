@@ -9,3 +9,5 @@ paper-assets/
 .env.*
 !.env.example
 *.pdf
+!tests/fixtures/
+!tests/fixtures/*.pdf
