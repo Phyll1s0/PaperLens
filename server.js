@@ -22,6 +22,9 @@ import {
   buildPaperExportQa as buildPaperExportQaReport,
 } from "./lib/export-qa.js";
 import {
+  buildPaperMarkdownExport,
+} from "./lib/export-markdown.js";
+import {
   KIMI_CODE_ANTHROPIC_ENDPOINT,
   buildKimiCodeAnthropicHeaders,
   buildKimiCodeAnthropicRequestBody,
@@ -398,7 +401,10 @@ async function handleUpload(req, res) {
 
 async function handleExportPaperMarkdown(req, res, paperId) {
   const paper = await loadPaper(paperId);
-  const markdown = buildPaperMarkdownExport(paper, getRequestBaseUrl(req));
+  const markdown = buildPaperMarkdownExport(paper, getRequestBaseUrl(req), {
+    isReadingParagraphForPaper,
+    getVisiblePaperArtifacts,
+  });
   const filename = `${sanitizeDownloadFilename(paper.title || paper.filename || paper.id)}.md`;
   await recordPaperExport(paper, "markdown", filename);
 
@@ -4834,78 +4840,6 @@ function normalizePaperOcrStatus(paper) {
   return paper?.ocr || null;
 }
 
-function buildPaperMarkdownExport(paper, baseUrl = "") {
-  const title = normalizeExportLine(paper.title || paper.filename || "PaperLens Notes");
-  const sectionsById = new Map((paper.sections || []).map((section) => [section.id, section]));
-  const artifactsById = new Map(getVisiblePaperArtifacts(paper).map((artifact) => [artifact.id, artifact]));
-  const lines = [
-    `# ${escapeMarkdownHeading(title)}`,
-    "",
-    `- 文件：${normalizeExportLine(paper.filename || "") || "未知"}`,
-    `- 页数：${paper.pageCount || "未知"}`,
-    `- 段落数：${(paper.paragraphs || []).filter((paragraph) => isReadingParagraphForPaper(paper, paragraph)).length}`,
-    `- 导出时间：${new Date().toISOString()}`,
-    "",
-  ];
-
-  let currentSectionTitle = "";
-  for (const paragraph of paper.paragraphs || []) {
-    if (paragraph.kind === "heading") {
-      const heading = normalizeExportLine(paragraph.sourceText || "");
-      if (heading) {
-        currentSectionTitle = heading;
-        lines.push(`## ${escapeMarkdownHeading(heading)}`, "");
-      }
-      continue;
-    }
-
-    if (!isReadingParagraphForPaper(paper, paragraph)) {
-      continue;
-    }
-
-    const section = sectionsById.get(paragraph.sectionId);
-    const sectionTitle = normalizeExportLine(section?.title || paragraph.sectionTitleHint || "");
-    if (sectionTitle && sectionTitle !== "正文" && sectionTitle !== currentSectionTitle) {
-      currentSectionTitle = sectionTitle;
-      lines.push(`## ${escapeMarkdownHeading(sectionTitle)}`, "");
-    }
-
-    const pageLabel = formatExportPageRange(paragraph);
-    lines.push(`### P${Number(paragraph.order || 0) + 1}${pageLabel ? ` · ${pageLabel}` : ""}`, "");
-    appendMarkdownBlock(lines, "原文", paragraph.sourceText);
-    appendMarkdownBlock(lines, "翻译", paragraph.translation || "尚未生成");
-    appendMarkdownBlock(lines, "讲解", paragraph.explanation || "尚未生成");
-
-    const keyTerms = normalizeKeywordList(paragraph.keyTerms).slice(0, 12);
-    if (keyTerms.length) {
-      lines.push(`**术语：** ${keyTerms.map((term) => `\`${escapeMarkdownInline(term)}\``).join(" ")}`, "");
-    }
-
-    const relatedArtifacts = (Array.isArray(paragraph.relatedArtifactIds) ? paragraph.relatedArtifactIds : [])
-      .map((id) => artifactsById.get(id))
-      .filter(Boolean);
-    if (relatedArtifacts.length) {
-      lines.push("**相关图表：**");
-      for (const artifact of relatedArtifacts) {
-        const label = normalizeExportLine(artifact.label || artifact.visualType || artifact.type || "图表");
-        const imagePath = normalizeExportLine(artifact.imagePath || "");
-        const caption = normalizeExportBlock(artifact.text || "");
-        const cropUrl = getExportArtifactCropUrl(paper, artifact, baseUrl);
-        lines.push(`- ${escapeMarkdownInline(label)}${imagePath ? `：${imagePath}` : ""}`);
-        if (cropUrl) {
-          lines.push(`  ![${escapeMarkdownImageAlt(label)}](${cropUrl})`);
-        }
-        if (caption) {
-          lines.push(`  ${caption}`);
-        }
-      }
-      lines.push("");
-    }
-  }
-
-  return `${lines.join("\n").replace(/\n{4,}/g, "\n\n\n").trim()}\n`;
-}
-
 async function buildPaperDocxExport(paper) {
   const title = normalizeExportLine(paper.title || paper.filename || "PaperLens Notes");
   const sectionsById = new Map((paper.sections || []).map((section) => [section.id, section]));
@@ -5273,17 +5207,6 @@ function hashString(value) {
   return hash;
 }
 
-function getExportArtifactCropUrl(paper, artifact, baseUrl = "") {
-  if (!artifact?.crop || !artifact.imagePath) {
-    return "";
-  }
-
-  const prefix = String(baseUrl || "").replace(/\/+$/, "");
-  const paperId = encodeURIComponent(paper.id);
-  const artifactId = encodeURIComponent(artifact.id);
-  return `${prefix}/api/papers/${paperId}/artifacts/${artifactId}/crop.svg`;
-}
-
 function buildArtifactCropSvg(artifact, baseUrl = "") {
   const crop = artifact.crop || {};
   const x = Number(crop.x);
@@ -5329,15 +5252,6 @@ function formatSvgNumber(value) {
   return Number(value).toFixed(3).replace(/\.?0+$/, "");
 }
 
-function appendMarkdownBlock(lines, label, text) {
-  const clean = normalizeExportBlock(text);
-  if (!clean) {
-    return;
-  }
-
-  lines.push(`**${label}**`, "", clean, "");
-}
-
 function formatExportPageRange(paragraph) {
   const start = Number(paragraph.pageNumber || 0);
   const end = Number(paragraph.pageEndNumber || start);
@@ -5359,18 +5273,6 @@ function normalizeExportBlock(text) {
     .replace(/\n[ \t]+/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-}
-
-function escapeMarkdownHeading(text) {
-  return escapeMarkdownInline(text).replace(/^#+\s*/, "");
-}
-
-function escapeMarkdownImageAlt(text) {
-  return String(text || "").replace(/[\]\n\r]/g, " ").trim();
-}
-
-function escapeMarkdownInline(text) {
-  return String(text || "").replace(/([\\`*_{}\[\]()#+.!|-])/g, "\\$1");
 }
 
 function escapeXmlText(text) {
