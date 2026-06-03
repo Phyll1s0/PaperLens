@@ -4,13 +4,13 @@ Updated: 2026-06-03
 
 ## Current Problems
 
-- [ ] 测试覆盖不足：核心路径仍以 `node --check`、health 和手工 API 测试为主，缺少 PDF fixture、Job Queue、Word 导出和 Provider 诊断回归测试。
+- [ ] 测试覆盖不足：核心路径仍以 `node --check`、health 和手工 API 测试为主，缺少 PDF fixture、Job Queue 和 Provider 诊断回归测试。
 - [ ] 长任务预算还不够透明：分析前缺少每篇论文预计 token、预计时间、预计费用/额度和任务级预算上限。
 - [ ] 视觉结构仍不够可控：复杂双栏、多图组合、跨页图、公式/代码混排时，自动裁剪仍可能过大、误分类，用户还不能手动修正。
 
 ## Next
 
-1. [ ] 自动化测试扩展：补最小 PDF fixture、Word 导出和 Job Queue 恢复测试。
+1. [ ] 自动化测试扩展：补最小 PDF fixture 和 Job Queue 恢复测试。
 2. [ ] 长任务预算保护：每篇论文显示预计 token、预计时长、预计费用/额度，支持任务级最大预算，超限前提示。
 3. [ ] 视觉裁剪编辑器：允许用户点击页面图像后手动框选/调整图片、公式、代码块，并重建相关段落引用。
 
@@ -24,6 +24,7 @@ Updated: 2026-06-03
 
 ## Done
 
+- [x] Word 导出回归测试：抽出 `lib/export-docx.js`，让 `.docx` 下载 API 和测试共用导出逻辑；覆盖 docx zip 结构、document XML、媒体关系、图片文件、隐藏图表过滤和 XML 转义。
 - [x] Markdown 导出回归测试：抽出 `lib/export-markdown.js`，让 Markdown 下载 API 和测试共用导出逻辑；覆盖章节、页码、术语去重、尚未生成段落、隐藏图表过滤和裁剪图片链接。
 - [x] 导出 QA 回归测试：抽出 `lib/export-qa.js`，让 API 和测试共用导出检查逻辑；覆盖隐藏图表引用、缺失图表引用、缺失裁剪、缺失图片、低置信裁剪和 LaTeX 风险。
 - [x] Markdown 表格与公式展示升级：问答/讲解中的 Markdown 表格会渲染为真实表格，并兼容模型把表格行压成一行的情况；公式 artifact 展示层增加 LaTeX 化归一，优先用 display math 呈现。
