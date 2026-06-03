@@ -19,7 +19,7 @@ npm run dev
 http://127.0.0.1:3000
 ```
 
-`npm run setup` 会创建缺失的本地目录、从 `.env.example` 生成 `.env`，并检查 Node、Docker、Poppler 和 Claude Code CLI 是否可用。只想检查环境而不写文件，可以运行：
+`npm run setup` 会创建缺失的本地目录、从 `.env.example` 生成 `.env`，并检查 Node、Docker、Poppler，以及可选的 Claude Code CLI 是否可用。默认的 Kimi Code Direct 通道不依赖 Claude CLI。只想检查环境而不写文件，可以运行：
 
 ```bash
 npm run setup -- --check
@@ -159,7 +159,7 @@ docker compose down
 
 Docker 会用 named volumes 持久化 `uploads/`、`data/`、`paper-assets/` 和 `.cache/`。
 
-Docker Compose 会自动读取 `.env` 中的 `PAPERLENS_ACCESS_TOKEN`、`PAPERLENS_SECRET_KEY`、`PAPERLENS_PROXY_URL` 和 `PAPERLENS_OCR_LANGUAGE`。Docker 镜像会安装 OCRmyPDF、Tesseract 英文/简体中文语言包和 Claude Code CLI，因此扫描版 PDF OCR 与 `Claude Code + Kimi Code Key` Provider 都可以在容器内运行。`Claude Code 本机配置` Provider 仍然依赖容器内自己的环境变量或配置，不会自动读取宿主机的 `~/.claude`。
+Docker Compose 会自动读取 `.env` 中的 `PAPERLENS_ACCESS_TOKEN`、`PAPERLENS_SECRET_KEY`、`PAPERLENS_PROXY_URL` 和 `PAPERLENS_OCR_LANGUAGE`。Docker 镜像会安装 OCRmyPDF、Tesseract 英文/简体中文语言包和 Claude Code CLI；扫描版 PDF OCR 可以直接在容器内运行。默认的 `Kimi Code Direct` Provider 走 HTTP API，不需要容器内 Claude CLI。`Claude Code 本机配置` Provider 仍然依赖容器内自己的环境变量或配置，不会自动读取宿主机的 `~/.claude`。
 
 默认端口是 `3000`。如果宿主机端口被占用，可在 `.env` 设置：
 
@@ -177,13 +177,14 @@ PAPERLENS_PORT=3010
 - 可在上传后使用 AI 重新分段。
 - AI 分段会带上一窗口摘要和尾段作为上下文，并保存章节摘要、关键词和跨页续接线索。
 - 可在上传后自动逐段生成翻译、讲解和关键词，并显示后端持久化 Job 进度。
-- 自动分析会按 Provider 分流批处理；Claude Code Agent 低并发大批次，DeepSeek/OpenAI-compatible 更偏吞吐，并会缓存已完成段落。
+- 自动分析会按 Provider 分流批处理；Kimi Code Direct、DeepSeek/OpenAI-compatible 更偏吞吐，Claude Code 本机配置更保守，并会缓存已完成段落。
 - 分析任务支持刷新后恢复、任务历史查看和失败段落小批次重跑。
 - 在浏览器会话中保存模型配置和本地 key id，不保存完整 API Key。
 - 后端只在本地私有 `data/secrets.json` 保存完整 API Key，任务文件只保存 key id；设置访问令牌或 secret key 后会加密保存。
 - 对单个段落生成翻译、讲解和关键词。
 - 段落分析会结合邻近段落、相关图表 caption 和前文术语。
 - 段落分析上下文窗口会额外结合全文关键词、章节摘要和同引用窗口。
+- 展示层会修复常见碎片 LaTeX，把被 PDF/模型拆成多行的公式 token 合并成可渲染公式。
 - 公式和代码块会保留页面原始截图裁剪，支持点击放大查看。
 - 对单个段落进行追问，并结合附近段落回答。
 
@@ -193,7 +194,7 @@ PAPERLENS_PORT=3010
 
 - DeepSeek Base URL：`https://api.deepseek.com`
 - DeepSeek Model：`deepseek-v4-flash` 或 `deepseek-v4-pro`
-- Claude Code + Kimi Code Key：本机 `claude` CLI + 页面输入的 Kimi Code Key，Base URL 显示为 `local:claude-kimi`
+- Kimi Code Direct：页面输入 Kimi Code Key，后端直连 Anthropic-compatible endpoint `https://api.kimi.com/coding/v1/messages`，Base URL 显示为 `local:claude-kimi`
 - Claude Code 本机配置：使用本机 Claude Code 已登录/已配置的认证，不读取页面 API Key
 - Kimi Code Base URL：`https://api.kimi.com/coding/v1`
 - Kimi Code Model：`kimi-for-coding`
@@ -203,15 +204,19 @@ PAPERLENS_PORT=3010
 - OpenAI Model 示例：`gpt-4.1-mini`
 - API Key 提交成功后会写入本机私有 `data/secrets.json`，浏览器只保存本地 key id；`data/` 已被 `.gitignore` 忽略。
 
-注意：`www.kimi.com/code/console` 生成的是 Kimi Code Key，它和 Kimi 开放平台 Key 不通用。Kimi Code Key 使用 `https://api.kimi.com/coding/v1` 和 `kimi-for-coding`，但官方可能限制它只给 Coding Agent 使用。论文阅读这类普通应用建议使用 Kimi 开放平台 Key。
+注意：`www.kimi.com/code/console` 生成的是 Kimi Code Key，它和 Kimi 开放平台 Key 不通用。PaperLens 的 `Kimi Code Direct` 使用 Kimi Code 的 Anthropic-compatible endpoint `https://api.kimi.com/coding/v1/messages` 和模型 `kimi-for-coding`；普通 `Kimi Code` 选项则用于 OpenAI-compatible endpoint `https://api.kimi.com/coding/v1`。
 
-如果要在 PaperLens 中使用 Kimi Code Key，可以选择 `Claude Code + Kimi Code Key` Provider。它不会直接从网页伪装调用 Kimi Code API，而是让后端调用本机已安装的 Claude Code CLI，并通过 Anthropic-compatible endpoint `https://api.kimi.com/coding/` 访问 Kimi Code。为降低风险，PaperLens 调用时会使用 `--bare`、`--setting-sources project`、`--no-session-persistence`、`--tools ""`，只传入文本任务，并避免本机用户级 Claude settings 覆盖页面输入的 key。
+如果要在 PaperLens 中使用 Kimi Code Key，优先选择 `Kimi Code Direct` Provider。这个通道不读取本机 `~/.claude`，不依赖 `claude` CLI，也不会使用 Claude CLI 的 `--max-budget-usd`。如果你明确想沿用本机 Claude Code 登录态或 OpenSSI 等配置，再选择 `Claude Code 本机配置`。
 
-如果网页提示找不到 `claude` CLI，请确认本机能运行 `claude --version`。macOS launchd 服务会把 `/opt/homebrew/bin`、`/usr/local/bin`、`~/.local/bin` 加入 PATH；如果你的 Claude Code 安装在其他位置，可以设置 `PAPERLENS_CLAUDE_CLI=/path/to/claude`。
+如果 `Claude Code 本机配置` 提示找不到 `claude` CLI，请确认本机能运行 `claude --version`。macOS launchd 服务会把 `/opt/homebrew/bin`、`/usr/local/bin`、`~/.local/bin` 加入 PATH；如果你的 Claude Code 安装在其他位置，可以设置 `PAPERLENS_CLAUDE_CLI=/path/to/claude`。默认的 `Kimi Code Direct` 不需要这一步。
 
-如果你的网络必须通过代理访问模型服务，最简单是在网页模型设置里填 `Proxy URL`；也可以在 `.env` 里设置 `PAPERLENS_PROXY_URL`。本机后台脚本、macOS launchd 和 Docker Compose 都会读取它。普通 OpenAI-compatible Provider 会由 PaperLens 后端代理传输层发起请求，支持 `http://`、`https://`、`socks5://` / `socks5h://` 和 `NO_PROXY`；Claude Code Provider 会把代理注入 CLI 环境。网页模型诊断里会显示代理来源和传输模式，例如 `http-connect` 或 `socks5-tunnel`。Docker 里访问宿主机代理通常要写 `http://host.docker.internal:端口`，不是 `127.0.0.1`。
+如果你的网络必须通过代理访问模型服务，最简单是在网页模型设置里填 `Proxy URL`；也可以在 `.env` 里设置 `PAPERLENS_PROXY_URL`。本机后台脚本、macOS launchd 和 Docker Compose 都会读取它。普通 OpenAI-compatible 与 Kimi Code Direct 请求会由 PaperLens 后端代理传输层发起，支持 `http://`、`https://`、`socks5://` / `socks5h://` 和 `NO_PROXY`；Claude Code 本机配置会把代理注入 CLI 环境。网页模型诊断里会显示代理来源和传输模式，例如 `http-connect` 或 `socks5-tunnel`。Docker 里访问宿主机代理通常要写 `http://host.docker.internal:端口`，不是 `127.0.0.1`。
 
-AI 分段会走三阶段：先做全文结构预扫描，生成标题、正文起点、References 起点、章节页码、非正文区域地图和 `segmentationPlan`；再按 3 页左右的窗口局部分段，每个 heading/paragraph 会尽量绑定计划章节，并带着结构地图、前序摘要和尾段上下文；最后做合并校验，统一修正章节归属、过滤作者/链接/图注/参考文献等非正文碎片，并合并跨页或断句段落。上传和打开旧论文时还会生成页面 `visualRegions`，用几何位置识别图片、表格、公式、代码等视觉区域，再用页面 PNG 的非白像素收紧裁剪边界，并优先用这些区域裁剪图表。长任务默认按“精读质量优先”优化：后端会把段落合并成批次，并发跑多个批次并安全合并写入；已完成段落会写入本地分析缓存，补跑或全量任务会优先复用相同段落的翻译/讲解；失败项重跑会自动降到小批次，批量失败后也会自适应缩小后续批次。每段讲解会覆盖段落含义、论文中的作用、关键概念/公式/图表关系和阅读难点。`.env` 可调整：`PAPERLENS_ANALYSIS_TARGET_MINUTES=20` 控制目标耗时估算，`PAPERLENS_AGENT_ANALYSIS_BATCH_SIZE=8` / `PAPERLENS_AGENT_ANALYSIS_CONCURRENCY=2` 控制 Claude Code Agent，`PAPERLENS_ANALYSIS_BATCH_SIZE=12` / `PAPERLENS_ANALYSIS_CONCURRENCY=3` 控制普通 OpenAI-compatible，`PAPERLENS_ANALYSIS_FAILED_RETRY_BATCH_SIZE=2` 控制失败补跑小批次。批次和并发越大越快，但更容易触发限流、超时或 JSON 不完整；如果想进一步提速，可以把批次调高，但讲解质量会受影响。
+AI 分段会走三阶段：先做全文结构预扫描，生成标题、正文起点、References 起点、章节页码、非正文区域地图和 `segmentationPlan`；再按 3 页左右的窗口局部分段，每个 heading/paragraph 会尽量绑定计划章节，并带着结构地图、前序摘要和尾段上下文；最后做合并校验，统一修正章节归属、过滤作者/链接/图注/参考文献等非正文碎片，并合并跨页或断句段落。上传和打开旧论文时还会生成页面 `visualRegions`，用几何位置识别图片、表格、公式、代码等视觉区域，再用页面 PNG 的非白像素收紧裁剪边界，并优先用这些区域裁剪图表。Kimi Code Direct 默认使用本地视觉分段，避免把慢模型通道阻塞在 PDF 分段上；后续翻译讲解仍通过持久化 Job Queue 批量执行。
+
+长任务默认按“精读质量优先”优化：后端会把段落合并成批次，并发跑多个批次并安全合并写入；已完成段落会写入本地分析缓存，补跑或全量任务会优先复用相同段落的翻译/讲解；失败项重跑会自动降到小批次，批量失败后也会自适应缩小后续批次。每段讲解会覆盖段落含义、论文中的作用、关键概念/公式/图表关系和阅读难点。`.env` 可调整：`PAPERLENS_ANALYSIS_TARGET_MINUTES=20` 控制目标耗时估算，`PAPERLENS_ANALYSIS_BATCH_SIZE=12` / `PAPERLENS_ANALYSIS_CONCURRENCY=3` 控制 Kimi Code Direct 和普通 OpenAI-compatible，`PAPERLENS_AGENT_ANALYSIS_BATCH_SIZE=8` / `PAPERLENS_AGENT_ANALYSIS_CONCURRENCY=2` 控制 Claude Code 本机配置，`PAPERLENS_ANALYSIS_FAILED_RETRY_BATCH_SIZE=2` 控制失败补跑小批次。批次和并发越大越快，但更容易触发限流、超时或 JSON 不完整；如果想进一步提速，可以把批次调高，但讲解质量会受影响。
+
+当前 Kimi Code Direct 通道已用 TimesFM 论文做过完整 smoke test：`125/125` 个阅读段落完成，失败 `0`，导出 QA 为 `ok`，未发现 LaTeX、图表引用或裁剪缺失风险。
 
 重跑分三种：段落卡片按钮只重跑单段；工具栏“补跑失败/未完成”只跑失败、缺翻译或缺讲解的段落，保留已经成功的结果；“重新分段并生成全部”会先重新 AI 分段，再清空并重跑全部新段落。
 
@@ -262,6 +267,7 @@ PAPERLENS_PDF_ENGINE=poppler
 
 ```text
 poppler-utils
+ocrmypdf / tesseract
 @anthropic-ai/claude-code
 ```
 

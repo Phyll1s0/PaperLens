@@ -1736,7 +1736,7 @@ function resolveSecretForSettings(settings) {
   }
 
   if (settings.baseUrl === "local:claude-kimi" && !secret.key.startsWith("sk-kimi-")) {
-    throw badRequest("Kimi Code Key 格式不对：Claude Code + Kimi Code Key 需要输入以 sk-kimi- 开头的完整 Key。请不要复制控制台列表里的脱敏显示值。");
+    throw badRequest("Kimi Code Key 格式不对：Kimi Code Direct 需要输入以 sk-kimi- 开头的完整 Key。请不要复制控制台列表里的脱敏显示值。");
   }
 
   return secret;
@@ -10606,7 +10606,7 @@ function normalizeSettings(settings = {}) {
   }
 
   if (normalizedApiKey && baseUrl === "local:claude-kimi" && !normalizedApiKey.startsWith("sk-kimi-")) {
-    throw badRequest("Kimi Code Key 格式不对：Claude Code + Kimi Code Key 需要输入以 sk-kimi- 开头的完整 Key。请不要复制控制台列表里的脱敏显示值。");
+    throw badRequest("Kimi Code Key 格式不对：Kimi Code Direct 需要输入以 sk-kimi- 开头的完整 Key。请不要复制控制台列表里的脱敏显示值。");
   }
 
   if (!model) {
@@ -10839,7 +10839,7 @@ function buildModelDiagnosticRecommendations(report) {
   }
 
   if (provider === "claude-kimi-agent" && !report.key.present) {
-    items.push("Claude Code + Kimi Code Key 需要页面输入完整 Kimi Code Key；控制台列表里的脱敏 sk-ki... 不能使用。");
+    items.push("Kimi Code Direct 需要页面输入完整 Kimi Code Key；控制台列表里的脱敏 sk-ki... 不能使用。");
   }
 
   if (provider === "claude-kimi-agent" && report.key.present && !report.key.formatOk) {

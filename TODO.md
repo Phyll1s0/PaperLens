@@ -1,20 +1,18 @@
 # PaperLens TODO
 
-Updated: 2026-06-02
+Updated: 2026-06-03
 
 ## Current Problems
 
-- [ ] 视觉结构仍不够可控：复杂双栏、多图组合、跨页图、公式/代码混排时，自动裁剪仍可能过大、误分类，用户还不能手动修正。
+- [ ] 测试覆盖不足：核心路径仍以 `node --check`、health 和手工 API 测试为主，缺少 PDF fixture、Job Queue、导出 QA、LaTeX 渲染和 Provider 诊断回归测试。
 - [ ] 长任务预算还不够透明：分析前缺少每篇论文预计 token、预计时间、预计费用/额度和任务级预算上限。
-- [ ] 测试覆盖不足：核心路径仍以 `node --check`、health 和手工 API 测试为主，缺少 PDF fixture、Job Queue、导出和 Provider 诊断回归测试。
-- [ ] README 与实际能力仍有漂移：最新的诊断包、导出 QA、资源保护、视觉维护和稳定性策略需要同步进文档。
+- [ ] 视觉结构仍不够可控：复杂双栏、多图组合、跨页图、公式/代码混排时，自动裁剪仍可能过大、误分类，用户还不能手动修正。
 
 ## Next
 
-1. [ ] 视觉裁剪编辑器：允许用户点击页面图像后手动框选/调整图片、公式、代码块，并重建相关段落引用。
+1. [ ] 自动化测试基础层：补最小 PDF fixture、Provider mock、Kimi Direct mock、碎片 LaTeX 渲染、导出 QA、Markdown/Word 导出和 Job Queue 恢复测试。
 2. [ ] 长任务预算保护：每篇论文显示预计 token、预计时长、预计费用/额度，支持任务级最大预算，超限前提示。
-3. [ ] 自动化测试基础层：补最小 PDF fixture、Provider mock、导出 QA、Markdown/Word 导出和 Job Queue 恢复测试。
-4. [ ] 文档同步：把实际功能、推荐部署方式、本机应用端方案、Docker 限制、代理和 API Key 安全策略整理到 README。
+3. [ ] 视觉裁剪编辑器：允许用户点击页面图像后手动框选/调整图片、公式、代码块，并重建相关段落引用。
 
 ## Later
 
@@ -26,6 +24,10 @@ Updated: 2026-06-02
 
 ## Done
 
+- [x] 文档同步：README、`.env.example` 和 setup 提示已更新到 Kimi Code Direct、真实论文跑通结果、碎片 LaTeX 修复、Docker/Claude CLI 关系和代理策略。
+- [x] Kimi Code Direct 通道：页面 Kimi Code Key 默认直连 `https://api.kimi.com/coding/v1/messages`，不依赖本机 `claude` CLI；Claude CLI 只保留为本机配置/可选后备。
+- [x] 整篇论文真实跑通：TimesFM 论文使用 Kimi Code Direct 精读完成 `125/125` 段，失败 `0`，导出 QA 为 `ok`。
+- [x] 碎片 LaTeX 渲染修复：展示前自动合并被换行拆碎的公式 token，例如 `y 1:L := \{ y 1, ⋯, y L \}` 会归一化为可渲染的 `$y_{1:L}:=\{y_{1},⋯,y_{L}\}$`。
 - [x] Claude/Kimi 脱敏诊断包：新增 `/api/model/diagnostics` 和前端“诊断包”按钮，可复制 Provider、Key 摘要、Claude CLI、代理、预算、Docker/本机环境和建议，不返回明文 API Key。
 - [x] 导出 QA 检查：新增 `/api/papers/:id/export-qa`，前端提供“导出检查”按钮和结果面板，覆盖未完成段落、坏图表引用、裁剪/资源缺失、低置信图和 LaTeX 风险。
 - [x] 长任务资源保护：新增 `PAPERLENS_MAX_ANALYSIS_JOB_PARAGRAPHS`、`PAPERLENS_MAX_ANALYSIS_JOB_CHARS`、`PAPERLENS_MAX_AI_SEGMENTATION_PAGES`、`PAPERLENS_MAX_OCR_JOB_PAGES`、`PAPERLENS_MAX_VISUAL_REBUILD_*`；health 和前端状态显示当前上限。

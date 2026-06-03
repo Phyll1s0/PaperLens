@@ -22,7 +22,7 @@ function main() {
   checkCommand("docker", ["--version"], "Docker");
   checkCommand("pdftotext", ["-v"], "Poppler pdftotext");
   checkCommand("pdftoppm", ["-v"], "Poppler pdftoppm");
-  checkCommand("claude", ["--version"], "Claude Code CLI");
+  checkCommand("claude", ["--version"], "Claude Code CLI", { optional: true });
   printSummary();
 }
 
@@ -84,7 +84,7 @@ function ensureEnvFile() {
   checks.push({ label: ".env", ok: true, note: force ? "rewritten from template" : "created from template" });
 }
 
-function checkCommand(command, versionArgs, label) {
+function checkCommand(command, versionArgs, label, options = {}) {
   const result = spawnSync(command, versionArgs, {
     cwd: ROOT_DIR,
     encoding: "utf8",
@@ -94,14 +94,16 @@ function checkCommand(command, versionArgs, label) {
   checks.push({
     label,
     ok: result.status === 0,
-    note: result.status === 0 ? output || "available" : "not found or not configured",
+    optional: Boolean(options.optional),
+    note: result.status === 0 ? output || "available" : options.optional ? "optional; only needed for Claude Code 本机配置" : "not found or not configured",
   });
 }
 
 function printSummary() {
   console.log("");
   for (const check of checks) {
-    console.log(`${check.ok ? "OK " : "WARN"} ${check.label}: ${check.note}`);
+    const prefix = check.ok ? "OK " : check.optional ? "INFO" : "WARN";
+    console.log(`${prefix} ${check.label}: ${check.note}`);
   }
 
   console.log("");
@@ -113,7 +115,7 @@ function printSummary() {
   console.log("  docker compose up -d --build");
   console.log("");
   console.log("Optional:");
-  console.log("  edit .env for PAPERLENS_PROXY_URL or PAPERLENS_CLAUDE_CLI");
+  console.log("  edit .env for PAPERLENS_PROXY_URL, PAPERLENS_ACCESS_TOKEN, or PAPERLENS_CLAUDE_CLI");
 }
 
 main();
