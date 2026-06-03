@@ -13,6 +13,7 @@ import {
   clampAdaptiveBatchSize,
   nextAdaptiveBatchSizeAfterSplit,
 } from "./lib/analysis-batching.js";
+import { isLikelyCodeBlockText } from "./lib/artifact-classifier.js";
 import {
   KIMI_CODE_ANTHROPIC_ENDPOINT,
   buildKimiCodeAnthropicHeaders,
@@ -7287,15 +7288,7 @@ function isLikelyFormulaBlock(text, block = {}) {
 }
 
 function isLikelyCodeBlock(text, block = {}) {
-  const lineCount = Number(block.lineCount || 1);
-  if (/^(import|from|def|class|function|const|let|var)\b/i.test(text)) {
-    return true;
-  }
-
-  const codeKeywords = (text.match(/\b(function|class|def|return|import|from|const|let|var|public|private|void|int|float|string|for|while|if|else)\b/gi) || []).length;
-  const codeSymbols = (text.match(/[{};=<>]/g) || []).length;
-
-  return lineCount >= 3 && codeKeywords >= 2 && codeSymbols >= 4 && text.length <= 1800;
+  return isLikelyCodeBlockText(text, block);
 }
 
 function isLikelyFigureTextBlock(text, block = {}) {

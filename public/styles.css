@@ -1203,6 +1203,14 @@ select:focus {
   object-fit: fill;
 }
 
+.artifact-crop img.is-direct-crop {
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  object-fit: contain;
+}
+
 .artifact-crop:hover {
   border-color: rgba(15, 118, 110, 0.55);
   box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.1);

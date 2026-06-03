@@ -3086,7 +3086,7 @@ function renderArtifactCrop(artifact) {
   frame.style.aspectRatio = `${crop.width} / ${crop.height}`;
   frame.addEventListener("click", () => openArtifactViewer(artifact));
 
-  frame.append(renderCropImage(artifact));
+  frame.append(renderCropImage(artifact, { preferCropUrl: true }));
   return frame;
 }
 
@@ -3101,15 +3101,21 @@ function hasArtifactCrop(artifact) {
   );
 }
 
-function renderCropImage(artifact) {
+function renderCropImage(artifact, options = {}) {
   const crop = artifact.crop;
   const image = document.createElement("img");
-  image.src = artifact.imagePath;
+  const cropUrl = options.preferCropUrl ? getArtifactCropUrl(artifact) : "";
+  image.src = cropUrl || artifact.imagePath;
+  image.className = cropUrl ? "is-direct-crop" : "is-page-crop";
   image.alt = artifact.label
     ? `${artifact.label} 裁剪预览`
     : `${getArtifactLabel(artifact.type, artifact.visualType)}裁剪预览`;
   image.loading = "lazy";
   image.decoding = "async";
+  if (cropUrl) {
+    return image;
+  }
+
   image.style.width = `${(crop.pageWidth / crop.width) * 100}%`;
   image.style.height = `${(crop.pageHeight / crop.height) * 100}%`;
   image.style.left = `${-(crop.x / crop.width) * 100}%`;
