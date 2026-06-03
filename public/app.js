@@ -18,6 +18,7 @@ const state = {
   lastSegmentationError: "",
   progressTimer: null,
   lastProgressParagraphId: "",
+  pendingChatMessages: new Map(),
   autoAnalyze: {
     running: false,
     stopRequested: false,
@@ -909,6 +910,7 @@ async function uploadPdf() {
     state.paper = paper;
     resetSegmentationJobState();
     resetAnalysisJobState();
+    state.pendingChatMessages.clear();
     state.query = "";
     state.exportQa = null;
     els.searchInput.value = "";
@@ -1044,6 +1046,7 @@ async function openPaper(paperId) {
     state.paper = await readResponse(response);
     resetAnalysisJobState();
     resetSegmentationJobState();
+    state.pendingChatMessages.clear();
     state.query = "";
     state.exportQa = null;
     state.showHiddenParagraphs = false;
@@ -2374,6 +2377,7 @@ async function askParagraph(paragraphId, input) {
     return;
   }
 
+  const pendingId = addPendingChatMessage(paragraphId, message);
   input.value = "";
   state.busyParagraphId = paragraphId;
   renderPaperPreservingViewport();
@@ -2391,14 +2395,52 @@ async function askParagraph(paragraphId, input) {
     }, "段落追问");
     const result = await readResponse(response);
     applySecuredSettings(result.settings);
+    resolvePendingChatMessage(paragraphId, pendingId);
     replaceParagraph(result.paragraph);
     setStatus("回答完成");
   } catch (error) {
+    failPendingChatMessage(paragraphId, pendingId, error.message);
     setStatus(error.message, true);
   } finally {
     state.busyParagraphId = null;
     renderPaperPreservingViewport();
   }
+}
+
+function addPendingChatMessage(paragraphId, question) {
+  const pendingId = `pending_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  const messages = state.pendingChatMessages.get(paragraphId) || [];
+  messages.push({
+    id: pendingId,
+    question,
+    answer: "正在回答...",
+    pending: true,
+  });
+  state.pendingChatMessages.set(paragraphId, messages);
+  return pendingId;
+}
+
+function resolvePendingChatMessage(paragraphId, pendingId) {
+  const messages = state.pendingChatMessages.get(paragraphId) || [];
+  const next = messages.filter((item) => item.id !== pendingId);
+  if (next.length) {
+    state.pendingChatMessages.set(paragraphId, next);
+  } else {
+    state.pendingChatMessages.delete(paragraphId);
+  }
+}
+
+function failPendingChatMessage(paragraphId, pendingId, message) {
+  const messages = state.pendingChatMessages.get(paragraphId) || [];
+  const item = messages.find((entry) => entry.id === pendingId);
+  if (!item) {
+    return;
+  }
+
+  item.pending = false;
+  item.error = true;
+  item.answer = `回答失败：${normalizeDisplayError(message)}`;
+  state.pendingChatMessages.set(paragraphId, messages);
 }
 
 function ensureModelSettings(options = {}) {
@@ -4755,13 +4797,13 @@ function renderChatBox(paragraph) {
   const thread = document.createElement("div");
   thread.className = "chat-thread";
 
-  for (const item of paragraph.chatMessages || []) {
+  for (const item of getParagraphChatMessages(paragraph)) {
     const question = document.createElement("div");
-    question.className = "chat-message";
+    question.className = "chat-message from-user";
     question.append(label("你"), paragraphText(item.question));
 
     const answer = document.createElement("div");
-    answer.className = "chat-message";
+    answer.className = `chat-message from-ai${item.pending ? " is-pending" : ""}${item.error ? " is-error" : ""}`;
     answer.append(label("AI"), paragraphText(item.answer));
 
     thread.append(question, answer);
@@ -4790,6 +4832,13 @@ function renderChatBox(paragraph) {
   actions.append(askButton);
   wrapper.append(thread, input, actions);
   return wrapper;
+}
+
+function getParagraphChatMessages(paragraph) {
+  return [
+    ...(Array.isArray(paragraph.chatMessages) ? paragraph.chatMessages : []),
+    ...(state.pendingChatMessages.get(paragraph.id) || []),
+  ];
 }
 
 function label(text) {

@@ -1913,6 +1913,20 @@ select:focus {
   background: #fbfcfa;
 }
 
+.chat-message.from-user {
+  background: #ffffff;
+}
+
+.chat-message.from-ai.is-pending {
+  border-color: rgba(15, 118, 110, 0.28);
+  background: rgba(15, 118, 110, 0.06);
+}
+
+.chat-message.from-ai.is-error {
+  border-color: rgba(143, 44, 35, 0.26);
+  background: rgba(143, 44, 35, 0.06);
+}
+
 .chat-message strong {
   display: block;
   margin-bottom: 5px;
