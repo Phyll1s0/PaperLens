@@ -25,6 +25,7 @@ Updated: 2026-06-03
 ## Done
 
 - [x] 文档同步：README、`.env.example` 和 setup 提示已更新到 Kimi Code Direct、真实论文跑通结果、碎片 LaTeX 修复、Docker/Claude CLI 关系和代理策略。
+- [x] 分段碎片与慢速退化修复：短续行合并放宽、PDF 图表/LaTeX 提取垃圾过滤，Kimi Code Direct 精读 batch 改为更稳的 4 段并避免 adaptiveBatchSize 永久退化到 1。
 - [x] Provider mock 回归测试：抽出 OpenAI-compatible endpoint/payload/response/error 纯函数，覆盖 DeepSeek payload、额度/限流/认证错误和返回解析。
 - [x] Kimi Direct 协议回归测试：抽出 Anthropic payload/header/response 纯函数并加入 `npm test`，避免 provider 改动破坏调用格式。
 - [x] 自动化测试基础入口：新增 `npm test`、`scripts/test.mjs` 和首个碎片 LaTeX 回归测试，后续测试统一接入 `tests/*.test.mjs`。

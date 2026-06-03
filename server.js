@@ -10,6 +10,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { inflateSync } from "node:zlib";
 import {
+  clampAdaptiveBatchSize,
+  nextAdaptiveBatchSizeAfterSplit,
+} from "./lib/analysis-batching.js";
+import {
   KIMI_CODE_ANTHROPIC_ENDPOINT,
   buildKimiCodeAnthropicHeaders,
   buildKimiCodeAnthropicRequestBody,
@@ -21,6 +25,11 @@ import {
   formatModelError,
   getChatCompletionsEndpoint,
 } from "./lib/openai-compatible-provider.js";
+import {
+  isLikelyPdfExtractionGarbageText,
+  shouldMergeSegmentedText,
+  startsLikeTextContinuation,
+} from "./lib/segmentation-repair.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -3047,7 +3056,11 @@ function getAnalysisBatchSize(settings = {}, job = null) {
   }
 
   if (Number.isFinite(Number(job.adaptiveBatchSize)) && Number(job.adaptiveBatchSize) > 0) {
-    return Math.max(1, Math.min(Number(job.adaptiveBatchSize), configured));
+    return clampAdaptiveBatchSize(job.adaptiveBatchSize, {
+      configuredBatchSize: configured,
+      retryFailedOnly: job.retryFailedOnly,
+      minAdaptiveBatchSize: strategy.minAdaptiveBatchSize,
+    });
   }
 
   const remaining = job.items.filter((item) => item.status === "queued" || item.status === "running").length;
@@ -3081,6 +3094,7 @@ function getAnalysisProviderStrategy(settings = {}, job = null) {
     expectedBatchSeconds: 45,
     targetMinutes: ANALYSIS_TARGET_MINUTES,
     failedRetryBatchSize: Math.max(1, Math.min(ANALYSIS_FAILED_RETRY_BATCH_SIZE + 1, 6)),
+    minAdaptiveBatchSize: Math.max(1, Math.min(ANALYSIS_FAILED_RETRY_BATCH_SIZE + 1, 4)),
     timeoutBaseMs: 70_000,
     timeoutPerParagraphMs: 8_000,
     timeoutMaxMs: 210_000,
@@ -3092,6 +3106,7 @@ function getAnalysisProviderStrategy(settings = {}, job = null) {
     strategy.maxBatchSize = 24;
     strategy.expectedBatchSeconds = 34;
     strategy.failedRetryBatchSize = Math.max(1, Math.min(ANALYSIS_FAILED_RETRY_BATCH_SIZE + 1, 6));
+    strategy.minAdaptiveBatchSize = Math.max(2, Math.min(strategy.failedRetryBatchSize, 4));
     strategy.timeoutBaseMs = 65_000;
     strategy.timeoutPerParagraphMs = 7_000;
   }
@@ -3102,17 +3117,19 @@ function getAnalysisProviderStrategy(settings = {}, job = null) {
     strategy.maxBatchSize = 20;
     strategy.expectedBatchSeconds = 42;
     strategy.failedRetryBatchSize = ANALYSIS_FAILED_RETRY_BATCH_SIZE;
+    strategy.minAdaptiveBatchSize = Math.max(2, Math.min(strategy.failedRetryBatchSize, 4));
   }
 
   if (kimiCodeDirectLike) {
     strategy.name = "kimi-code-direct";
     strategy.label = `Kimi Code Direct/${getAnalysisProfileLabel(profile)}`;
     strategy.agentLike = false;
-    strategy.batchSize = Math.max(8, ANALYSIS_BATCH_SIZE);
-    strategy.concurrency = Math.min(ANALYSIS_CONCURRENCY, 3);
-    strategy.maxBatchSize = 20;
-    strategy.expectedBatchSeconds = 38;
+    strategy.batchSize = 4;
+    strategy.concurrency = Math.min(Math.max(ANALYSIS_CONCURRENCY, 3), 4);
+    strategy.maxBatchSize = 8;
+    strategy.expectedBatchSeconds = 46;
     strategy.failedRetryBatchSize = ANALYSIS_FAILED_RETRY_BATCH_SIZE;
+    strategy.minAdaptiveBatchSize = Math.max(3, Math.min(strategy.batchSize, 4));
     strategy.timeoutBaseMs = 75_000;
     strategy.timeoutPerParagraphMs = 8_000;
     strategy.timeoutMaxMs = 240_000;
@@ -3126,6 +3143,7 @@ function getAnalysisProviderStrategy(settings = {}, job = null) {
     strategy.maxBatchSize = 20;
     strategy.expectedBatchSeconds = 75;
     strategy.failedRetryBatchSize = ANALYSIS_FAILED_RETRY_BATCH_SIZE;
+    strategy.minAdaptiveBatchSize = Math.max(2, Math.min(strategy.failedRetryBatchSize, 4));
     strategy.timeoutBaseMs = 140_000;
     strategy.timeoutPerParagraphMs = 18_000;
     strategy.timeoutMaxMs = 360_000;
@@ -3400,10 +3418,16 @@ async function runAnalysisJobBatch(job, items, signal, options = {}) {
     if (affectedItems.length > 1) {
       const chunks = splitJobItemsForBatchRetry(affectedItems, options.splitDepth || 0);
       const nextBatchSize = chunks[0]?.length || 1;
+      const strategy = getAnalysisProviderStrategy(job.settings, job);
       const retryBatchSize = getAnalysisProviderStrategy(job.settings, { ...job, retryFailedOnly: true }).failedRetryBatchSize;
-      job.adaptiveBatchSize = job.retryFailedOnly
-        ? Math.min(retryBatchSize, nextBatchSize)
-        : Math.max(1, Math.min(Number(job.adaptiveBatchSize || nextBatchSize), nextBatchSize));
+      job.adaptiveBatchSize = nextAdaptiveBatchSizeAfterSplit({
+        nextBatchSize,
+        currentAdaptiveBatchSize: job.adaptiveBatchSize || nextBatchSize,
+        configuredBatchSize: strategy.batchSize,
+        retryFailedOnly: job.retryFailedOnly,
+        failedRetryBatchSize: retryBatchSize,
+        minAdaptiveBatchSize: strategy.minAdaptiveBatchSize,
+      });
       for (const item of affectedItems) {
         item.status = "queued";
         item.error = `批量分析失败，已拆分小批量重试：${error.message || "模型请求失败。"}`;
@@ -5628,6 +5652,15 @@ function shouldMergeAcrossPage(previous, paragraph) {
     return true;
   }
 
+  if (shouldMergeSegmentedText(previous.sourceText, paragraph.sourceText, {
+    sameSection: true,
+    previousContinuesToNext: previous.continuesToNext,
+    nextContinuesFromPrevious: paragraph.continuesFromPrevious,
+    nextIsHeading: isLikelyHeading(paragraph.sourceText) || isLikelySectionOpening(paragraph.sourceText),
+  })) {
+    return true;
+  }
+
   return previous.sourceText.endsWith("-") ||
     !endsWithSentence(previous.sourceText) ||
     startsLikeContinuation(paragraph.sourceText);
@@ -5655,6 +5688,15 @@ function shouldMergeSamePageParagraphs(previous, paragraph) {
     return true;
   }
 
+  if (shouldMergeSegmentedText(previous.sourceText, paragraph.sourceText, {
+    sameSection: true,
+    previousContinuesToNext: previous.continuesToNext,
+    nextContinuesFromPrevious: paragraph.continuesFromPrevious,
+    nextIsHeading: isLikelyHeading(paragraph.sourceText) || isLikelySectionOpening(paragraph.sourceText),
+  })) {
+    return true;
+  }
+
   const previousShortOpen = previous.sourceText.length < 900 && !endsWithSentence(previous.sourceText);
   return previousShortOpen && startsLikeContinuation(paragraph.sourceText);
 }
@@ -5672,7 +5714,7 @@ function endsWithSentence(text) {
 }
 
 function startsLikeContinuation(text) {
-  return /^[a-z,;:)\]]/.test(String(text || "").trim());
+  return startsLikeTextContinuation(text);
 }
 
 function isLikelySectionOpening(text) {
@@ -5733,6 +5775,10 @@ function getReadablePageBlocks(page) {
 
 function isLikelyNonReadingBlock(block, page = null) {
   const rawText = String(block.text || "").replace(/\s+/g, " ").trim();
+  if (isLikelyPdfExtractionGarbageText(block.text || rawText)) {
+    return true;
+  }
+
   if (classifyPageArtifact(block)) {
     return true;
   }
@@ -5838,6 +5884,10 @@ function isLikelyEmbeddedVisualTextBlock(text, block = {}, region = {}) {
 
 function isLikelyNonReadingParagraphText(text, context = {}) {
   const raw = normalizeArtifactText(text);
+  if (isLikelyPdfExtractionGarbageText(text)) {
+    return true;
+  }
+
   if (isLikelyCaptionText(raw)) {
     return true;
   }
@@ -8905,6 +8955,9 @@ function auditSegmentedParagraphNoise(paragraph, structureMap = null, repeatedTe
   if (isLikelyDiagramOnlyText(clean, context)) {
     reasons.push("visual-text");
   }
+  if (isLikelyPdfExtractionGarbageText(paragraph?.rawSourceText || paragraph?.sourceText || clean)) {
+    reasons.push("pdf-extraction-garbage");
+  }
 
   const normalizedReasons = normalizeSegmentationNoiseReasons(reasons);
   if (!normalizedReasons.length) {
@@ -8919,6 +8972,7 @@ function auditSegmentedParagraphNoise(paragraph, structureMap = null, repeatedTe
     "publication-metadata",
     "standalone-link",
     "bibliography-entry",
+    "pdf-extraction-garbage",
   ]);
   const action = normalizedReasons.some((reason) => dropReasons.has(reason)) ? "drop" : "skip-analysis";
   const confidence = action === "drop" || normalizedReasons.length >= 2 ? "high" : "medium";
