@@ -13,7 +13,11 @@ import {
   clampAdaptiveBatchSize,
   nextAdaptiveBatchSizeAfterSplit,
 } from "./lib/analysis-batching.js";
-import { isLikelyCodeBlockText } from "./lib/artifact-classifier.js";
+import {
+  isLikelyCodeBlockText,
+  isLikelyFormulaBlockText,
+  isUsefulFormulaArtifactText,
+} from "./lib/artifact-classifier.js";
 import {
   KIMI_CODE_ANTHROPIC_ENDPOINT,
   buildKimiCodeAnthropicHeaders,
@@ -6008,7 +6012,73 @@ function extractPageArtifacts(pages) {
     });
   }
 
-  return artifacts;
+  return dedupePageArtifacts(artifacts).filter(isUsefulPageArtifact);
+}
+
+function isUsefulPageArtifact(artifact) {
+  if (artifact?.type !== "formula") {
+    return true;
+  }
+
+  return isUsefulFormulaArtifactText(artifact.text || "");
+}
+
+function dedupePageArtifacts(artifacts = []) {
+  const result = [];
+  for (const artifact of artifacts) {
+    const existing = result.find((item) => areDuplicatePageArtifacts(item, artifact));
+    if (existing) {
+      mergePageArtifact(existing, artifact);
+      continue;
+    }
+
+    result.push(artifact);
+  }
+
+  return result;
+}
+
+function areDuplicatePageArtifacts(a, b) {
+  if (!a || !b || a.type !== b.type || Number(a.pageNumber || 0) !== Number(b.pageNumber || 0)) {
+    return false;
+  }
+
+  if (a.visualRegionId && b.visualRegionId && a.visualRegionId === b.visualRegionId) {
+    return true;
+  }
+
+  if (!a.crop || !b.crop) {
+    return false;
+  }
+
+  return regionOverlapRatio(a.crop, b.crop) >= 0.92;
+}
+
+function mergePageArtifact(target, source) {
+  target.text = mergeArtifactText(target.text, source.text);
+  target.lineCount = Math.max(Number(target.lineCount || 1), Number(source.lineCount || 1));
+  target.label = target.label || source.label || "";
+  target.cropQuality = chooseBetterCropQuality(target.cropQuality, source.cropQuality);
+}
+
+function mergeArtifactText(a, b) {
+  const parts = [];
+  for (const value of [a, b]) {
+    const clean = normalizeArtifactText(value);
+    if (!clean || parts.some((item) => item === clean || item.includes(clean) || clean.includes(item))) {
+      continue;
+    }
+    parts.push(clean);
+  }
+
+  return parts.join(" ").trim();
+}
+
+function chooseBetterCropQuality(a = {}, b = {}) {
+  const rank = { high: 3, medium: 2, low: 1, unknown: 0 };
+  const aRank = rank[a.confidence || "unknown"] ?? 0;
+  const bRank = rank[b.confidence || "unknown"] ?? 0;
+  return bRank > aRank ? b : a;
 }
 
 function buildPageArtifactFields(page, block, type, blockIndex = -1) {
@@ -7264,12 +7334,12 @@ function classifyPageArtifact(block) {
     return "caption";
   }
 
-  if (isLikelyFormulaBlock(text, block)) {
-    return "formula";
-  }
-
   if (isLikelyCodeBlock(text, block)) {
     return "code";
+  }
+
+  if (isLikelyFormulaBlock(text, block)) {
+    return "formula";
   }
 
   if (isLikelyFigureTextBlock(text, block)) {
@@ -7280,11 +7350,7 @@ function classifyPageArtifact(block) {
 }
 
 function isLikelyFormulaBlock(text, block = {}) {
-  const lineCount = Number(block.lineCount || 1);
-  const mathTokens = (text.match(/[=≤≥≠≈∑∏∫√∞→←↔±×÷∂λμσγαβθΩΔ]|\b(argmin|argmax|softmax|log|exp|min|max)\b/gi) || []).length;
-  const sentenceCount = (text.match(/[.!?。！？]/g) || []).length;
-
-  return text.length <= 260 && lineCount <= 5 && mathTokens >= 2 && sentenceCount <= 1;
+  return isLikelyFormulaBlockText(text, block);
 }
 
 function isLikelyCodeBlock(text, block = {}) {

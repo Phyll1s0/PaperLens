@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { isLikelyCodeBlockText } from "../lib/artifact-classifier.js";
+import {
+  isLikelyCodeBlockText,
+  isLikelyFormulaBlockText,
+  isUsefulFormulaArtifactText,
+} from "../lib/artifact-classifier.js";
 
 assert.equal(
   isLikelyCodeBlockText(
@@ -32,3 +36,38 @@ assert.equal(
   ),
   true,
 );
+
+assert.equal(
+  isLikelyFormulaBlockText("H+1 |Vts | ℓ(θ) =−", { lineCount: 3 }),
+  true,
+);
+
+assert.equal(
+  isLikelyFormulaBlockText("MASE( ˆ xi,xi) = C−S", { lineCount: 2 }),
+  true,
+);
+
+assert.equal(
+  isLikelyFormulaBlockText("h = 1 h = 1 2150 2200 2250 2300 2350 Token ID", { lineCount: 5 }),
+  false,
+);
+
+assert.equal(
+  isLikelyFormulaBlockText("h = 1", { lineCount: 1 }),
+  false,
+);
+
+assert.equal(
+  isLikelyFormulaBlockText("GPT4TS Task-specific Reference No Fine-tuning epochs: 100, cos: 1, tmax: 10, nL = 6,η = 10−3", { lineCount: 1 }),
+  false,
+);
+
+assert.equal(
+  isLikelyFormulaBlockText("QLα(q,x) = α(x−q), if x>q, To aggregate Eq. (4) over multiple series and prediction instants, we consider the weighted average", { lineCount: 2 }),
+  false,
+);
+
+assert.equal(isUsefulFormulaArtifactText("Xt = i=1"), false);
+assert.equal(isUsefulFormulaArtifactText("C+H t=C+1 |ˆ"), false);
+assert.equal(isUsefulFormulaArtifactText("WQL = 1 WQLαj. j=1"), true);
+assert.equal(isUsefulFormulaArtifactText("MASE( ˆ xi,xi) = C−S"), true);
