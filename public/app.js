@@ -3128,11 +3128,8 @@ function renderPageArtifact(artifact) {
 
   const crop = renderArtifactCrop(artifact);
   if (crop) {
-    const compactBody = renderPageArtifactCompactBody(artifact);
     card.append(header, crop);
-    if (compactBody) {
-      card.append(compactBody);
-    } else if (!isVisualCaptionArtifact(artifact)) {
+    if (!isVisualCaptionArtifact(artifact)) {
       card.append(body);
     }
   } else {
@@ -3140,23 +3137,6 @@ function renderPageArtifact(artifact) {
   }
 
   return card;
-}
-
-function renderPageArtifactCompactBody(artifact) {
-  if (!isVisualCaptionArtifact(artifact)) {
-    return null;
-  }
-
-  const text = getCompactArtifactText(artifact);
-  if (!text) {
-    return null;
-  }
-
-  const body = document.createElement("div");
-  body.className = "page-artifact-body is-compact";
-  body.textContent = text;
-  body.title = text;
-  return body;
 }
 
 function getArtifactDisplayMarkdown(artifact) {
@@ -3205,30 +3185,6 @@ function normalizeFormulaArtifactLatex(source) {
 function isVisualCaptionArtifact(artifact) {
   return artifact?.type === "caption" &&
     (artifact.visualType === "figure" || artifact.visualType === "table" || !artifact.visualType);
-}
-
-function getCompactArtifactText(artifact) {
-  const text = String(artifact?.text || "")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!text) {
-    return "";
-  }
-
-  const label = String(artifact?.label || "").trim();
-  const withoutRepeatedLabel = label && text.toLowerCase().startsWith(label.toLowerCase())
-    ? text.slice(label.length).replace(/^[:：.\-\s]+/, "").trim()
-    : text;
-  return truncateClientText(withoutRepeatedLabel || text, 180);
-}
-
-function truncateClientText(text, limit = 180) {
-  const value = String(text || "").trim();
-  if (value.length <= limit) {
-    return value;
-  }
-
-  return `${value.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
 }
 
 function renderArtifactActions(artifact) {

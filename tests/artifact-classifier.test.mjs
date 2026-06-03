@@ -23,6 +23,30 @@ assert.equal(
 
 assert.equal(
   isLikelyCodeBlockText(
+    "Return Forecasting 0.0675 (RankIC) Return Forecasting Volatility Forecasting 0.0702 (IC) (MAE) 0.037 Price Forecasting 0.0267 (RankIC)",
+    { lineCount: 4 },
+  ),
+  false,
+);
+
+assert.equal(
+  isLikelyCodeBlockText(
+    "Let D-dimensional vector xt ∈RD denote the K-line observation at discrete time t, comprising D key financial indicators. In this work, we fix the dimension D= 6 to represent OHLCVA attributes.",
+    { lineCount: 6 },
+  ),
+  false,
+);
+
+assert.equal(
+  isLikelyCodeBlockText(
+    "0331 13:25 0402 10:35 0403 14:45 0408 13:25 0410 10:35 0411 14:45 Time GroundTruth Kline Chart",
+    { lineCount: 3 },
+  ),
+  false,
+);
+
+assert.equal(
+  isLikelyCodeBlockText(
     "128,lmax = 2048). Output: An augmented time series. 1: k∼U{1,K} 2: l∼U{lmin,lmax} 3: for i←1,k do 4: n∼U{1,Nd} 5: x(i) 1:l ∼Xn 6: end for 7: return x",
     { lineCount: 12 },
   ),
