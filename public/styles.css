@@ -1186,21 +1186,9 @@ select:focus {
   opacity: 0.58;
 }
 
-.page-artifact p,
-.page-artifact pre {
-  margin: 0;
-  color: #2f3c38;
+.page-artifact-body {
   font-size: 13px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-}
-
-.page-artifact pre {
-  overflow: auto;
-  padding: 9px;
-  border-radius: 6px;
-  background: #ffffff;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  line-height: 1.58;
 }
 
 .artifact-crop {
@@ -1382,18 +1370,10 @@ select:focus {
 .artifact-viewer-caption {
   margin: 0;
   overflow: auto;
-  color: #2f3c38;
-  font-size: 13px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-}
-
-pre.artifact-viewer-caption {
   padding: 10px;
   border: 1px solid #e1e7e3;
   border-radius: 6px;
   background: #f8faf7;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
 .paragraph-card {
@@ -1570,10 +1550,9 @@ pre.artifact-viewer-caption {
 }
 
 .source-text {
-  margin: 0;
   color: #24312e;
-  line-height: 1.72;
-  white-space: pre-wrap;
+  font-size: 14px;
+  line-height: 1.74;
 }
 
 .related-artifacts {
@@ -1655,13 +1634,6 @@ pre.artifact-viewer-caption {
   font-size: 13px;
 }
 
-.analysis-box p {
-  margin: 0;
-  color: #2f3c38;
-  line-height: 1.62;
-  white-space: pre-wrap;
-}
-
 .markdown-code {
   display: inline-block;
   max-width: 100%;
@@ -1683,6 +1655,86 @@ pre.artifact-viewer-caption {
 .markdown-em {
   color: #42504c;
   font-style: italic;
+}
+
+.markdown-body {
+  min-width: 0;
+  color: #2f3c38;
+  font-size: 13px;
+  line-height: 1.68;
+}
+
+.markdown-body > *:first-child {
+  margin-top: 0;
+}
+
+.markdown-body > *:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body p {
+  margin: 0 0 0.72em;
+}
+
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  margin: 1em 0 0.46em;
+  color: #1e2d2a;
+  font-size: 13px;
+  line-height: 1.42;
+}
+
+.markdown-body h3 {
+  font-size: 14px;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0 0 0.78em;
+  padding-left: 1.35em;
+}
+
+.markdown-body li {
+  margin: 0.2em 0;
+}
+
+.markdown-body blockquote {
+  margin: 0 0 0.86em;
+  padding: 8px 11px;
+  border-left: 3px solid rgba(15, 118, 110, 0.42);
+  border-radius: 0 6px 6px 0;
+  background: rgba(15, 118, 110, 0.06);
+  color: #40504b;
+}
+
+.markdown-body hr {
+  height: 1px;
+  margin: 12px 0;
+  border: 0;
+  background: #dfe7e2;
+}
+
+.markdown-code-block {
+  margin: 0 0 0.86em;
+  overflow: auto;
+  padding: 10px 11px;
+  border: 1px solid #dfe7e2;
+  border-radius: 6px;
+  background: #f7f8f6;
+  color: #1f2937;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.markdown-code-block code {
+  white-space: pre;
+}
+
+.markdown-math {
+  margin: 0 0 0.86em;
 }
 
 .math-inline,
@@ -1858,10 +1910,8 @@ pre.artifact-viewer-caption {
   color: var(--muted);
 }
 
-.chat-message p {
-  margin: 0;
-  line-height: 1.6;
-  white-space: pre-wrap;
+.chat-message .markdown-body {
+  line-height: 1.66;
 }
 
 .hidden {

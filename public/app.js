@@ -213,7 +213,7 @@ function bindEvents() {
   });
   els.searchInput.addEventListener("input", () => {
     state.query = els.searchInput.value.trim().toLowerCase();
-    renderPaper();
+    renderPaperPreservingViewport();
   });
   els.librarySearchInput.addEventListener("input", debounce(() => {
     state.libraryQuery = els.librarySearchInput.value.trim();
@@ -235,7 +235,7 @@ function bindEvents() {
   els.rebuildVisualButton.addEventListener("click", rebuildVisualArtifacts);
   els.toggleHiddenParagraphsButton.addEventListener("click", () => {
     state.showHiddenParagraphs = !state.showHiddenParagraphs;
-    renderPaper();
+    renderPaperPreservingViewport();
   });
   els.tagInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
@@ -1116,7 +1116,7 @@ async function updatePaperMetadata(patch, options = {}) {
     state.paper = await readResponse(response);
     if (!options.quiet) {
       setStatus("论文信息已更新");
-      renderPaper();
+      renderPaperPreservingViewport();
       await loadRecentPapers();
     }
     return state.paper;
@@ -1155,7 +1155,7 @@ async function rebuildVisualArtifacts() {
     }, "重建视觉结构");
     const result = await readResponse(response);
     state.paper = result.paper || state.paper;
-    renderPaper();
+    renderPaperPreservingViewport();
     await loadRecentPapers();
     setStatus(result.message || formatVisualRebuildStatus(result.stats));
   } catch (error) {
@@ -1754,7 +1754,7 @@ async function runExportQa() {
     const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}/export-qa`, {}, "导出检查");
     const result = await readResponse(response);
     state.exportQa = result;
-    renderPaper();
+    renderPaperPreservingViewport();
     setStatus(formatExportQaStatus(result), result.status === "error");
   } catch (error) {
     setStatus(error.message, true);
@@ -1843,14 +1843,14 @@ async function createAnalysisJob(payload = {}) {
     }
 
     if (!result.job) {
-      renderPaper();
+      renderPaperPreservingViewport();
       setStatus(result.message || "没有待分析段落");
       updateAutoButtons();
       return;
     }
 
     beginAnalysisJob(result.job);
-    renderPaper();
+    renderPaperPreservingViewport();
     await loadJobHistory();
     setStatus(payload.statusLabel || "已加入后端分析队列");
   } catch (error) {
@@ -2331,7 +2331,7 @@ async function refreshCurrentPaper() {
 
   const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}`, {}, "刷新论文状态");
   state.paper = await readResponse(response);
-  renderPaper();
+  renderPaperPreservingViewport();
 }
 
 function needsAnalysis(paragraph) {
@@ -2376,7 +2376,7 @@ async function askParagraph(paragraphId, input) {
 
   input.value = "";
   state.busyParagraphId = paragraphId;
-  renderPaper();
+  renderPaperPreservingViewport();
 
   try {
     const response = await apiFetch("/api/chat", {
@@ -2397,7 +2397,7 @@ async function askParagraph(paragraphId, input) {
     setStatus(error.message, true);
   } finally {
     state.busyParagraphId = null;
-    renderPaper();
+    renderPaperPreservingViewport();
   }
 }
 
@@ -2483,6 +2483,56 @@ function renderPaper() {
     renderParagraphs(paper);
   }
   updateAutoButtons();
+}
+
+function renderPaperPreservingViewport() {
+  const anchor = captureViewportAnchor();
+  renderPaper();
+  restoreViewportAnchor(anchor);
+}
+
+function captureViewportAnchor() {
+  const cards = [...document.querySelectorAll(".paragraph-card[id]")];
+  if (!cards.length) {
+    return { scrollY: window.scrollY };
+  }
+
+  const targetY = Math.max(96, window.innerHeight * 0.28);
+  const visible = cards
+    .map((card) => ({ card, rect: card.getBoundingClientRect() }))
+    .filter(({ rect }) => rect.bottom > 80 && rect.top < window.innerHeight)
+    .sort((a, b) => Math.abs(a.rect.top - targetY) - Math.abs(b.rect.top - targetY))[0];
+
+  if (!visible) {
+    return { scrollY: window.scrollY };
+  }
+
+  return {
+    paragraphId: visible.card.id,
+    top: visible.rect.top,
+    scrollY: window.scrollY,
+  };
+}
+
+function restoreViewportAnchor(anchor) {
+  if (!anchor) {
+    return;
+  }
+
+  window.requestAnimationFrame(() => {
+    if (anchor.paragraphId) {
+      const card = document.querySelector(`#${CSS.escape(anchor.paragraphId)}`);
+      if (card) {
+        const nextTop = card.getBoundingClientRect().top;
+        window.scrollBy({ top: nextTop - anchor.top, left: 0, behavior: "auto" });
+        return;
+      }
+    }
+
+    if (Number.isFinite(anchor.scrollY)) {
+      window.scrollTo({ top: anchor.scrollY, left: 0, behavior: "auto" });
+    }
+  });
 }
 
 function isOcrRequiredPaper(paper) {
@@ -2621,13 +2671,13 @@ async function startOcrJob() {
       state.paper = result.paper;
     }
     if (!result.job) {
-      renderPaper();
+      renderPaperPreservingViewport();
       setStatus(result.message || "这篇 PDF 不需要 OCR");
       return;
     }
 
     beginOcrJob(result.job);
-    renderPaper();
+    renderPaperPreservingViewport();
     setStatus(result.message || "已加入本机 OCR 队列");
   } catch (error) {
     setStatus(error.message, true);
@@ -2708,8 +2758,6 @@ async function pollOcrJob() {
       resetOcrJobState({ keepMessage: true });
       setStatus(job.error || job.message || "OCR 失败", true);
     }
-
-    renderPaper();
   } finally {
     state.ocrJob.pollInFlight = false;
   }
@@ -3028,16 +3076,15 @@ function renderPageArtifact(artifact) {
   meta.textContent = artifact.hidden ? `已隐藏 · ${labelText}` : labelText;
   header.append(meta, renderArtifactActions(artifact));
 
-  const body = artifact.type === "code"
-    ? document.createElement("pre")
-    : document.createElement("p");
+  const body = document.createElement("div");
+  body.className = "page-artifact-body markdown-body";
   if (artifact.type === "code") {
-    body.textContent = artifact.text;
+    body.append(renderMarkdownCodeBlock(artifact.text || ""));
   } else {
     const text = artifact.type === "formula" && !hasMathDelimiters(artifact.text)
       ? `\\[${artifact.text}\\]`
       : artifact.text;
-    renderRichText(body, text);
+    renderMarkdownBlock(body, text);
   }
 
   const crop = renderArtifactCrop(artifact);
@@ -3159,7 +3206,7 @@ async function editArtifact(artifactId, payload) {
 
   state.artifactEditBusyId = artifactId;
   setStatus("正在更新视觉材料");
-  renderPaper();
+  renderPaperPreservingViewport();
 
   try {
     const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}/artifacts/${encodeURIComponent(artifactId)}/edit`, {
@@ -3171,14 +3218,14 @@ async function editArtifact(artifactId, payload) {
     state.paper = result.paper || state.paper;
     state.exportQa = null;
     state.artifactEditBusyId = null;
-    renderPaper();
+    renderPaperPreservingViewport();
     await loadRecentPapers();
     setStatus(result.message || "视觉材料已更新。");
   } catch (error) {
     setStatus(error.message, true);
   } finally {
     state.artifactEditBusyId = null;
-    renderPaper();
+    renderPaperPreservingViewport();
   }
 }
 
@@ -3294,15 +3341,15 @@ function openArtifactViewer(artifact, options = {}) {
   cropFrame.append(renderCropImage(artifact));
   viewerBody.append(cropFrame, renderArtifactLocator(artifact, options));
 
-  const caption = document.createElement(artifact.type === "code" ? "pre" : "p");
-  caption.className = "artifact-viewer-caption";
+  const caption = document.createElement("div");
+  caption.className = "artifact-viewer-caption markdown-body";
   if (artifact.type === "code") {
-    caption.textContent = artifact.text;
+    caption.append(renderMarkdownCodeBlock(artifact.text || ""));
   } else {
     const captionText = artifact.type === "formula" && !hasMathDelimiters(artifact.text)
       ? `\\[${artifact.text}\\]`
       : artifact.text;
-    renderRichText(caption, captionText);
+    renderMarkdownBlock(caption, captionText);
   }
 
   panel.append(header, viewerBody, caption);
@@ -3547,9 +3594,9 @@ function renderParagraphCard(paragraph) {
   const content = document.createElement("div");
   content.className = "paragraph-content";
 
-  const source = document.createElement("p");
-  source.className = "source-text";
-  renderRichText(source, paragraph.sourceText);
+  const source = document.createElement("div");
+  source.className = "source-text markdown-body";
+  renderMarkdownBlock(source, paragraph.sourceText);
   content.append(source);
 
   const relatedArtifacts = getRelatedArtifactsForParagraph(state.paper, paragraph);
@@ -3691,7 +3738,7 @@ async function editParagraph(paragraphId, payload) {
     const result = await readResponse(response);
     state.paper = result.paper || state.paper;
     state.paragraphEditBusyId = null;
-    renderPaper();
+    renderPaperPreservingViewport();
     await loadRecentPapers();
     setStatus(result.message || "分段已更新，变动段落已标记为待补跑。");
   } catch (error) {
@@ -3863,6 +3910,167 @@ function normalizeDisplayError(text) {
 
 function renderRichText(element, text) {
   element.replaceChildren(createRichTextFragment(normalizeRichTextSource(text)));
+}
+
+function renderMarkdownBlock(element, text) {
+  element.replaceChildren(createMarkdownBlockFragment(normalizeRichTextSource(text)));
+}
+
+function createMarkdownBlockFragment(text) {
+  const fragment = document.createDocumentFragment();
+  const lines = String(text || "").replace(/\r/g, "").split("\n");
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+
+    const fence = line.match(/^\s*```([A-Za-z0-9_-]*)\s*$/);
+    if (fence) {
+      const codeLines = [];
+      index += 1;
+      while (index < lines.length && !/^\s*```\s*$/.test(lines[index])) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) {
+        index += 1;
+      }
+      fragment.append(renderMarkdownCodeBlock(codeLines.join("\n"), fence[1] || ""));
+      continue;
+    }
+
+    const displayMath = readMarkdownDisplayMathBlock(lines, index);
+    if (displayMath) {
+      const block = document.createElement("div");
+      block.className = "markdown-math";
+      block.append(renderMathSegment(displayMath.source, true));
+      fragment.append(block);
+      index = displayMath.nextIndex;
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,4})\s+(.+)$/);
+    if (heading) {
+      const level = Math.min(4, heading[1].length + 2);
+      const element = document.createElement(`h${level}`);
+      element.append(createRichTextFragment(heading[2].trim()));
+      fragment.append(element);
+      index += 1;
+      continue;
+    }
+
+    if (/^\s*>\s?/.test(line)) {
+      const quoteLines = [];
+      while (index < lines.length && /^\s*>\s?/.test(lines[index])) {
+        quoteLines.push(lines[index].replace(/^\s*>\s?/, ""));
+        index += 1;
+      }
+      const quote = document.createElement("blockquote");
+      quote.append(createMarkdownBlockFragment(quoteLines.join("\n")));
+      fragment.append(quote);
+      continue;
+    }
+
+    if (/^\s*[-*+]\s+/.test(line)) {
+      const list = document.createElement("ul");
+      while (index < lines.length && /^\s*[-*+]\s+/.test(lines[index])) {
+        const item = document.createElement("li");
+        item.append(createRichTextFragment(lines[index].replace(/^\s*[-*+]\s+/, "").trim()));
+        list.append(item);
+        index += 1;
+      }
+      fragment.append(list);
+      continue;
+    }
+
+    if (/^\s*\d+[.)]\s+/.test(line)) {
+      const list = document.createElement("ol");
+      while (index < lines.length && /^\s*\d+[.)]\s+/.test(lines[index])) {
+        const item = document.createElement("li");
+        item.append(createRichTextFragment(lines[index].replace(/^\s*\d+[.)]\s+/, "").trim()));
+        list.append(item);
+        index += 1;
+      }
+      fragment.append(list);
+      continue;
+    }
+
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      fragment.append(document.createElement("hr"));
+      index += 1;
+      continue;
+    }
+
+    const paragraphLines = [line.trim()];
+    index += 1;
+    while (index < lines.length && lines[index].trim() && !isMarkdownBlockStart(lines[index])) {
+      paragraphLines.push(lines[index].trim());
+      index += 1;
+    }
+
+    const paragraph = document.createElement("p");
+    paragraph.append(createRichTextFragment(paragraphLines.join(" ")));
+    fragment.append(paragraph);
+  }
+
+  return fragment;
+}
+
+function isMarkdownBlockStart(line) {
+  return /^\s*```/.test(line) ||
+    /^\s*(?:#{1,4}\s+|>\s?|[-*+]\s+|\d+[.)]\s+|(?:-{3,}|\*{3,}|_{3,})\s*$)/.test(line) ||
+    /^\s*(?:\$\$|\\\[)/.test(line);
+}
+
+function readMarkdownDisplayMathBlock(lines, startIndex) {
+  const first = lines[startIndex] || "";
+  const trimmed = first.trim();
+  const delimiter = trimmed.startsWith("$$")
+    ? { open: "$$", close: "$$" }
+    : trimmed.startsWith("\\[")
+      ? { open: "\\[", close: "\\]" }
+      : null;
+  if (!delimiter) {
+    return null;
+  }
+
+  const firstAfterOpen = trimmed.slice(delimiter.open.length);
+  const sameLineClose = firstAfterOpen.lastIndexOf(delimiter.close);
+  if (sameLineClose !== -1) {
+    const source = firstAfterOpen.slice(0, sameLineClose).trim();
+    return source ? { source, nextIndex: startIndex + 1 } : null;
+  }
+
+  const mathLines = [firstAfterOpen];
+  let index = startIndex + 1;
+  while (index < lines.length) {
+    const closeIndex = lines[index].indexOf(delimiter.close);
+    if (closeIndex !== -1) {
+      mathLines.push(lines[index].slice(0, closeIndex));
+      const source = mathLines.join("\n").trim();
+      return source ? { source, nextIndex: index + 1 } : null;
+    }
+    mathLines.push(lines[index]);
+    index += 1;
+  }
+
+  return null;
+}
+
+function renderMarkdownCodeBlock(source, language = "") {
+  const pre = document.createElement("pre");
+  pre.className = "markdown-code-block";
+  const code = document.createElement("code");
+  if (language) {
+    code.dataset.language = language;
+  }
+  code.textContent = source;
+  pre.append(code);
+  return pre;
 }
 
 function createRichTextFragment(text) {
@@ -4480,8 +4688,9 @@ function renderAnalysisBox(title, text) {
   const heading = document.createElement("h3");
   heading.textContent = title;
 
-  const body = document.createElement("p");
-  renderRichText(body, text);
+  const body = document.createElement("div");
+  body.className = "markdown-body";
+  renderMarkdownBlock(body, text);
 
   box.append(heading, body);
   return box;
@@ -4538,9 +4747,10 @@ function label(text) {
 }
 
 function paragraphText(text) {
-  const p = document.createElement("p");
-  renderRichText(p, text);
-  return p;
+  const body = document.createElement("div");
+  body.className = "markdown-body";
+  renderMarkdownBlock(body, text);
+  return body;
 }
 
 function renderAnalysisDashboard() {
