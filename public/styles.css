@@ -1191,6 +1191,16 @@ select:focus {
   line-height: 1.58;
 }
 
+.page-artifact-body.is-compact {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #65736e;
+  font-size: 12px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 .artifact-crop {
   position: relative;
   display: block;
