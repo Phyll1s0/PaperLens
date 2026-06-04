@@ -4,7 +4,7 @@ Updated: 2026-06-04
 
 ## Current Problems
 
-- [ ] 测试覆盖仍需扩展：已有 Provider/Kimi/导出/Job/PDF/富文本/分段噪声/分段验证样例测试，但缺少模型诊断报告、视觉重建摘要和真实 PDF fixture 回归测试。
+- [ ] 测试覆盖仍需扩展：已有 Provider/Kimi/导出/Job/PDF/富文本/分段噪声/分段验证/模型诊断样例测试，但缺少视觉重建摘要和真实 PDF fixture 回归测试。
 - [ ] 长任务预算还不够透明：分析前缺少每篇论文预计 token、预计时间、预计费用/额度和任务级预算上限。
 - [ ] 视觉结构仍不够可控：复杂双栏、多图组合、跨页图、公式/代码混排时，自动裁剪仍可能过大、误分类，用户还不能手动修正。
 - [ ] 精读分段入口仍需继续增强：复杂双栏论文里，PDF block 排序、章节地图、References、表格主体、流程图文字、跨页自然段仍可能被误收或误合并；混合 block 还需要更精细的按行/按列重建。
@@ -12,10 +12,9 @@ Updated: 2026-06-04
 
 ## Next
 
-1. [ ] 自动化测试扩展：补模型诊断报告回归测试。
-2. [ ] 长任务预算保护：每篇论文显示预计 token、预计时长、预计费用/额度，支持任务级最大预算，超限前提示。
-3. [ ] 视觉裁剪编辑器：允许用户点击页面图像后手动框选/调整图片、公式、代码块，并重建相关段落引用。
-4. [ ] 服务状态脚本修复：让 `npm run service:status` 识别当前 3000 端口上的 PaperLens 进程，避免 PID 文件不一致时误报 not running。
+1. [ ] 长任务预算保护：每篇论文显示预计 token、预计时长、预计费用/额度，支持任务级最大预算，超限前提示。
+2. [ ] 视觉裁剪编辑器：允许用户点击页面图像后手动框选/调整图片、公式、代码块，并重建相关段落引用。
+3. [ ] 服务状态脚本修复：让 `npm run service:status` 识别当前 3000 端口上的 PaperLens 进程，避免 PID 文件不一致时误报 not running。
 
 ## Later
 
@@ -28,6 +27,7 @@ Updated: 2026-06-04
 ## Done
 
 - [x] 章节地图入口升级：新增 `lib/segmentation-structure.js`，本地 layout fallback 会从 PDF heading 识别多章节结构；过滤标题、作者、图注、坐标轴、年份参考文献等伪 heading，并让本地段落按实际 heading 顺序生成 sections。
+- [x] 模型诊断报告回归测试：抽出 `lib/model-diagnostics.js`，覆盖 Kimi Code Direct、Claude 本机配置、保存 Key 引用错配、代理/URL 脱敏、预算和 Docker 建议，确保诊断包不泄露完整 API Key。
 - [x] 分段调试视图二期：调试报告保留页图信息；前端支持点击 PDF block 在页图上框选定位，对比 PDF block 与当前段落，并下载完整调试 JSON。
 - [x] 视觉重建回归集：抽出 `lib/visual-crop-quality.js`，固化裁剪归一化、低置信/过大裁剪、像素精修置信度、`Figure 1.` / `Table 1.`、公式/代码/表格误分类样例。
 - [x] 混合 block 重建二期：Poppler 和 Swift PDF 提取会保存 block 内 line 坐标；混合作者/机构/元数据 block 优先按 line 重建多个正文片段，并把精确 bbox 传给段落来源和调试面板。
