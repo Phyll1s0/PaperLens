@@ -21,13 +21,13 @@ const pages = parsePopplerBboxLayout(`<?xml version="1.0" encoding="UTF-8"?>
   <page width="300.000000" height="200.000000">
     <flow>
       <block xMin="72.0" yMin="40.0" xMax="235.0" yMax="62.0">
-        <line>
+        <line xMin="72.0" yMin="40.0" xMax="235.0" yMax="62.0">
           <word xMin="72.0" yMin="40.0" xMax="120.0" yMax="62.0">PaperLens</word>
           <word xMin="124.0" yMin="40.0" xMax="170.0" yMax="62.0">Fixture</word>
         </line>
       </block>
       <block xMin="72.0" yMin="68.0" xMax="245.0" yMax="90.0">
-        <line>
+        <line xMin="72.0" yMin="68.0" xMax="245.0" yMax="90.0">
           <word>Alpha</word>
           <word>&amp;</word>
           <word>Beta</word>
@@ -35,7 +35,7 @@ const pages = parsePopplerBboxLayout(`<?xml version="1.0" encoding="UTF-8"?>
         </line>
       </block>
       <block xMin="72.0" yMin="96.0" xMax="225.0" yMax="118.0">
-        <line>
+        <line xMin="72.0" yMin="96.0" xMax="225.0" yMax="118.0">
           <word>Page</word>
           <word>1</word>
           <word>minimal</word>
@@ -64,6 +64,13 @@ assert.deepEqual(pages[0].blocks.map((block) => ({
   { text: "Alpha & Beta <Gamma>", x: 72, y: 68, width: 173, height: 22, lineCount: 1 },
   { text: "Page 1 minimal PDF", x: 72, y: 96, width: 153, height: 22, lineCount: 1 },
 ]);
+assert.deepEqual(pages[0].blocks[0].lines, [
+  { text: "PaperLens Fixture", x: 72, y: 40, width: 163, height: 22 },
+]);
+assert.deepEqual(
+  pages[0].blocks.map((block) => block.lines.length),
+  [1, 1, 1],
+);
 
 if (await commandExists("pdftotext")) {
   const extraction = await extractPdfText(fixturePath, "", "", {

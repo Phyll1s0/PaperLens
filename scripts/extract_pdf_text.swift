@@ -2,6 +2,15 @@ import Foundation
 import PDFKit
 import AppKit
 
+struct TextLine: Codable {
+    let text: String
+    let x: Double
+    let y: Double
+    let width: Double
+    let height: Double
+    let column: Int
+}
+
 struct TextBlock: Codable {
     let text: String
     let x: Double
@@ -10,6 +19,7 @@ struct TextBlock: Codable {
     let height: Double
     let column: Int
     let lineCount: Int
+    let lines: [TextLine]
 }
 
 struct PageText: Codable {
@@ -85,7 +95,17 @@ struct BlockBuilder {
             width: Double(maxX - minX),
             height: Double(maxY - minY),
             column: column,
-            lineCount: lines.count
+            lineCount: lines.count,
+            lines: lines.map { line in
+                TextLine(
+                    text: line.text,
+                    x: Double(line.x),
+                    y: Double(line.y),
+                    width: Double(line.width),
+                    height: Double(line.height),
+                    column: line.column
+                )
+            }
         )
     }
 }
@@ -335,7 +355,17 @@ func convertBlocksToTopLeftCoordinates(_ blocks: [TextBlock], pageHeight: CGFloa
             width: block.width,
             height: block.height,
             column: block.column,
-            lineCount: block.lineCount
+            lineCount: block.lineCount,
+            lines: block.lines.map { line in
+                TextLine(
+                    text: line.text,
+                    x: line.x,
+                    y: Double(max(CGFloat(0), pageHeight - CGFloat(line.y) - CGFloat(line.height))),
+                    width: line.width,
+                    height: line.height,
+                    column: line.column
+                )
+            }
         )
     }
 }

@@ -5299,6 +5299,19 @@ function buildRescuedReadableBlocks(block, page) {
 }
 
 function estimateRescuedBlockGeometry(block, segment) {
+  if (segment?.box &&
+    [segment.box.x, segment.box.y, segment.box.width, segment.box.height].every((value) => Number.isFinite(Number(value))) &&
+    Number(segment.box.width) > 0 &&
+    Number(segment.box.height) > 0) {
+    return {
+      x: Number(segment.box.x),
+      y: Number(segment.box.y),
+      width: Number(segment.box.width),
+      height: Number(segment.box.height),
+      lineCount: Math.max(1, Number(segment.lineCount || 1)),
+    };
+  }
+
   const box = pickBlockBox(block);
   const rawLength = Math.max(1, String(block.rawText || block.text || "").length);
   if (!box) {

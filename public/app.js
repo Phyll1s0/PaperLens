@@ -3374,7 +3374,8 @@ function formatSegmentationDebugBlockMeta(block, legend) {
     parts.push(`标签：${block.tags.join(" / ")}`);
   }
   if ((block.rescuedSegments || []).length) {
-    parts.push(`救回：${block.rescuedSegments[0].preview}`);
+    const segment = block.rescuedSegments[0];
+    parts.push(`救回${segment.reason ? `(${segment.reason})` : ""}：${segment.preview}`);
   }
   return parts.join(" · ");
 }
