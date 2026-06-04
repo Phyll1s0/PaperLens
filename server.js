@@ -24,6 +24,9 @@ import {
   buildPaperExportQa as buildPaperExportQaReport,
 } from "./lib/export-qa.js";
 import {
+  buildPaperSegmentationDebugReport,
+} from "./lib/segmentation-debug.js";
+import {
   buildPaperDocxExport,
 } from "./lib/export-docx.js";
 import {
@@ -245,6 +248,11 @@ const server = http.createServer(async (req, res) => {
     const exportQaMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/export-qa$/);
     if (req.method === "GET" && exportQaMatch) {
       return await handleExportPaperQa(res, exportQaMatch[1]);
+    }
+
+    const segmentationDebugMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/segmentation-debug$/);
+    if (req.method === "GET" && segmentationDebugMatch) {
+      return await handlePaperSegmentationDebug(res, segmentationDebugMatch[1]);
     }
 
     const exportMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/export\.md$/);
@@ -485,6 +493,11 @@ async function handleExportPaperQa(res, paperId) {
       return Boolean(assetPath && existsSync(assetPath));
     },
   }));
+}
+
+async function handlePaperSegmentationDebug(res, paperId) {
+  const paper = await loadPaper(paperId);
+  return json(res, buildPaperSegmentationDebugReport(paper));
 }
 
 async function handleUpdatePaperMetadata(req, res, paperId) {

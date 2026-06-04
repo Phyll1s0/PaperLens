@@ -1003,6 +1003,101 @@ select:focus {
   font-size: 12px;
 }
 
+.segmentation-debug-panel {
+  border-color: rgba(51, 90, 158, 0.2);
+  background: #f7f9fd;
+}
+
+.segmentation-debug-panel .export-qa-badge {
+  background: rgba(51, 90, 158, 0.12);
+  color: #2f4f8c;
+}
+
+.segmentation-debug-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(260px, 0.9fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.segmentation-debug-section {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.segmentation-debug-section h4 {
+  margin: 0;
+  color: #25312d;
+  font-size: 13px;
+}
+
+.segmentation-debug-page {
+  border: 1px solid rgba(100, 112, 108, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.segmentation-debug-page summary {
+  cursor: pointer;
+  padding: 10px;
+  color: #33403c;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.segmentation-debug-blocks,
+.segmentation-debug-paragraphs {
+  display: grid;
+  gap: 7px;
+  padding: 0 10px 10px;
+}
+
+.segmentation-debug-block {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  padding: 8px;
+  border: 1px solid rgba(100, 112, 108, 0.13);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.76);
+}
+
+.segmentation-debug-block.drop {
+  background: rgba(180, 83, 42, 0.06);
+}
+
+.segmentation-debug-block.keep .segmentation-debug-marker {
+  background: rgba(15, 118, 110, 0.1);
+  color: var(--accent-strong);
+}
+
+.segmentation-debug-block-body {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 3px;
+  min-width: 0;
+}
+
+.segmentation-debug-block-body strong,
+.segmentation-debug-paragraph strong {
+  overflow-wrap: anywhere;
+  color: #1d2522;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.segmentation-debug-block-body p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.segmentation-debug-paragraph {
+  background: rgba(255, 255, 255, 0.76);
+}
+
 .ocr-notice {
   display: grid;
   gap: 10px;
@@ -2141,6 +2236,10 @@ select:focus {
   .export-qa-header,
   .export-qa-issue {
     flex-wrap: wrap;
+  }
+
+  .segmentation-debug-layout {
+    grid-template-columns: 1fr;
   }
 
   .paragraph-header {

@@ -14,6 +14,7 @@ const state = {
   pipelineBusy: false,
   jobHistory: [],
   exportQa: null,
+  segmentationDebug: null,
   modelDiagnosticReport: null,
   lastSegmentationError: "",
   progressTimer: null,
@@ -123,6 +124,7 @@ const els = {
   downloadNotesButton: document.querySelector("#downloadNotesButton"),
   downloadDocxButton: document.querySelector("#downloadDocxButton"),
   exportQaButton: document.querySelector("#exportQaButton"),
+  segmentationDebugButton: document.querySelector("#segmentationDebugButton"),
   rerunAnalyzeButton: document.querySelector("#rerunAnalyzeButton"),
   stopAutoButton: document.querySelector("#stopAutoButton"),
   jobHistory: document.querySelector("#jobHistory"),
@@ -205,6 +207,7 @@ function bindEvents() {
   els.downloadNotesButton.addEventListener("click", downloadPaperNotes);
   els.downloadDocxButton.addEventListener("click", downloadPaperDocx);
   els.exportQaButton.addEventListener("click", runExportQa);
+  els.segmentationDebugButton.addEventListener("click", runSegmentationDebug);
   els.rerunAnalyzeButton.addEventListener("click", rerunFullPipeline);
   els.stopAutoButton.addEventListener("click", stopAutoAnalyze);
   els.providerSelect.addEventListener("change", () => {
@@ -913,6 +916,7 @@ async function uploadPdf() {
     state.pendingChatMessages.clear();
     state.query = "";
     state.exportQa = null;
+    state.segmentationDebug = null;
     els.searchInput.value = "";
     setStatus(isOcrRequiredPaper(paper)
       ? "检测到扫描版 PDF：需要先 OCR，再进行分段和讲解。"
@@ -1049,6 +1053,7 @@ async function openPaper(paperId) {
     state.pendingChatMessages.clear();
     state.query = "";
     state.exportQa = null;
+    state.segmentationDebug = null;
     state.showHiddenParagraphs = false;
     state.lastProgressParagraphId = state.paper.readingProgress?.paragraphId || "";
     els.searchInput.value = "";
@@ -1766,6 +1771,34 @@ async function runExportQa() {
   }
 }
 
+async function runSegmentationDebug() {
+  if (!state.paper) {
+    return;
+  }
+
+  els.segmentationDebugButton.disabled = true;
+  els.segmentationDebugButton.textContent = "读取中";
+  setStatus("正在读取分段调试信息");
+
+  try {
+    const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}/segmentation-debug`, {}, "分段调试");
+    const result = await readResponse(response);
+    state.segmentationDebug = result;
+    renderPaperPreservingViewport();
+    window.requestAnimationFrame(() => {
+      document.querySelector(".segmentation-debug-panel")?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+    setStatus(formatSegmentationDebugStatus(result));
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    updateAutoButtons();
+  }
+}
+
 function formatExportQaStatus(result) {
   const summary = result?.summary || {};
   if (result?.status === "ok") {
@@ -1779,6 +1812,15 @@ function formatExportQaStatus(result) {
     `坏引用 ${summary.brokenArtifactRefs || 0}`,
     `图片问题 ${(summary.missingArtifactCrops || 0) + (summary.missingAssetFiles || 0) + (summary.lowConfidenceCrops || 0)}`,
     `LaTeX ${summary.latexRisks || 0}`,
+  ].join(" · ");
+}
+
+function formatSegmentationDebugStatus(result) {
+  const summary = result?.summary || {};
+  return [
+    `分段调试：${summary.reportedBlocks || 0}/${summary.extractionBlocks || 0} 个 block`,
+    `丢弃 ${summary.droppedBlocks || 0}`,
+    `噪声段 ${summary.paragraphsWithNoise || 0}`,
   ].join(" · ");
 }
 
@@ -2969,6 +3011,10 @@ function renderParagraphs(paper) {
     fragment.append(renderExportQaPanel(state.exportQa));
   }
 
+  if (state.segmentationDebug?.paperId === paper.id) {
+    fragment.append(renderSegmentationDebugPanel(state.segmentationDebug));
+  }
+
   for (const paragraph of paragraphs) {
     for (const pageNumber of getParagraphPageNumbers(paragraph)) {
       if (shownPageNumbers.has(pageNumber)) {
@@ -3155,6 +3201,288 @@ function formatExportQaIssueContext(issue) {
     parts.push(issue.recommendation);
   }
   return parts.join(" · ") || issue.type || "";
+}
+
+function renderSegmentationDebugPanel(result) {
+  const panel = document.createElement("section");
+  panel.className = "export-qa-panel segmentation-debug-panel";
+
+  const header = document.createElement("div");
+  header.className = "export-qa-header";
+
+  const titleWrap = document.createElement("div");
+  const title = document.createElement("h3");
+  title.textContent = "分段调试";
+  const meta = document.createElement("p");
+  meta.textContent = formatSegmentationDebugPanelMeta(result);
+  titleWrap.append(title, meta);
+
+  const badge = document.createElement("span");
+  badge.className = "export-qa-badge";
+  badge.textContent = getSegmentationModeLabel(result?.segmentation?.mode);
+  header.append(titleWrap, badge);
+  panel.append(header);
+
+  const summary = document.createElement("div");
+  summary.className = "export-qa-summary segmentation-debug-summary";
+  for (const item of getSegmentationDebugSummaryItems(result.summary || {})) {
+    const chip = document.createElement("span");
+    chip.textContent = `${item.label} ${item.value}`;
+    summary.append(chip);
+  }
+  panel.append(summary);
+
+  const layout = document.createElement("div");
+  layout.className = "segmentation-debug-layout";
+  layout.append(renderSegmentationDebugPages(result));
+  layout.append(renderSegmentationDebugParagraphs(result));
+  panel.append(layout);
+
+  return panel;
+}
+
+function formatSegmentationDebugPanelMeta(result) {
+  const generatedAt = result?.generatedAt ? new Date(result.generatedAt) : null;
+  const timeLabel = generatedAt && Number.isFinite(generatedAt.getTime())
+    ? generatedAt.toLocaleString()
+    : "";
+  const segmentation = result?.segmentation || {};
+  return [
+    segmentation.planSource ? `计划 ${segmentation.planSource}` : "",
+    segmentation.fallbackStrategy ? `兜底 ${segmentation.fallbackStrategy}` : "",
+    segmentation.fallbackReason || "",
+    timeLabel,
+  ].filter(Boolean).join(" · ") || "PDF block、清洗理由和段落来源";
+}
+
+function getSegmentationModeLabel(mode) {
+  const labels = {
+    ai: "AI 分段",
+    layout: "版面分段",
+    heuristic: "基础分段",
+    "ocr-required": "需要 OCR",
+  };
+  return labels[mode] || "分段证据";
+}
+
+function getSegmentationDebugSummaryItems(summary) {
+  return [
+    { label: "页", value: summary.pages || 0 },
+    { label: "Block", value: `${summary.reportedBlocks || 0}/${summary.extractionBlocks || 0}` },
+    { label: "保留", value: summary.keptBlocks || 0 },
+    { label: "丢弃", value: summary.droppedBlocks || 0 },
+    { label: "段落", value: summary.paragraphs || 0 },
+    { label: "噪声段", value: summary.paragraphsWithNoise || 0 },
+    { label: "有坐标", value: summary.paragraphsWithSourceBox || 0 },
+    { label: "章节", value: summary.sections || 0 },
+  ];
+}
+
+function renderSegmentationDebugPages(result) {
+  const wrap = document.createElement("div");
+  wrap.className = "segmentation-debug-section";
+  const heading = document.createElement("h4");
+  heading.textContent = "PDF 页块";
+  wrap.append(heading);
+
+  const pages = Array.isArray(result?.pages) ? result.pages : [];
+  if (!pages.length) {
+    const empty = document.createElement("p");
+    empty.className = "export-qa-empty";
+    empty.textContent = "当前论文没有保存 PDF 页块。旧数据可能需要重新上传或重建。";
+    wrap.append(empty);
+    return wrap;
+  }
+
+  for (const page of pages.slice(0, 8)) {
+    wrap.append(renderSegmentationDebugPage(page, result.reasonLegend || {}));
+  }
+
+  if (pages.length > 8) {
+    const more = document.createElement("p");
+    more.className = "export-qa-more";
+    more.textContent = `还有 ${pages.length - 8} 页未展开，接口报告中已保留摘要。`;
+    wrap.append(more);
+  }
+
+  return wrap;
+}
+
+function renderSegmentationDebugPage(page, legend) {
+  const details = document.createElement("details");
+  details.className = "segmentation-debug-page";
+  details.open = Number(page.pageNumber || 0) <= 2;
+
+  const summary = document.createElement("summary");
+  summary.textContent = [
+    `第 ${page.pageNumber || "?"} 页`,
+    `${page.keptBlocks || 0} 保留`,
+    `${page.droppedBlocks || 0} 丢弃`,
+    page.visualRegions ? `${page.visualRegions} 视觉区` : "",
+  ].filter(Boolean).join(" · ");
+  details.append(summary);
+
+  const blocks = document.createElement("div");
+  blocks.className = "segmentation-debug-blocks";
+  for (const block of (page.blocks || []).slice(0, 14)) {
+    blocks.append(renderSegmentationDebugBlock(block, legend));
+  }
+  details.append(blocks);
+
+  if ((page.blocks || []).length > 14) {
+    const more = document.createElement("p");
+    more.className = "export-qa-more";
+    more.textContent = `本页还有 ${(page.blocks || []).length - 14} 个 block 未展开。`;
+    details.append(more);
+  }
+
+  return details;
+}
+
+function renderSegmentationDebugBlock(block, legend) {
+  const row = document.createElement("div");
+  row.className = `segmentation-debug-block ${block.decision === "drop" ? "drop" : "keep"}`;
+
+  const marker = document.createElement("span");
+  marker.className = "export-qa-marker segmentation-debug-marker";
+  marker.textContent = block.decision === "drop" ? "丢弃" : "保留";
+
+  const body = document.createElement("div");
+  body.className = "segmentation-debug-block-body";
+  const preview = document.createElement("strong");
+  preview.textContent = block.preview || "空 block";
+  const meta = document.createElement("p");
+  meta.textContent = formatSegmentationDebugBlockMeta(block, legend);
+  body.append(preview, meta);
+
+  row.append(marker, body);
+  return row;
+}
+
+function formatSegmentationDebugBlockMeta(block, legend) {
+  const parts = [`#${Number(block.index || 0) + 1}`];
+  if (block.box) {
+    parts.push(`x${Math.round(block.box.x)} y${Math.round(block.box.y)} w${Math.round(block.box.width)} h${Math.round(block.box.height)}`);
+  }
+  if (block.lineCount) {
+    parts.push(`${block.lineCount} 行`);
+  }
+  if ((block.reasons || []).length) {
+    parts.push((block.reasons || []).map((reason) => legend[reason] || reason).join("；"));
+  }
+  if ((block.tags || []).length) {
+    parts.push(`标签：${block.tags.join(" / ")}`);
+  }
+  return parts.join(" · ");
+}
+
+function renderSegmentationDebugParagraphs(result) {
+  const wrap = document.createElement("div");
+  wrap.className = "segmentation-debug-section";
+  const heading = document.createElement("h4");
+  heading.textContent = "可疑段落";
+  wrap.append(heading);
+
+  const paragraphs = getSuspiciousDebugParagraphs(result);
+  if (!paragraphs.length) {
+    const empty = document.createElement("p");
+    empty.className = "export-qa-empty";
+    empty.textContent = "当前报告没有发现明显噪声段或缺来源段。";
+    wrap.append(empty);
+    return wrap;
+  }
+
+  const list = document.createElement("div");
+  list.className = "segmentation-debug-paragraphs";
+  for (const paragraph of paragraphs.slice(0, 14)) {
+    list.append(renderSegmentationDebugParagraph(paragraph, result.reasonLegend || {}));
+  }
+  wrap.append(list);
+
+  if (paragraphs.length > 14) {
+    const more = document.createElement("p");
+    more.className = "export-qa-more";
+    more.textContent = `还有 ${paragraphs.length - 14} 个可疑段落未展开。`;
+    wrap.append(more);
+  }
+
+  return wrap;
+}
+
+function getSuspiciousDebugParagraphs(result) {
+  return (result?.paragraphs || [])
+    .filter((paragraph) =>
+      (paragraph.noiseReasons || []).length ||
+      paragraph.hidden ||
+      paragraph.analysisEligible === false ||
+      !paragraph.sourceBlock ||
+      paragraph.sourceBlock?.decision === "drop")
+    .sort((a, b) => {
+      const aNoise = (a.noiseReasons || []).length ? 0 : 1;
+      const bNoise = (b.noiseReasons || []).length ? 0 : 1;
+      if (aNoise !== bNoise) {
+        return aNoise - bNoise;
+      }
+      return Number(a.order || 0) - Number(b.order || 0);
+    });
+}
+
+function renderSegmentationDebugParagraph(paragraph, legend) {
+  const row = document.createElement("div");
+  row.className = "export-qa-issue segmentation-debug-paragraph";
+
+  const marker = document.createElement("span");
+  marker.className = "export-qa-marker";
+  marker.textContent = `P${Number(paragraph.order || 0) + 1}`;
+
+  const body = document.createElement("div");
+  body.className = "export-qa-issue-body";
+  const preview = document.createElement("strong");
+  preview.textContent = paragraph.sourcePreview || "空段落";
+  const context = document.createElement("p");
+  context.textContent = formatSegmentationDebugParagraphMeta(paragraph, legend);
+  body.append(preview, context);
+
+  row.append(marker, body);
+  if (paragraph.id) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary-button export-qa-locate";
+    button.textContent = "定位";
+    button.addEventListener("click", () => {
+      document.querySelector(`#${CSS.escape(paragraph.id)}`)?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+    });
+    row.append(button);
+  }
+  return row;
+}
+
+function formatSegmentationDebugParagraphMeta(paragraph, legend) {
+  const parts = [];
+  if (paragraph.sectionTitle) {
+    parts.push(paragraph.sectionTitle);
+  }
+  if (paragraph.pageNumber) {
+    const pageLabel = paragraph.pageEndNumber && paragraph.pageEndNumber !== paragraph.pageNumber
+      ? `第 ${paragraph.pageNumber}-${paragraph.pageEndNumber} 页`
+      : `第 ${paragraph.pageNumber} 页`;
+    parts.push(pageLabel);
+  }
+  if ((paragraph.noiseReasons || []).length) {
+    parts.push((paragraph.noiseReasons || []).map((reason) => legend[reason] || reason).join("；"));
+  }
+  if (paragraph.sourceBlock) {
+    parts.push(`来源 block #${Number(paragraph.sourceBlock.index || 0) + 1}`);
+    if (Number.isFinite(Number(paragraph.sourceBlock.matchScore))) {
+      parts.push(`匹配 ${paragraph.sourceBlock.matchScore}`);
+    }
+  } else {
+    parts.push("未匹配到保留 block");
+  }
+  return parts.join(" · ");
 }
 
 function getPageImage(paper, pageNumber) {
@@ -3401,6 +3729,7 @@ async function editArtifact(artifactId, payload) {
     const result = await readResponse(response);
     state.paper = result.paper || state.paper;
     state.exportQa = null;
+    state.segmentationDebug = null;
     state.artifactEditBusyId = null;
     renderPaperPreservingViewport();
     await loadRecentPapers();
@@ -3952,6 +4281,7 @@ async function editParagraph(paragraphId, payload) {
     }, "更新分段");
     const result = await readResponse(response);
     state.paper = result.paper || state.paper;
+    state.segmentationDebug = null;
     state.paragraphEditBusyId = null;
     renderPaperPreservingViewport();
     await loadRecentPapers();
@@ -5341,6 +5671,8 @@ function updateAutoButtons() {
   els.downloadDocxButton.disabled = !state.paper;
   els.exportQaButton.disabled = !state.paper || busy;
   els.exportQaButton.textContent = "导出检查";
+  els.segmentationDebugButton.disabled = !state.paper || busy;
+  els.segmentationDebugButton.textContent = "分段调试";
   els.rerunAnalyzeButton.disabled = !state.paper || busy || ocrRequired;
   els.rebuildVisualButton.disabled = !state.paper || busy;
   els.rebuildVisualButton.textContent = state.maintenanceBusy ? "重建中" : "重建图表";
