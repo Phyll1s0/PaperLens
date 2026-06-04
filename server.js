@@ -7872,7 +7872,9 @@ function segmentPaperLocally(paper, reason = "local-layout") {
     fallbackReason: reason,
   };
   const initialParagraphs = splitIntoParagraphs(pages);
-  const validation = validateAndRepairSegmentedParagraphs(initialParagraphs, structureMap);
+  const validation = validateAndRepairSegmentedParagraphs(initialParagraphs, structureMap, {
+    pageMetrics: buildSegmentationPageMetrics(pages),
+  });
   const validationSummary = {
     ...validation.summary,
     warnings: [...new Set([...(validation.summary.warnings || []), reason])],
@@ -8009,6 +8011,7 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
   const validation = validateAndRepairSegmentedParagraphs(
     buildParagraphsFromSegmentItems(items, structureMap),
     structureMap,
+    { pageMetrics: buildSegmentationPageMetrics(pages) },
   );
   const paragraphs = validation.paragraphs;
   const readingCount = paragraphs.filter((paragraph) => isReadingParagraph(paragraph)).length;
@@ -8649,8 +8652,18 @@ function buildParagraphsFromSegmentItems(items, structureMap = null) {
   return paragraphs;
 }
 
-function validateAndRepairSegmentedParagraphs(paragraphs, structureMap = null) {
-  return repairSegmentedParagraphs(paragraphs, structureMap);
+function validateAndRepairSegmentedParagraphs(paragraphs, structureMap = null, options = {}) {
+  return repairSegmentedParagraphs(paragraphs, structureMap, options);
+}
+
+function buildSegmentationPageMetrics(pages = []) {
+  return (Array.isArray(pages) ? pages : [])
+    .map((page) => ({
+      pageNumber: Number(page?.pageNumber || 0),
+      pageWidth: Number(page?.width || page?.pageWidth || 0),
+      pageHeight: Number(page?.height || page?.pageHeight || 0),
+    }))
+    .filter((page) => page.pageNumber > 0 && (page.pageWidth > 0 || page.pageHeight > 0));
 }
 
 function createSegmentationAuditStats(inputParagraphs = 0) {

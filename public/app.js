@@ -3291,6 +3291,7 @@ function renderSegmentationDebugPanel(result) {
   const side = document.createElement("div");
   side.className = "segmentation-debug-side";
   side.append(renderSegmentationDebugIssues(result));
+  side.append(renderSegmentationDebugCrossPageRepair(result));
   side.append(renderSegmentationDebugMemory(result));
   side.append(renderSegmentationDebugEvidence(result));
   side.append(renderSegmentationDebugParagraphs(result));
@@ -3483,6 +3484,120 @@ function getSegmentationDebugIssueSeverityLabel(severity) {
     low: "低优先级",
   };
   return labels[severity] || "问题";
+}
+
+function renderSegmentationDebugCrossPageRepair(result) {
+  const repair = result?.segmentation?.validation?.crossPageRepair || null;
+  const wrap = document.createElement("div");
+  wrap.className = "segmentation-debug-section segmentation-debug-cross-page";
+  const heading = document.createElement("h4");
+  heading.textContent = "跨页合并校验";
+  wrap.append(heading);
+
+  if (!repair || !Number(repair.candidates || 0)) {
+    const empty = document.createElement("p");
+    empty.className = "export-qa-empty";
+    empty.textContent = "当前 validation 没有记录跨页候选。重新 AI 分段或本地分段后会显示候选和合并理由。";
+    wrap.append(empty);
+    return wrap;
+  }
+
+  const meta = document.createElement("div");
+  meta.className = "segmentation-debug-cross-page-meta";
+  for (const item of [
+    ["候选", repair.candidates || 0],
+    ["已合并", repair.merged || 0],
+    ["未合并", repair.rejected || 0],
+  ]) {
+    const chip = document.createElement("span");
+    chip.textContent = `${item[0]} ${item[1]}`;
+    meta.append(chip);
+  }
+  wrap.append(meta);
+
+  const reasonText = formatSegmentationDebugReasonCounts(repair.reasons, getSegmentationDebugCrossPageReasonLabel);
+  const blockerText = formatSegmentationDebugReasonCounts(repair.blockers, getSegmentationDebugCrossPageBlockerLabel);
+  if (reasonText || blockerText) {
+    const details = document.createElement("p");
+    details.className = "segmentation-debug-cross-page-reasons";
+    details.textContent = [
+      reasonText ? `证据：${reasonText}` : "",
+      blockerText ? `阻止：${blockerText}` : "",
+    ].filter(Boolean).join(" · ");
+    wrap.append(details);
+  }
+
+  const samples = Array.isArray(repair.samples) ? repair.samples : [];
+  if (samples.length) {
+    const list = document.createElement("div");
+    list.className = "segmentation-debug-cross-page-samples";
+    for (const sample of samples.slice(0, 5)) {
+      list.append(renderSegmentationDebugCrossPageSample(sample));
+    }
+    wrap.append(list);
+  }
+
+  return wrap;
+}
+
+function renderSegmentationDebugCrossPageSample(sample) {
+  const card = document.createElement("article");
+  card.className = `segmentation-debug-cross-page-sample ${sample.merged ? "merged" : "rejected"}`;
+  const title = document.createElement("strong");
+  title.textContent = [
+    sample.merged ? "已合并" : "未合并",
+    Number.isFinite(Number(sample.score)) ? `score ${sample.score}` : "",
+    sample.previousPage && sample.nextPage ? `p.${sample.previousPage}->p.${sample.nextPage}` : "",
+  ].filter(Boolean).join(" · ");
+
+  const reason = document.createElement("p");
+  const reasonText = (sample.reasons || []).map(getSegmentationDebugCrossPageReasonLabel).filter(Boolean).join("；");
+  const blockerText = (sample.blockers || []).map(getSegmentationDebugCrossPageBlockerLabel).filter(Boolean).join("；");
+  reason.textContent = [reasonText, blockerText ? `阻止：${blockerText}` : ""].filter(Boolean).join(" · ");
+
+  const previous = document.createElement("small");
+  previous.textContent = `前段：${sample.previousPreview || ""}`;
+  const next = document.createElement("small");
+  next.textContent = `后段：${sample.nextPreview || ""}`;
+  card.append(title, reason, previous, next);
+  return card;
+}
+
+function formatSegmentationDebugReasonCounts(counts = {}, formatter = (value) => value) {
+  return Object.entries(counts || {})
+    .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))
+    .slice(0, 5)
+    .map(([key, value]) => `${formatter(key) || key} ${value}`)
+    .join("，");
+}
+
+function getSegmentationDebugCrossPageReasonLabel(reason) {
+  const labels = {
+    "explicit-continuation": "显式续写",
+    "hyphen-continuation": "连字符续行",
+    "previous-open-sentence": "前段未收句",
+    "next-starts-continuation": "后段续写开头",
+    "segmented-text-continuation": "文本续写",
+    "same-section": "同章节",
+    "previous-near-page-bottom": "前段近页底",
+    "next-near-page-top": "后段近页顶",
+  };
+  return labels[reason] || reason;
+}
+
+function getSegmentationDebugCrossPageBlockerLabel(reason) {
+  const labels = {
+    "not-reading-pair": "不是正文段落对",
+    "non-consecutive-page": "页码不连续",
+    "manual-edit": "人工编辑段落",
+    "section-mismatch": "章节不一致",
+    "section-title-mismatch": "章节标题不一致",
+    "next-section-opening": "后段像新章节",
+    "non-reading-text": "含非正文噪声",
+    "score-below-threshold": "分数不足",
+    "no-text-continuation": "无文本续写证据",
+  };
+  return labels[reason] || reason;
 }
 
 function renderSegmentationDebugMemory(result) {

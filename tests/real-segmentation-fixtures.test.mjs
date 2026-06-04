@@ -10,6 +10,9 @@ import {
   shouldMergeSegmentedText,
   stripPublicationMetadataFragments,
 } from "../lib/segmentation-repair.js";
+import {
+  scoreCrossPageMergeCandidate,
+} from "../lib/segmentation-validation.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const ROOT_DIR = path.dirname(path.dirname(__filename));
@@ -75,10 +78,28 @@ for (const item of fixture.cases) {
   }
 
   for (const pair of item.expect.openEndedContinuations || []) {
-    const left = normalizeFixtureText(findFixtureBlock(item, pair.left).text);
-    const right = normalizeFixtureText(findFixtureBlock(item, pair.right).text);
+    const leftBlock = findFixtureBlock(item, pair.left);
+    const rightBlock = findFixtureBlock(item, pair.right);
+    const left = normalizeFixtureText(leftBlock.text);
+    const right = normalizeFixtureText(rightBlock.text);
     assert.equal(endsWithSentence(left), false, `${item.id}: left side should be open-ended`);
     assert.ok(right.length > 80, `${item.id}: right continuation should be substantive`);
+    if (Number(pair.right.page) === Number(pair.left.page) + 1) {
+      const score = scoreCrossPageMergeCandidate(
+        fixtureParagraph("left", left, pair.left.page, item, leftBlock),
+        fixtureParagraph("right", right, pair.right.page, item, rightBlock),
+        {
+          pageMetrics: item.pages.map((page) => ({
+            pageNumber: page.pageNumber,
+            pageWidth: page.width,
+            pageHeight: page.height,
+          })),
+        },
+      );
+      assert.equal(score.candidate, true, `${item.id}: expected cross-page candidate`);
+      assert.equal(score.shouldMerge, true, `${item.id}: expected cross-page repair merge`);
+      assert.ok(score.reasons.includes("previous-open-sentence"), `${item.id}: expected open-sentence reason`);
+    }
   }
 }
 
@@ -114,4 +135,23 @@ function normalizeFixtureText(text) {
     .replace(/[ \t]*\n[ \t]*/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function fixtureParagraph(id, text, pageNumber, item, block) {
+  const section = (item.expect.headings || [])[0] || "Method";
+  return {
+    id,
+    kind: "paragraph",
+    pageNumber,
+    pageEndNumber: pageNumber,
+    sourceText: text,
+    sectionTitleHint: section,
+    plannedSectionId: "fixture_section",
+    sourceBox: block ? {
+      x: block.x,
+      y: block.y,
+      width: block.width,
+      height: block.height,
+    } : null,
+  };
 }

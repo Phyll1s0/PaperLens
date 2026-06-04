@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   auditSegmentedParagraphNoise,
+  scoreCrossPageMergeCandidate,
   validateAndRepairSegmentedParagraphs,
 } from "../lib/segmentation-validation.js";
 
@@ -56,11 +57,15 @@ const structureMap = {
   ], structureMap);
 
   assert.equal(result.summary.mergedFragments, 1);
+  assert.equal(result.summary.crossPageRepair.candidates, 1);
+  assert.equal(result.summary.crossPageRepair.merged, 1);
+  assert.equal(result.summary.crossPageRepair.reasons["explicit-continuation"], 1);
   assert.equal(result.paragraphs.length, 2);
   assert.equal(result.paragraphs[0].pageNumber, 3);
   assert.equal(result.paragraphs[0].pageEndNumber, 4);
   assert.match(result.paragraphs[0].sourceText, /temporal pattern before a language model/);
   assert.equal(result.paragraphs[0].plannedSectionId, "sec_method");
+  assert.equal(result.paragraphs[0].segmentationMergeTrace[0].type, "cross-page");
 }
 
 {
@@ -83,9 +88,94 @@ const structureMap = {
   ], structureMap);
 
   assert.equal(result.summary.mergedFragments, 0);
+  assert.equal(result.summary.crossPageRepair.candidates, 1);
+  assert.equal(result.summary.crossPageRepair.rejected, 1);
+  assert.equal(result.summary.crossPageRepair.blockers["section-mismatch"], 1);
   assert.equal(result.paragraphs.length, 3);
   assert.equal(result.paragraphs[0].plannedSectionId, "sec_method");
   assert.equal(result.paragraphs[1].plannedSectionId, "sec_results");
+}
+
+{
+  const previous = paragraph(
+    "p1",
+    "The proposed tokenizer first maps each time-series value into a coarse token while preserving",
+    3,
+    {
+      sectionTitleHint: "Method",
+      plannedSectionId: "sec_method",
+      sourceBox: { x: 72, y: 710, width: 420, height: 42 },
+    },
+  );
+  const next = paragraph(
+    "p2",
+    "the local fine-grained residual with a second codebook before the decoder predicts future tokens.",
+    4,
+    {
+      sectionTitleHint: "Method",
+      plannedSectionId: "sec_method",
+      sourceBox: { x: 72, y: 86, width: 420, height: 44 },
+    },
+  );
+  const score = scoreCrossPageMergeCandidate(previous, next, {
+    pageMetrics: [
+      { pageNumber: 3, pageHeight: 792 },
+      { pageNumber: 4, pageHeight: 792 },
+    ],
+  });
+
+  assert.equal(score.candidate, true);
+  assert.equal(score.shouldMerge, true);
+  assert.ok(score.score >= 7);
+  assert.ok(score.reasons.includes("previous-open-sentence"));
+  assert.ok(score.reasons.includes("next-starts-continuation"));
+  assert.ok(score.reasons.includes("previous-near-page-bottom"));
+  assert.ok(score.reasons.includes("next-near-page-top"));
+}
+
+{
+  const previous = paragraph(
+    "p1",
+    "The experiment section ends with a complete sentence about the benchmark setup.",
+    3,
+    {
+      sectionTitleHint: "Method",
+      plannedSectionId: "sec_method",
+      sourceBox: { x: 72, y: 710, width: 420, height: 42 },
+    },
+  );
+  const next = paragraph(
+    "p2",
+    "Results show that the method improves accuracy across several datasets.",
+    4,
+    {
+      sectionTitleHint: "Method",
+      plannedSectionId: "sec_method",
+      sourceBox: { x: 72, y: 86, width: 420, height: 44 },
+    },
+  );
+  const score = scoreCrossPageMergeCandidate(previous, next, {
+    pageMetrics: [
+      { pageNumber: 3, pageHeight: 792 },
+      { pageNumber: 4, pageHeight: 792 },
+    ],
+  });
+
+  assert.equal(score.candidate, true);
+  assert.equal(score.shouldMerge, false);
+  assert.ok(score.blockers.length > 0);
+}
+
+{
+  const score = scoreCrossPageMergeCandidate(
+    paragraph("p1", "The previous manually edited paragraph does not merge across", 3, {
+      manualSegmentationEdit: { action: "merge" },
+    }),
+    paragraph("p2", "pages even if the next text looks like a continuation.", 4),
+  );
+  assert.equal(score.candidate, true);
+  assert.equal(score.shouldMerge, false);
+  assert.ok(score.blockers.includes("manual-edit"));
 }
 
 {

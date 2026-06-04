@@ -1177,6 +1177,80 @@ select:focus {
   overflow-wrap: anywhere;
 }
 
+.segmentation-debug-cross-page {
+  padding: 10px;
+  border: 1px solid rgba(51, 90, 158, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.segmentation-debug-cross-page-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.segmentation-debug-cross-page-meta span {
+  padding: 4px 7px;
+  border: 1px solid rgba(15, 118, 110, 0.16);
+  border-radius: 999px;
+  background: rgba(15, 118, 110, 0.07);
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.segmentation-debug-cross-page-reasons {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.segmentation-debug-cross-page-samples {
+  display: grid;
+  gap: 6px;
+}
+
+.segmentation-debug-cross-page-sample {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid rgba(100, 112, 108, 0.13);
+  border-left-width: 3px;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.segmentation-debug-cross-page-sample.merged {
+  border-left-color: #0f766e;
+}
+
+.segmentation-debug-cross-page-sample.rejected {
+  border-left-color: #b45309;
+}
+
+.segmentation-debug-cross-page-sample strong {
+  color: #1d2522;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.segmentation-debug-cross-page-sample p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.segmentation-debug-cross-page-sample small {
+  color: #33403c;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 .segmentation-debug-memory-meta,
 .segmentation-debug-memory-tags {
   display: flex;
