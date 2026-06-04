@@ -1921,6 +1921,17 @@ select:focus {
   font-weight: 720;
 }
 
+.paragraph-location-summary {
+  padding: 3px 7px;
+  border: 1px solid rgba(51, 90, 158, 0.14);
+  border-radius: 999px;
+  background: rgba(51, 90, 158, 0.06);
+  color: #2f4f8c;
+  font-size: 11px;
+  font-weight: 780;
+  line-height: 1.25;
+}
+
 .paragraph-page-links {
   display: inline-flex;
   align-items: center;
@@ -1938,6 +1949,16 @@ select:focus {
   font-weight: 780;
   line-height: 1.25;
   cursor: pointer;
+}
+
+.paragraph-page-link.start,
+.paragraph-page-link.end {
+  border-color: rgba(15, 118, 110, 0.24);
+  background: rgba(15, 118, 110, 0.08);
+}
+
+.paragraph-page-link.middle {
+  color: #2f4f8c;
 }
 
 .paragraph-page-link:hover {

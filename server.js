@@ -40,6 +40,9 @@ import {
   normalizePaperMemory,
 } from "./lib/paper-memory.js";
 import {
+  enrichPaperParagraphLocations,
+} from "./lib/paragraph-location.js";
+import {
   rescueReadableSegmentsFromMixedBlock,
 } from "./lib/segmentation-block-rescue.js";
 import {
@@ -10386,6 +10389,7 @@ async function loadPaper(paperId) {
   if (upgradedArtifacts || upgradedContext) {
     await savePaper(paper);
   }
+  enrichPaperParagraphLocations(paper);
   return paper;
 }
 

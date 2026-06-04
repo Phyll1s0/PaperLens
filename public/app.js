@@ -4801,6 +4801,8 @@ function renderSectionDivider(section) {
 function renderParagraphCard(paragraph) {
   const card = document.createElement("article");
   const readingParagraph = isReadingParagraph(state.paper, paragraph);
+  const relatedArtifacts = getRelatedArtifactsForParagraph(state.paper, paragraph);
+  const paragraphLocation = buildParagraphLocationView(state.paper, paragraph, relatedArtifacts);
   card.className = `paragraph-card${readingParagraph ? "" : " is-ineligible"}`;
   card.id = paragraph.id;
 
@@ -4812,16 +4814,22 @@ function renderParagraphCard(paragraph) {
 
   const kicker = document.createElement("div");
   kicker.className = "paragraph-kicker";
-  const pageLabel = paragraph.pageEndNumber && paragraph.pageEndNumber !== paragraph.pageNumber
-    ? `第 ${paragraph.pageNumber}-${paragraph.pageEndNumber} 页`
-    : `第 ${paragraph.pageNumber} 页`;
+  const pageLabel = paragraphLocation.startPage
+    ? paragraphLocation.isCrossPage
+      ? `第 ${paragraphLocation.startPage}-${paragraphLocation.endPage} 页`
+      : `第 ${paragraphLocation.startPage} 页`
+    : "未知页";
   kicker.textContent = `P${paragraph.order + 1} · ${pageLabel}`;
 
   const status = document.createElement("span");
   status.className = `paragraph-status ${getAnalysisStatus(paragraph)}`;
   status.textContent = getAnalysisStatusText(paragraph);
   meta.append(kicker);
-  const pageLinks = renderParagraphPageLinks(paragraph);
+  const locationSummary = renderParagraphLocationSummary(paragraphLocation);
+  if (locationSummary) {
+    meta.append(locationSummary);
+  }
+  const pageLinks = renderParagraphPageLinks(paragraph, paragraphLocation);
   if (pageLinks) {
     meta.append(pageLinks);
   }
@@ -4851,7 +4859,6 @@ function renderParagraphCard(paragraph) {
   renderMarkdownBlock(source, paragraph.sourceText);
   content.append(source);
 
-  const relatedArtifacts = getRelatedArtifactsForParagraph(state.paper, paragraph);
   if (relatedArtifacts.length) {
     content.append(renderRelatedArtifacts(relatedArtifacts));
   }
@@ -4895,32 +4902,122 @@ function renderParagraphCard(paragraph) {
   return card;
 }
 
-function renderParagraphPageLinks(paragraph) {
-  const start = Number(paragraph.pageNumber || 0);
-  const end = Number(paragraph.pageEndNumber || start);
-  if (!Number.isFinite(start) || !Number.isFinite(end) || start <= 0 || end <= start) {
+function renderParagraphLocationSummary(location) {
+  if (!location?.startPage) {
+    return null;
+  }
+
+  const parts = [];
+  if (location.isCrossPage) {
+    parts.push(`跨 ${location.pageCount} 页`);
+  }
+  if ((location.relatedArtifactPages || []).length) {
+    parts.push(`相关图表 ${location.relatedArtifactPages.map((page) => `p.${page}`).join(" / ")}`);
+  }
+  if (!parts.length) {
+    return null;
+  }
+
+  const summary = document.createElement("span");
+  summary.className = "paragraph-location-summary";
+  summary.textContent = parts.join(" · ");
+  return summary;
+}
+
+function renderParagraphPageLinks(paragraph, location = null) {
+  const resolved = location || buildParagraphLocationView(state.paper, paragraph, []);
+  if (!resolved.startPage || !resolved.pageAnchors.length) {
     return null;
   }
 
   const wrap = document.createElement("div");
   wrap.className = "paragraph-page-links";
-  const maxLinks = Math.min(end, start + 5);
-  for (let pageNumber = start; pageNumber <= maxLinks; pageNumber += 1) {
+  const anchors = resolved.pageAnchors.slice(0, 6);
+  for (const anchor of anchors) {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "paragraph-page-link";
-    button.textContent = `p.${pageNumber}`;
-    button.title = `跳到第 ${pageNumber} 页预览`;
-    button.addEventListener("click", () => focusPagePreview(pageNumber));
+    button.className = `paragraph-page-link ${anchor.role || "single"}`;
+    button.textContent = anchor.label || `p.${anchor.pageNumber}`;
+    button.title = [
+      `跳到第 ${anchor.pageNumber} 页预览`,
+      anchor.hasSourceBox ? "该页含段落起始坐标" : "",
+      anchor.hasPageImage ? "" : "当前页可能没有页图预览",
+    ].filter(Boolean).join(" · ");
+    button.addEventListener("click", () => focusPagePreview(anchor.pageNumber));
     wrap.append(button);
   }
-  if (end > maxLinks) {
+  if (resolved.pageAnchors.length > anchors.length) {
     const more = document.createElement("span");
     more.className = "paragraph-page-more";
-    more.textContent = `+${end - maxLinks}`;
+    more.textContent = `+${resolved.pageAnchors.length - anchors.length}`;
     wrap.append(more);
   }
   return wrap;
+}
+
+function buildParagraphLocationView(paper, paragraph, relatedArtifacts = []) {
+  const serverLocation = paragraph?.location && paragraph.location.version ? paragraph.location : null;
+  const startPage = normalizeOptionalPositivePageNumber(serverLocation?.startPage || paragraph?.pageNumber);
+  const endPage = Math.max(
+    startPage || 0,
+    normalizeOptionalPositivePageNumber(serverLocation?.endPage || paragraph?.pageEndNumber || paragraph?.pageNumber) || startPage || 0,
+  );
+  const pages = startPage ? buildParagraphPageRange(startPage, endPage) : [];
+  const pageImageNumbers = new Set((paper?.pageImages || [])
+    .map((image) => normalizeOptionalPositivePageNumber(image.pageNumber))
+    .filter(Boolean));
+  const relatedArtifactPages = [...new Set([
+    ...(serverLocation?.relatedArtifactPages || []),
+    ...(relatedArtifacts || []).map((artifact) => normalizeOptionalPositivePageNumber(artifact.pageNumber)),
+  ].filter(Boolean))].sort((a, b) => a - b);
+
+  return {
+    version: 1,
+    startPage: startPage || null,
+    endPage: endPage || startPage || null,
+    pageCount: pages.length,
+    pages,
+    isCrossPage: pages.length > 1,
+    relatedArtifactPages,
+    pageAnchors: pages.map((pageNumber, index) => ({
+      pageNumber,
+      role: pages.length === 1
+        ? "single"
+        : index === 0
+          ? "start"
+          : index === pages.length - 1 ? "end" : "middle",
+      label: formatParagraphPageAnchorLabel(pageNumber, index, pages.length),
+      hasPageImage: pageImageNumbers.has(pageNumber),
+      hasSourceBox: index === 0 && Boolean(paragraph?.sourceBox),
+    })),
+  };
+}
+
+function buildParagraphPageRange(startPage, endPage) {
+  const pages = [];
+  const cappedEnd = Math.min(Math.max(startPage, endPage || startPage), startPage + 24);
+  for (let pageNumber = startPage; pageNumber <= cappedEnd; pageNumber += 1) {
+    pages.push(pageNumber);
+  }
+  return pages;
+}
+
+function formatParagraphPageAnchorLabel(pageNumber, index, total) {
+  if (total <= 1) {
+    return `p.${pageNumber}`;
+  }
+  if (index === 0) {
+    return `起 p.${pageNumber}`;
+  }
+  if (index === total - 1) {
+    return `止 p.${pageNumber}`;
+  }
+  return `续 p.${pageNumber}`;
+}
+
+function normalizeOptionalPositivePageNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.trunc(number) : null;
 }
 
 function renderParagraphEditActions(paragraph, readingParagraph) {
