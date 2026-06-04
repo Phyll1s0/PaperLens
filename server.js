@@ -34,6 +34,12 @@ import {
   buildPaperSegmentationDebugReport,
 } from "./lib/segmentation-debug.js";
 import {
+  buildHeuristicPaperMemory,
+  buildPaperMemoryScanInput,
+  formatPaperMemoryForPrompt,
+  normalizePaperMemory,
+} from "./lib/paper-memory.js";
+import {
   rescueReadableSegmentsFromMixedBlock,
 } from "./lib/segmentation-block-rescue.js";
 import {
@@ -182,6 +188,9 @@ const SEGMENTATION_CHUNK_TIMEOUT_MS = readIntegerEnv("PAPERLENS_SEGMENTATION_CHU
 const CLAUDE_SEGMENTATION_CHUNK_TIMEOUT_MS = readIntegerEnv("PAPERLENS_CLAUDE_SEGMENTATION_CHUNK_TIMEOUT_SECONDS", 90, 30, 600) * 1000;
 const CLAUDE_SEGMENTATION_CHUNK_MAX_PAGES = readIntegerEnv("PAPERLENS_CLAUDE_SEGMENTATION_CHUNK_MAX_PAGES", 1, 1, 3);
 const CLAUDE_SEGMENTATION_CHUNK_MAX_CHARS = readIntegerEnv("PAPERLENS_CLAUDE_SEGMENTATION_CHUNK_MAX_CHARS", 4200, 1800, 12000);
+const PAPER_MEMORY_INPUT_LIMIT = readIntegerEnv("PAPERLENS_PAPER_MEMORY_INPUT_CHARS", 36_000, 8_000, 120_000);
+const PAPER_MEMORY_CHUNK_TIMEOUT_MS = readIntegerEnv("PAPERLENS_PAPER_MEMORY_CHUNK_TIMEOUT_SECONDS", 210, 60, 1200) * 1000;
+const PAPER_MEMORY_SYNTHESIS_TIMEOUT_MS = readIntegerEnv("PAPERLENS_PAPER_MEMORY_SYNTHESIS_TIMEOUT_SECONDS", 210, 60, 1200) * 1000;
 const SEGMENTATION_ITEM_TEXT_LIMIT = 900;
 const SECTION_CONTEXT_TEXT_LIMIT = 900;
 const SEGMENTATION_PLAN_VERSION = 1;
@@ -2851,6 +2860,18 @@ async function updateSegmentationJobProgress(job, event = {}) {
   } else if (event.phase === "structure-done") {
     job.phase = "segment";
     job.message = "全文结构扫描完成，正在进入页块分段。";
+  } else if (event.phase === "memory-start") {
+    job.phase = "memory";
+    job.message = "精读预读：AI 正在通读全文并整理 Paper Memory。";
+  } else if (event.phase === "memory-chunk-start") {
+    job.phase = "memory";
+    job.message = `精读预读 ${Number(event.chunkIndex || 0) + 1}/${event.totalChunks || 1} · ${event.pageRange || ""}`.trim();
+  } else if (event.phase === "memory-chunk-done") {
+    job.phase = "memory";
+    job.message = `Paper Memory 预读进度 ${Number(event.chunkIndex || 0) + 1}/${event.totalChunks || 1} · ${event.pageRange || ""}`.trim();
+  } else if (event.phase === "memory-done") {
+    job.phase = "segment";
+    job.message = "Paper Memory 已生成，正在进入页块分段。";
   } else if (event.phase === "chunk-start") {
     const item = job.items[event.chunkIndex];
     if (item) {
@@ -4286,7 +4307,7 @@ function getAnalysisProfileInstruction(settings = {}) {
 
 function buildParagraphAnalysisMessages(paper, paragraph, settings = {}) {
   const section = (paper.sections || []).find((item) => item.id === paragraph.sectionId);
-  const analysisContext = buildParagraphAnalysisContext(paper, paragraph);
+  const analysisContext = buildParagraphAnalysisContext(paper, paragraph, settings);
   const profileInstruction = getAnalysisProfileInstruction(settings);
   return [
     {
@@ -4322,7 +4343,7 @@ function buildParagraphAnalysisMessages(paper, paragraph, settings = {}) {
 }
 
 function buildParagraphBatchAnalysisMessages(paper, paragraphs, settings = {}) {
-  const globalContext = buildPaperProfileContext(paper) || "无。";
+  const globalContext = buildPaperProfileContext(paper, settings) || "无。";
   const profileInstruction = getAnalysisProfileInstruction(settings);
   return [
     {
@@ -4462,9 +4483,9 @@ function getArtifactContextLabel(artifact) {
   return "图表";
 }
 
-function buildParagraphAnalysisContext(paper, paragraph) {
+function buildParagraphAnalysisContext(paper, paragraph, settings = {}) {
   const blocks = [
-    buildPaperProfileContext(paper),
+    buildPaperProfileContext(paper, settings),
     buildSectionWindowContext(paper, paragraph),
     buildNearbyParagraphContext(paper, paragraph),
     buildReferenceWindowContext(paper, paragraph),
@@ -4475,7 +4496,7 @@ function buildParagraphAnalysisContext(paper, paragraph) {
   return truncateText(blocks.join("\n\n"), ANALYSIS_CONTEXT_TOTAL_LIMIT);
 }
 
-function buildPaperProfileContext(paper) {
+function buildPaperProfileContext(paper, settings = {}) {
   const profile = paper.contextProfile || {};
   const structure = paper.structureMap || {};
   const lines = [];
@@ -4494,6 +4515,13 @@ function buildPaperProfileContext(paper) {
   const keywords = normalizeKeywordList(profile.keywords).slice(0, 16);
   if (keywords.length) {
     lines.push(`全文关键词: ${keywords.join("、")}`);
+  }
+
+  if (normalizeAnalysisProfile(settings.analysisProfile) !== "fast" && paper.paperMemory) {
+    const memory = formatPaperMemoryForPrompt(paper.paperMemory, [], { limit: 1200 });
+    if (memory && memory !== "无。") {
+      lines.push(`精读预读记忆:\n${memory}`);
+    }
   }
 
   return lines.length ? lines.join("\n") : "";
@@ -7169,11 +7197,14 @@ function buildHeuristicSectionSummary(paragraphs) {
   return `开头内容: ${truncateText(first.sourceText, 420)}`;
 }
 
-function buildPaperContextProfile(paragraphs, sections, chunkSummaries = [], structureMap = null) {
+function buildPaperContextProfile(paragraphs, sections, chunkSummaries = [], structureMap = null, paperMemory = null) {
   const sectionById = new Map((sections || []).map((section) => [section.id, section]));
   const readingParagraphs = paragraphs.filter((paragraph) =>
     isReadingParagraph(paragraph, sectionById.get(paragraph.sectionId)));
   const keywords = [];
+  for (const keyword of normalizeKeywordList(paperMemory?.keyTerms)) {
+    pushUnique(keywords, keyword);
+  }
   for (const summary of chunkSummaries) {
     for (const keyword of normalizeKeywordList(summary.keywords)) {
       pushUnique(keywords, keyword);
@@ -7187,6 +7218,8 @@ function buildPaperContextProfile(paragraphs, sections, chunkSummaries = [], str
   }
 
   const summaryText = [
+    paperMemory?.summary || "",
+    paperMemory?.mainThread || "",
     structureMap?.summary || "",
     ...chunkSummaries.map((summary) => summary.summary),
   ]
@@ -7717,6 +7750,191 @@ function shouldUseLocalFirstSegmentation(settings = {}) {
   return isClaudeAgentSettings(settings) && !CLAUDE_AGENT_AI_SEGMENTATION;
 }
 
+function shouldUsePaperMemoryForSegmentation(settings = {}) {
+  return normalizeAnalysisProfile(settings.analysisProfile) !== "fast";
+}
+
+async function buildPaperMemoryWithAi(paper, pages, structureMap, settings, options = {}) {
+  await options.onProgress?.({ phase: "memory-start" });
+  const chunks = chunkPagesForPaperMemory(pages, settings);
+  const chunkNotes = [];
+  let usedFallback = false;
+  for (const [index, chunk] of chunks.entries()) {
+    await options.onProgress?.({
+      phase: "memory-chunk-start",
+      chunkIndex: index,
+      totalChunks: chunks.length,
+      pageRange: getPageRangeLabel(chunk),
+    });
+    try {
+      chunkNotes.push(await buildPaperMemoryChunkWithAi(paper, chunk, structureMap, settings, {
+        signal: options.signal,
+        chunkIndex: index,
+        totalChunks: chunks.length,
+      }));
+    } catch (error) {
+      if (options.signal?.aborted || error.statusCode === 499 || isFatalModelConfigurationError(error)) {
+        throw error;
+      }
+      usedFallback = true;
+      chunkNotes.push({
+        ...buildHeuristicPaperMemory(paper, chunk, structureMap),
+        source: "heuristic",
+        chunkSummaries: [`${getPageRangeLabel(chunk)} 预读失败，使用本地 block/链接/视觉材料兜底：${truncateText(error.message || "unknown", 120)}`],
+      });
+    }
+    await options.onProgress?.({
+      phase: "memory-chunk-done",
+      chunkIndex: index,
+      totalChunks: chunks.length,
+      pageRange: getPageRangeLabel(chunk),
+    });
+  }
+
+  const merged = buildHeuristicPaperMemory(paper, pages, structureMap, chunkNotes);
+  let memory = merged;
+  try {
+    memory = await synthesizePaperMemoryWithAi(paper, structureMap, merged, settings, {
+      signal: options.signal,
+      usedFallback,
+    });
+  } catch (error) {
+    if (options.signal?.aborted || error.statusCode === 499 || isFatalModelConfigurationError(error)) {
+      throw error;
+    }
+    memory = {
+      ...merged,
+      source: usedFallback ? "ai+heuristic-fallback" : "ai-merge-fallback",
+      segmentationGuidance: [
+        ...(Array.isArray(merged.segmentationGuidance) ? merged.segmentationGuidance : []),
+        `Paper Memory 合成失败，使用预读 chunk 合并结果：${truncateText(error.message || "unknown", 140)}`,
+      ],
+    };
+  }
+  await options.onProgress?.({ phase: "memory-done" });
+  return normalizePaperMemory(memory, paper, structureMap);
+}
+
+async function buildPaperMemoryChunkWithAi(paper, pages, structureMap, settings, options = {}) {
+  const pageRange = getPageRangeLabel(pages);
+  const pageText = buildPaperMemoryScanInput(pages, {
+    totalLimit: Math.min(PAPER_MEMORY_INPUT_LIMIT, isClaudeAgentSettings(settings) ? 14_000 : 26_000),
+    perPageLimit: isClaudeAgentSettings(settings) ? 3200 : 5200,
+  });
+  if (!pageText) {
+    return buildHeuristicPaperMemory(paper, pages, structureMap);
+  }
+
+  const messages = [
+    {
+      role: "system",
+      content: [
+        "你是论文精读预读助手。你的任务不是分段、不是翻译，而是先通读 PDF block，建立后续精读分段要用的 Paper Memory。",
+        "必须保留对理解论文有用但不适合直接当正文段落的内容：关键公式、图表、代码块、数据集/代码仓库/项目链接、重要脚注或备注。",
+        "作者、版权、页眉页脚、参考文献可以标为非正文提示，但不要把关键 URL、公式或图表信息直接丢掉。",
+        "只输出合法 JSON，不要使用 Markdown 代码块。",
+      ].join("\n"),
+    },
+    {
+      role: "user",
+      content: [
+        `论文: ${paper.title || paper.filename || "未知论文"}`,
+        `当前预读窗口: ${options.chunkIndex + 1 || 1}/${options.totalChunks || 1}，页码 ${pageRange}`,
+        "",
+        "全文结构地图:",
+        formatPaperStructureMapForPrompt(structureMap, pages),
+        "",
+        "请预读下面原始 PDF blocks。注意 [B...] 里包含 type/坐标/链接提示；这些元信息帮助判断内容性质，不要照抄进摘要。",
+        "输出格式必须是：",
+        "{",
+        '  "summary": "本窗口内容摘要，中文，不超过 160 字",',
+        '  "mainThread": "本窗口在论文主线中的作用，不超过 160 字",',
+        '  "contributions": ["贡献或主张"],',
+        '  "keyTerms": ["术语"],',
+        '  "importantFormulas": [{ "label": "Equation 1", "pageNumber": 2, "text": "公式原文", "purpose": "这个公式的作用" }],',
+        '  "importantVisuals": [{ "label": "Figure 1", "pageNumber": 2, "type": "figure/table/code", "description": "图表或代码说明" }],',
+        '  "resources": [{ "type": "code/dataset/project/paper/url", "url": "https://...", "pageNumber": 1, "label": "资源名", "whyImportant": "为什么重要" }],',
+        '  "nonReadingGuidance": ["作者/版权/References/页眉页脚等不要当正文段落的线索"],',
+        '  "segmentationGuidance": ["后续分段时应该保留/合并/跳过的判断建议"]',
+        "}",
+        "",
+        "原始 PDF blocks:",
+        pageText,
+      ].join("\n"),
+    },
+  ];
+
+  const content = await callModel(settings, messages, {
+    maxTokens: 5000,
+    signal: options.signal,
+    timeoutMs: PAPER_MEMORY_CHUNK_TIMEOUT_MS,
+  });
+  const parsed = parseModelJson(content);
+  return normalizePaperMemory({
+    ...parsed,
+    source: "ai",
+    chunkSummaries: [`${pageRange}: ${truncateText(parsed.summary || "", 180)}`],
+  }, paper, structureMap);
+}
+
+async function synthesizePaperMemoryWithAi(paper, structureMap, mergedMemory, settings, options = {}) {
+  const memoryText = formatPaperMemoryForPrompt(mergedMemory, [], { limit: 5200 });
+  const messages = [
+    {
+      role: "system",
+      content: [
+        "你是论文精读总规划助手。请把各窗口预读结果合成为全局 Paper Memory，用于后续分段和逐段讲解。",
+        "必须保留关键公式、图表、代码、数据集/代码仓库/项目链接；它们可以不进入正文段落，但不能从记忆中消失。",
+        "只输出合法 JSON，不要使用 Markdown 代码块。",
+      ].join("\n"),
+    },
+    {
+      role: "user",
+      content: [
+        `论文: ${paper.title || paper.filename || "未知论文"}`,
+        options.usedFallback ? "注意：部分窗口使用了本地启发式兜底，请综合判断。" : "",
+        "",
+        "结构地图:",
+        formatPaperStructureMapForPrompt(structureMap, []),
+        "",
+        "预读合并草稿:",
+        memoryText,
+        "",
+        "请输出全局 Paper Memory，格式为：",
+        "{",
+        '  "summary": "整篇论文主题和结构摘要，中文，不超过 240 字",',
+        '  "mainThread": "论文方法/论证主线，中文，不超过 240 字",',
+        '  "contributions": ["关键贡献"],',
+        '  "keyTerms": ["关键术语"],',
+        '  "importantFormulas": [{ "label": "Equation 1", "pageNumber": 2, "text": "公式原文", "purpose": "作用" }],',
+        '  "importantVisuals": [{ "label": "Figure 1", "pageNumber": 2, "type": "figure/table/code", "description": "作用" }],',
+        '  "resources": [{ "type": "code/dataset/project/paper/url", "url": "https://...", "pageNumber": 1, "label": "资源名", "whyImportant": "为什么重要" }],',
+        '  "nonReadingGuidance": ["不要进入正文段落但要记住的区域或内容类型"],',
+        '  "segmentationGuidance": ["后续分段时的全局原则"]',
+        "}",
+      ].filter(Boolean).join("\n"),
+    },
+  ];
+
+  const content = await callModel(settings, messages, {
+    maxTokens: 5000,
+    signal: options.signal,
+    timeoutMs: PAPER_MEMORY_SYNTHESIS_TIMEOUT_MS,
+  });
+  return normalizePaperMemory({
+    ...parseModelJson(content),
+    source: "ai",
+    chunkSummaries: mergedMemory.chunkSummaries || [],
+  }, paper, structureMap);
+}
+
+function chunkPagesForPaperMemory(pages, settings = {}) {
+  const options = isClaudeAgentSettings(settings)
+    ? { maxPages: 1, maxChars: 5200 }
+    : { maxPages: 3, maxChars: 12_000 };
+  return chunkPagesForSegmentation(pages, options);
+}
+
 function segmentPaperLocally(paper, reason = "local-layout") {
   const pages = Array.isArray(paper.extractionPages) ? paper.extractionPages : [];
   const structureMap = {
@@ -7791,15 +8009,21 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
   const structureMap = await buildPaperStructureMapWithAi(paper, pages, settings, { signal: options.signal });
   const chunkOptions = getSegmentationChunkOptions(settings);
   const chunks = chunkPagesForSegmentation(pages, chunkOptions);
+  await options.onProgress?.({
+    phase: "structure-done",
+    totalChunks: chunks.length,
+  });
+  const paperMemory = shouldUsePaperMemoryForSegmentation(settings)
+    ? await buildPaperMemoryWithAi(paper, pages, structureMap, settings, {
+      signal: options.signal,
+      onProgress: options.onProgress,
+    })
+    : null;
   const items = [];
   const chunkSummaries = [];
   const fallbackChunks = [];
   const windowState = createSegmentationWindowState();
   let forceLocalFallback = false;
-  await options.onProgress?.({
-    phase: "structure-done",
-    totalChunks: chunks.length,
-  });
 
   for (const [index, chunk] of chunks.entries()) {
     await options.onProgress?.({
@@ -7814,6 +8038,7 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
       totalChunks: chunks.length,
       windowContext: buildSegmentationWindowContext(windowState),
       structureMap,
+      paperMemory,
       chunkOptions,
       forceLocalFallback,
     });
@@ -7874,6 +8099,7 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
     status: "ready",
     segmentationMode: "ai",
     structureMap,
+    paperMemory,
     segmentationPlan: structureMap.segmentationPlan || [],
     segmentationValidation: validation.summary,
     segmentationQualityAudit,
@@ -7883,6 +8109,13 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
         source: "structure-map",
         version: structureMap.segmentationPlanVersion || SEGMENTATION_PLAN_VERSION,
         sections: getSegmentationPlan(structureMap).length,
+      },
+      paperMemory: {
+        source: paperMemory?.source || "",
+        keyTerms: Array.isArray(paperMemory?.keyTerms) ? paperMemory.keyTerms.length : 0,
+        formulas: Array.isArray(paperMemory?.importantFormulas) ? paperMemory.importantFormulas.length : 0,
+        visuals: Array.isArray(paperMemory?.importantVisuals) ? paperMemory.importantVisuals.length : 0,
+        resources: Array.isArray(paperMemory?.resources) ? paperMemory.resources.length : 0,
       },
       localSegmentation: {
         chunks: chunks.length,
@@ -7898,7 +8131,7 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
     },
     sections,
     paragraphs,
-    contextProfile: buildPaperContextProfile(paragraphs, sections, chunkSummaries, structureMap),
+    contextProfile: buildPaperContextProfile(paragraphs, sections, chunkSummaries, structureMap, paperMemory),
     updatedAt: new Date().toISOString(),
   };
 
@@ -8154,6 +8387,9 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
   const pageRange = getPageRangeLabel(pages);
   const windowContext = options.windowContext || "无。";
   const structureContext = formatPaperStructureMapForPrompt(options.structureMap, pages);
+  const paperMemoryContext = formatPaperMemoryForPrompt(options.paperMemory, pages, {
+    limit: SEGMENTATION_CONTEXT_TEXT_LIMIT,
+  });
 
   const messages = [
     {
@@ -8162,6 +8398,7 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
         "你是论文 PDF 分段助手。你的任务是把 PDF 抽取出来的页面文本切成适合精读的语义段落。",
         "必须忠于原文，不翻译，不总结，不新增内容。",
         "必须优先遵守全文结构地图；如果结构地图指出某页进入 References 或某区域是作者/版权/链接/页眉页脚，不要把这些内容输出成正文段落。",
+        "必须参考 Paper Memory；其中的公式、图表、代码和重要 URL 是后续讲解材料，可以省略为正文段落，但不要在分段判断中误认为无价值垃圾。",
         "合并同一自然段内的换行和断词，保留标题、编号、公式引用和术语。",
         "页面文本中的 [B...] 是块编号、页码、坐标和行数元信息，只用于判断顺序/栏位/跨页续接；sourceText 不要包含这些块标记。",
         "不要把上一窗口上下文重复输出成当前段落；它只用于判断跨页续接、章节脉络和术语一致性。",
@@ -8180,6 +8417,9 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
         "",
         "全文结构地图:",
         structureContext,
+        "",
+        "Paper Memory:",
+        paperMemoryContext,
         "",
         "上一窗口上下文:",
         windowContext,
@@ -8244,14 +8484,15 @@ function formatPaperStructureMapForPrompt(structureMap, pages) {
   }
 
   const { firstPage, lastPage } = getPageRangeBounds(pages);
+  const scopedToPages = Array.isArray(pages) && pages.length > 0;
   const sections = (structureMap.sections || [])
-    .filter((section) => rangesOverlap(section.startPage, section.endPage || section.startPage, firstPage, lastPage))
+    .filter((section) => !scopedToPages || rangesOverlap(section.startPage, section.endPage || section.startPage, firstPage, lastPage))
     .slice(0, 10);
   const plan = getSegmentationPlan(structureMap)
-    .filter((section) => rangesOverlap(section.startPage, section.endPage || section.startPage, firstPage, lastPage))
+    .filter((section) => !scopedToPages || rangesOverlap(section.startPage, section.endPage || section.startPage, firstPage, lastPage))
     .slice(0, 10);
   const zones = (structureMap.nonBodyZones || [])
-    .filter((zone) => rangesOverlap(zone.startPage, zone.endPage || zone.startPage, firstPage, lastPage))
+    .filter((zone) => !scopedToPages || rangesOverlap(zone.startPage, zone.endPage || zone.startPage, firstPage, lastPage))
     .slice(0, 10);
   const lines = [
     structureMap.paperTitle ? `标题: ${structureMap.paperTitle}` : "",
