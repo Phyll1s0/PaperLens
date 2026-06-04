@@ -14,9 +14,19 @@ const paper = {
     fallback: { strategy: "layout", reason: "agent timeout", chunks: [{ pageRange: "1-2" }] },
   },
   sections: [{ id: "s1", title: "Introduction", order: 0 }],
+  pageImages: [
+    {
+      pageNumber: 1,
+      imagePath: "/assets/debug_fixture/page-001.png",
+      imageWidth: 1224,
+      imageHeight: 1584,
+    },
+  ],
   extractionPages: [
     {
       pageNumber: 1,
+      width: 612,
+      height: 792,
       blocks: [
         {
           text: "Chronos: Learning the Language of Time Series",
@@ -103,6 +113,9 @@ assert.equal(report.segmentation.mode, "layout");
 assert.equal(report.segmentation.fallbackReason, "agent timeout");
 
 const pageOne = report.pages[0];
+assert.equal(pageOne.imagePath, "/assets/debug_fixture/page-001.png");
+assert.equal(pageOne.imageWidth, 1224);
+assert.equal(pageOne.width, 612);
 assert.equal(pageOne.keptBlocks, 2);
 assert.equal(pageOne.droppedBlocks, 3);
 assert.deepEqual(pageOne.blocks[0].reasons, ["frontmatter-title"]);

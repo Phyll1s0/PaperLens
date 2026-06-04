@@ -1013,11 +1013,26 @@ select:focus {
   color: #2f4f8c;
 }
 
+.segmentation-debug-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
 .segmentation-debug-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.1fr) minmax(260px, 0.9fr);
   gap: 12px;
   align-items: start;
+}
+
+.segmentation-debug-side {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
 }
 
 .segmentation-debug-section {
@@ -1055,16 +1070,31 @@ select:focus {
 
 .segmentation-debug-block {
   display: flex;
+  width: 100%;
   gap: 9px;
   align-items: flex-start;
+  text-align: left;
   padding: 8px;
   border: 1px solid rgba(100, 112, 108, 0.13);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.76);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
 }
 
 .segmentation-debug-block.drop {
   background: rgba(180, 83, 42, 0.06);
+}
+
+.segmentation-debug-block:hover,
+.segmentation-debug-block.is-selected {
+  border-color: rgba(51, 90, 158, 0.38);
+  box-shadow: 0 0 0 3px rgba(51, 90, 158, 0.09);
+}
+
+.segmentation-debug-block.is-selected {
+  background: rgba(51, 90, 158, 0.08);
 }
 
 .segmentation-debug-block.keep .segmentation-debug-marker {
@@ -1096,6 +1126,99 @@ select:focus {
 
 .segmentation-debug-paragraph {
   background: rgba(255, 255, 255, 0.76);
+}
+
+.segmentation-debug-evidence-card {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid rgba(100, 112, 108, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.segmentation-debug-locator {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.segmentation-debug-page-map {
+  max-height: 360px;
+}
+
+.segmentation-debug-page-marker {
+  border-color: #dc2626;
+  background: rgba(220, 38, 38, 0.13);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.94), 0 0 0 5px rgba(220, 38, 38, 0.16);
+}
+
+.segmentation-debug-comparison {
+  display: grid;
+  gap: 8px;
+}
+
+.segmentation-debug-compare-column {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid rgba(100, 112, 108, 0.13);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.segmentation-debug-compare-label {
+  color: #2f4f8c;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.segmentation-debug-compare-text {
+  max-height: 180px;
+  margin: 0;
+  overflow: auto;
+  color: #1d2522;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.segmentation-debug-compare-column small,
+.segmentation-debug-match small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.segmentation-debug-match {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid rgba(15, 118, 110, 0.16);
+  border-radius: 8px;
+  background: rgba(15, 118, 110, 0.04);
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.segmentation-debug-match:hover {
+  border-color: rgba(15, 118, 110, 0.4);
+}
+
+.segmentation-debug-match strong {
+  color: var(--accent-strong);
+  font-size: 12px;
+}
+
+.segmentation-debug-match span {
+  color: #1d2522;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .ocr-notice {

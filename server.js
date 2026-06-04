@@ -4756,6 +4756,9 @@ function buildPaperRecord({ id, filename, pdfPath, extraction }) {
     blocks: Array.isArray(page.blocks) ? page.blocks : [],
     visualRegions: Array.isArray(page.visualRegions) ? page.visualRegions : [],
     visualStructureVersion: page.visualStructureVersion || null,
+    imagePath: page.imagePath || null,
+    imageWidth: page.imageWidth || null,
+    imageHeight: page.imageHeight || null,
     width: page.width || null,
     height: page.height || null,
   }));

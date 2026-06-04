@@ -15,6 +15,7 @@ const state = {
   jobHistory: [],
   exportQa: null,
   segmentationDebug: null,
+  segmentationDebugSelection: null,
   modelDiagnosticReport: null,
   lastSegmentationError: "",
   progressTimer: null,
@@ -1784,6 +1785,7 @@ async function runSegmentationDebug() {
     const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}/segmentation-debug`, {}, "分段调试");
     const result = await readResponse(response);
     state.segmentationDebug = result;
+    state.segmentationDebugSelection = getDefaultSegmentationDebugSelection(result);
     renderPaperPreservingViewport();
     window.requestAnimationFrame(() => {
       document.querySelector(".segmentation-debug-panel")?.scrollIntoView({
@@ -3217,10 +3219,20 @@ function renderSegmentationDebugPanel(result) {
   meta.textContent = formatSegmentationDebugPanelMeta(result);
   titleWrap.append(title, meta);
 
+  const actions = document.createElement("div");
+  actions.className = "segmentation-debug-actions";
+  const downloadButton = document.createElement("button");
+  downloadButton.type = "button";
+  downloadButton.className = "secondary-button";
+  downloadButton.textContent = "下载 JSON";
+  downloadButton.title = "下载当前分段调试报告";
+  downloadButton.addEventListener("click", () => downloadSegmentationDebugJson(result));
+
   const badge = document.createElement("span");
   badge.className = "export-qa-badge";
   badge.textContent = getSegmentationModeLabel(result?.segmentation?.mode);
-  header.append(titleWrap, badge);
+  actions.append(downloadButton, badge);
+  header.append(titleWrap, actions);
   panel.append(header);
 
   const summary = document.createElement("div");
@@ -3235,10 +3247,28 @@ function renderSegmentationDebugPanel(result) {
   const layout = document.createElement("div");
   layout.className = "segmentation-debug-layout";
   layout.append(renderSegmentationDebugPages(result));
-  layout.append(renderSegmentationDebugParagraphs(result));
+  const side = document.createElement("div");
+  side.className = "segmentation-debug-side";
+  side.append(renderSegmentationDebugEvidence(result));
+  side.append(renderSegmentationDebugParagraphs(result));
+  layout.append(side);
   panel.append(layout);
 
   return panel;
+}
+
+function downloadSegmentationDebugJson(result) {
+  const filename = `${sanitizeClientFilename(result?.title || result?.paperId || "paperlens-segmentation-debug")}-segmentation-debug.json`;
+  const blob = new Blob([`${JSON.stringify(result || {}, null, 2)}\n`], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  setStatus("正在下载分段调试 JSON");
 }
 
 function formatSegmentationDebugPanelMeta(result) {
@@ -3295,7 +3325,7 @@ function renderSegmentationDebugPages(result) {
   }
 
   for (const page of pages.slice(0, 8)) {
-    wrap.append(renderSegmentationDebugPage(page, result.reasonLegend || {}));
+    wrap.append(renderSegmentationDebugPage(page, result.reasonLegend || {}, result));
   }
 
   if (pages.length > 8) {
@@ -3308,7 +3338,7 @@ function renderSegmentationDebugPages(result) {
   return wrap;
 }
 
-function renderSegmentationDebugPage(page, legend) {
+function renderSegmentationDebugPage(page, legend, result) {
   const details = document.createElement("details");
   details.className = "segmentation-debug-page";
   details.open = Number(page.pageNumber || 0) <= 2;
@@ -3325,7 +3355,7 @@ function renderSegmentationDebugPage(page, legend) {
   const blocks = document.createElement("div");
   blocks.className = "segmentation-debug-blocks";
   for (const block of (page.blocks || []).slice(0, 14)) {
-    blocks.append(renderSegmentationDebugBlock(block, legend));
+    blocks.append(renderSegmentationDebugBlock(block, legend, result));
   }
   details.append(blocks);
 
@@ -3339,9 +3369,20 @@ function renderSegmentationDebugPage(page, legend) {
   return details;
 }
 
-function renderSegmentationDebugBlock(block, legend) {
-  const row = document.createElement("div");
-  row.className = `segmentation-debug-block ${block.decision === "drop" ? "drop" : "keep"}`;
+function renderSegmentationDebugBlock(block, legend, result) {
+  const row = document.createElement("button");
+  row.type = "button";
+  const selected = isSelectedSegmentationDebugBlock(block, result);
+  row.className = `segmentation-debug-block ${block.decision === "drop" ? "drop" : "keep"}${selected ? " is-selected" : ""}`;
+  row.title = "在右侧页图中定位这个 PDF block";
+  row.addEventListener("click", () => {
+    state.segmentationDebugSelection = {
+      paperId: result?.paperId || "",
+      pageNumber: block.pageNumber,
+      blockIndex: block.index,
+    };
+    renderPaperPreservingViewport();
+  });
 
   const marker = document.createElement("span");
   marker.className = "export-qa-marker segmentation-debug-marker";
@@ -3357,6 +3398,198 @@ function renderSegmentationDebugBlock(block, legend) {
 
   row.append(marker, body);
   return row;
+}
+
+function renderSegmentationDebugEvidence(result) {
+  const wrap = document.createElement("div");
+  wrap.className = "segmentation-debug-section segmentation-debug-evidence";
+  const heading = document.createElement("h4");
+  heading.textContent = "定位与对比";
+  wrap.append(heading);
+
+  const block = getSelectedSegmentationDebugBlock(result);
+  if (!block) {
+    const empty = document.createElement("p");
+    empty.className = "export-qa-empty";
+    empty.textContent = "点击左侧 PDF block 后，这里会显示页图位置和当前段落对比。";
+    wrap.append(empty);
+    return wrap;
+  }
+
+  const page = getSegmentationDebugPage(result, block.pageNumber);
+  const card = document.createElement("div");
+  card.className = "segmentation-debug-evidence-card";
+
+  if (page?.imagePath && block.box) {
+    card.append(renderSegmentationDebugLocator(page, block));
+  } else {
+    const missing = document.createElement("p");
+    missing.className = "export-qa-empty";
+    missing.textContent = "这个 block 没有可用页图或坐标。旧论文可能需要重新上传或重建页图。";
+    card.append(missing);
+  }
+
+  card.append(renderSegmentationDebugComparison(result, block));
+  wrap.append(card);
+  return wrap;
+}
+
+function renderSegmentationDebugLocator(page, block) {
+  const locator = document.createElement("section");
+  locator.className = "segmentation-debug-locator";
+
+  const title = document.createElement("div");
+  title.className = "artifact-viewer-locator-title";
+  title.textContent = `第 ${block.pageNumber || page.pageNumber || "?"} 页 · block #${Number(block.index || 0) + 1}`;
+
+  const pageLink = document.createElement("a");
+  pageLink.className = "artifact-page-map segmentation-debug-page-map";
+  pageLink.href = page.imagePath;
+  pageLink.target = "_blank";
+  pageLink.rel = "noreferrer";
+  pageLink.title = "打开整页图片";
+
+  const pageImage = document.createElement("img");
+  pageImage.src = page.imagePath;
+  pageImage.alt = `第 ${page.pageNumber || block.pageNumber || "?"} 页 block 定位`;
+  pageImage.loading = "lazy";
+  pageImage.decoding = "async";
+
+  const marker = document.createElement("span");
+  marker.className = "artifact-page-marker segmentation-debug-page-marker";
+  const bounds = getSegmentationDebugPageBounds(page, block);
+  marker.style.left = `${clampPercent(block.box.x / bounds.width * 100)}%`;
+  marker.style.top = `${clampPercent(block.box.y / bounds.height * 100)}%`;
+  marker.style.width = `${clampPercent(block.box.width / bounds.width * 100)}%`;
+  marker.style.height = `${clampPercent(block.box.height / bounds.height * 100)}%`;
+
+  pageLink.append(pageImage, marker);
+  locator.append(title, pageLink);
+  return locator;
+}
+
+function getSegmentationDebugPageBounds(page, block) {
+  const width = Number(page?.width || 0) || Number(block?.box?.pageWidth || 0) || Number(page?.imageWidth || 0) || 1;
+  const height = Number(page?.height || 0) || Number(block?.box?.pageHeight || 0) || Number(page?.imageHeight || 0) || 1;
+  return { width, height };
+}
+
+function renderSegmentationDebugComparison(result, block) {
+  const comparison = document.createElement("div");
+  comparison.className = "segmentation-debug-comparison";
+
+  comparison.append(renderSegmentationDebugCompareColumn(
+    "PDF block",
+    block.cleanText || block.preview || block.rawPreview || "空 block",
+    formatSegmentationDebugBlockMeta(block, result?.reasonLegend || {}),
+  ));
+
+  const matches = getParagraphsForSegmentationDebugBlock(result, block);
+  const paragraphColumn = document.createElement("div");
+  paragraphColumn.className = "segmentation-debug-compare-column";
+  const label = document.createElement("span");
+  label.className = "segmentation-debug-compare-label";
+  label.textContent = "当前段落";
+  paragraphColumn.append(label);
+
+  if (!matches.length) {
+    const empty = document.createElement("p");
+    empty.className = "export-qa-empty";
+    empty.textContent = "没有当前段落匹配这个 block，可能已被清洗、合并到跨页段落，或进入图表/公式识别。";
+    paragraphColumn.append(empty);
+  } else {
+    for (const paragraph of matches.slice(0, 3)) {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "segmentation-debug-match";
+      item.addEventListener("click", () => {
+        document.querySelector(`#${CSS.escape(paragraph.id)}`)?.scrollIntoView({
+          behavior: "smooth",
+          block: "center",
+        });
+      });
+      const title = document.createElement("strong");
+      title.textContent = `P${Number(paragraph.order || 0) + 1}`;
+      const preview = document.createElement("span");
+      preview.textContent = paragraph.sourcePreview || "空段落";
+      const meta = document.createElement("small");
+      meta.textContent = formatSegmentationDebugParagraphMeta(paragraph, result?.reasonLegend || {});
+      item.append(title, preview, meta);
+      paragraphColumn.append(item);
+    }
+  }
+
+  comparison.append(paragraphColumn);
+  return comparison;
+}
+
+function renderSegmentationDebugCompareColumn(labelText, bodyText, metaText) {
+  const column = document.createElement("div");
+  column.className = "segmentation-debug-compare-column";
+  const label = document.createElement("span");
+  label.className = "segmentation-debug-compare-label";
+  label.textContent = labelText;
+  const body = document.createElement("p");
+  body.className = "segmentation-debug-compare-text";
+  body.textContent = bodyText;
+  const meta = document.createElement("small");
+  meta.textContent = metaText;
+  column.append(label, body, meta);
+  return column;
+}
+
+function getParagraphsForSegmentationDebugBlock(result, block) {
+  const paragraphs = Array.isArray(result?.paragraphs) ? result.paragraphs : [];
+  return paragraphs.filter((paragraph) =>
+    Number(paragraph?.sourceBlock?.pageNumber || 0) === Number(block?.pageNumber || 0) &&
+    Number(paragraph?.sourceBlock?.index || -1) === Number(block?.index || -2));
+}
+
+function getDefaultSegmentationDebugSelection(result) {
+  const block = findDefaultSegmentationDebugBlock(result);
+  return block
+    ? { paperId: result?.paperId || "", pageNumber: block.pageNumber, blockIndex: block.index }
+    : null;
+}
+
+function findDefaultSegmentationDebugBlock(result) {
+  const pages = Array.isArray(result?.pages) ? result.pages : [];
+  for (const page of pages) {
+    const block = (page.blocks || []).find((item) => item.box && page.imagePath);
+    if (block) {
+      return block;
+    }
+  }
+  for (const page of pages) {
+    const block = (page.blocks || [])[0];
+    if (block) {
+      return block;
+    }
+  }
+  return null;
+}
+
+function getSelectedSegmentationDebugBlock(result) {
+  const selection = state.segmentationDebugSelection;
+  if (selection?.paperId === result?.paperId) {
+    const page = getSegmentationDebugPage(result, selection.pageNumber);
+    const block = (page?.blocks || []).find((item) => Number(item.index) === Number(selection.blockIndex));
+    if (block) {
+      return block;
+    }
+  }
+  return findDefaultSegmentationDebugBlock(result);
+}
+
+function getSegmentationDebugPage(result, pageNumber) {
+  return (result?.pages || []).find((page) => Number(page.pageNumber || 0) === Number(pageNumber || 0)) || null;
+}
+
+function isSelectedSegmentationDebugBlock(block, result) {
+  const selected = getSelectedSegmentationDebugBlock(result);
+  return Boolean(selected) &&
+    Number(selected.pageNumber || 0) === Number(block.pageNumber || 0) &&
+    Number(selected.index || 0) === Number(block.index || 0);
 }
 
 function formatSegmentationDebugBlockMeta(block, legend) {
