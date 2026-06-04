@@ -92,6 +92,13 @@ import {
   normalizeVisualCrop as normalizeCrop,
 } from "./lib/visual-crop-quality.js";
 import {
+  ARTIFACT_CROP_VERSION as VISUAL_ARTIFACT_CROP_VERSION,
+  VISUAL_STRUCTURE_VERSION as VISUAL_ARTIFACT_STRUCTURE_VERSION,
+  buildArtifactCropSvg as buildVisualArtifactCropSvg,
+  enhancePagesWithVisualStructure as enhancePagesWithVisualArtifacts,
+  extractPageArtifacts as extractVisualPageArtifacts,
+} from "./lib/visual-artifacts.js";
+import {
   applyManualArtifactOverrides,
   buildVisualRebuildStats,
   collectManualArtifactOverrides,
@@ -141,8 +148,8 @@ const MAX_VISUAL_REBUILD_PAPERS = readIntegerEnv("PAPERLENS_MAX_VISUAL_REBUILD_P
 const MAX_VISUAL_REBUILD_PAGES = readIntegerEnv("PAPERLENS_MAX_VISUAL_REBUILD_PAGES", 1200, 0, 20_000);
 const OCR_LANGUAGE = process.env.PAPERLENS_OCR_LANGUAGE || process.env.PAPERLENS_OCR_LANG || "eng";
 const OCR_TIMEOUT_MS = readIntegerEnv("PAPERLENS_OCR_TIMEOUT_SECONDS", 1800, 60, 7200) * 1000;
-const ARTIFACT_CROP_VERSION = 10;
-const VISUAL_STRUCTURE_VERSION = 4;
+const ARTIFACT_CROP_VERSION = VISUAL_ARTIFACT_CROP_VERSION;
+const VISUAL_STRUCTURE_VERSION = VISUAL_ARTIFACT_STRUCTURE_VERSION;
 const SEGMENTATION_AUDIT_VERSION = 1;
 const JOB_ITEM_MAX_ATTEMPTS = 2;
 const JOB_POLL_LIMIT = 20;
@@ -553,7 +560,7 @@ async function handleArtifactCropSvg(req, res, paperId, artifactId) {
     return json(res, { error: "Artifact not found." }, 404);
   }
 
-  const svg = buildArtifactCropSvg(artifact, getRequestBaseUrl(req));
+  const svg = buildVisualArtifactCropSvg(artifact, getRequestBaseUrl(req));
   if (!svg) {
     return json(res, { error: "Artifact crop is not available." }, 404);
   }
@@ -4857,7 +4864,7 @@ async function handleChat(req, res) {
 }
 
 function buildPaperRecord({ id, filename, pdfPath, extraction }) {
-  const pages = enhancePagesWithVisualStructure(extraction.pages);
+  const pages = enhancePagesWithVisualArtifacts(extraction.pages);
   const paragraphs = splitIntoParagraphs(pages);
   const sections = inferSections(paragraphs);
   const title = inferTitleFromPages(pages, paragraphs, filename);
@@ -4881,7 +4888,7 @@ function buildPaperRecord({ id, filename, pdfPath, extraction }) {
     width: page.width || null,
     height: page.height || null,
   }));
-  const pageArtifacts = extractPageArtifacts(pages);
+  const pageArtifacts = extractVisualPageArtifacts(pages);
 
   const paper = {
     id,
@@ -10276,7 +10283,7 @@ function rebuildPaperVisualArtifacts(paper, options = {}) {
     return { changed: false, reason: "already-current", stats: emptyStats };
   }
 
-  const pages = enhancePagesWithVisualStructure(paper.extractionPages.map((page) => {
+  const pages = enhancePagesWithVisualArtifacts(paper.extractionPages.map((page) => {
     const pageImage = (paper.pageImages || []).find((item) => item.pageNumber === page.pageNumber);
     const size = inferStoredPageSize(paper, page);
     return {
@@ -10298,7 +10305,7 @@ function rebuildPaperVisualArtifacts(paper, options = {}) {
     width: page.width || null,
     height: page.height || null,
   }));
-  paper.pageArtifacts = applyManualArtifactOverrides(extractPageArtifacts(pages), manualArtifactOverrides);
+  paper.pageArtifacts = applyManualArtifactOverrides(extractVisualPageArtifacts(pages), manualArtifactOverrides);
   attachParagraphArtifactLinks(paper);
   const stats = buildVisualRebuildStats(paper, pages, previousArtifactCount);
   return { changed: true, reason: force ? "forced" : "upgraded", stats };
