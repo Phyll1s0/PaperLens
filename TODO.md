@@ -25,6 +25,7 @@ Updated: 2026-06-04
 ## Done
 
 - [x] 服务状态脚本修复：`npm run service:status` 会通过 health + 端口监听识别真实 PaperLens PID，自动修复 stale PID 文件；补上 `npm run service:restart`，启动/重启后回显真正监听 3000 的服务进程。
+- [x] 精读分段输入块准备：抽出 `lib/segmentation-page-input.js`，AI 分段和本地 layout 兜底共用同一套可测的 PDF block 过滤/排序；双栏页面按阅读顺序输入，作者/会议噪声、图注、表格主体、独立链接和视觉块不再直接送入正文分段窗口，混合作者块中的正文仍会救回。
 - [x] Paper Memory 调试闭环：`/api/papers/:id/segmentation-debug` 会返回精读预读抓到的摘要、主线、术语、公式、图表、代码/数据链接和非正文提示；前端分段调试面板可直接查看这些证据，资源链接可点击，便于判断分段错在预读还是切段。
 - [x] 精读 Paper Memory 预读：精读 AI 分段前先按原始 PDF blocks 预读整篇论文，合成 `paperMemory`，保留关键公式、图表、代码、资源链接和非正文提示；后续分段和精读讲解会引用这份记忆，快速模式不增加额外 AI 预读。
 - [x] 真实 PDF 视觉 fixture 回归：抽出 `lib/visual-artifacts.js`，让上传/重建/裁剪 SVG 使用同一条可测链路；新增 fixture 覆盖页面图生成、视觉块识别、低置信公式摘要、像素收紧图表和 crop SVG 输出。

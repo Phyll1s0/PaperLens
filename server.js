@@ -43,6 +43,12 @@ import {
   rescueReadableSegmentsFromMixedBlock,
 } from "./lib/segmentation-block-rescue.js";
 import {
+  buildSegmentationPageText as buildSegmentationPageInputText,
+  extractTextBlocks as extractSegmentationTextBlocks,
+  getReadablePageBlocks as getSegmentationReadablePageBlocks,
+  normalizeReadableBlockText as normalizeSegmentationReadableBlockText,
+} from "./lib/segmentation-page-input.js";
+import {
   buildPaperDocxExport,
 } from "./lib/export-docx.js";
 import {
@@ -5393,32 +5399,7 @@ function parseModelBoolean(value) {
 }
 
 function getReadablePageBlocks(page) {
-  if (Array.isArray(page.blocks) && page.blocks.length) {
-    const blocks = [];
-    for (const rawBlock of page.blocks) {
-      const block = {
-        ...rawBlock,
-        rawText: String(rawBlock?.text || ""),
-        text: normalizeReadableBlockText(rawBlock?.text || ""),
-      };
-      if (!block.text) {
-        continue;
-      }
-
-      if (!isLikelyNonReadingBlock(block, page)) {
-        blocks.push(block);
-        continue;
-      }
-
-      blocks.push(...buildRescuedReadableBlocks(block, page));
-    }
-
-    if (blocks.length) {
-      return blocks;
-    }
-  }
-
-  return extractTextBlocks(page.text);
+  return getSegmentationReadablePageBlocks(page);
 }
 
 function buildRescuedReadableBlocks(block, page) {
@@ -7024,61 +7005,7 @@ function normalizeArtifactText(text) {
 }
 
 function extractTextBlocks(text) {
-  const normalized = String(text || "")
-    .replace(/\r/g, "\n")
-    .replace(/[ \t]+/g, " ")
-    .replace(/-\n(?=[a-z])/g, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-
-  if (!normalized) {
-    return [];
-  }
-
-  const blankSplit = normalized
-    .split(/\n\s*\n/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-
-  if (blankSplit.length > 1) {
-    return blankSplit;
-  }
-
-  const lines = normalized
-    .split(/\n+/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  const blocks = [];
-  let current = "";
-
-  for (const line of lines) {
-    const heading = isLikelyHeading(line);
-
-    if (heading && current) {
-      blocks.push(current);
-      current = "";
-    }
-
-    if (heading) {
-      blocks.push(line);
-      continue;
-    }
-
-    current = current ? `${current} ${line}` : line;
-    const endsSentence = /[.!?。！？][)"'\]]?$/.test(line);
-
-    if ((endsSentence && current.length > 360) || current.length > 1300) {
-      blocks.push(current);
-      current = "";
-    }
-  }
-
-  if (current) {
-    blocks.push(current);
-  }
-
-  return blocks;
+  return extractSegmentationTextBlocks(text);
 }
 
 function normalizeParagraph(text) {
@@ -7091,7 +7018,7 @@ function normalizeParagraph(text) {
 }
 
 function normalizeReadableBlockText(text) {
-  return normalizeParagraph(stripPublicationMetadataFragments(text));
+  return normalizeSegmentationReadableBlockText(text);
 }
 
 function inferSections(paragraphs) {
@@ -8615,14 +8542,7 @@ function resolveSegmentationPlanSection(item, structureMap) {
 }
 
 function getSegmentationPageText(page) {
-  const blocks = getReadablePageBlocks(page);
-  if (blocks.length) {
-    return blocks
-      .map((block, index) => formatSegmentationPageBlock(page, block, index))
-      .join("\n\n");
-  }
-
-  return String(page.text || "");
+  return buildSegmentationPageInputText(page);
 }
 
 function formatSegmentationPageBlock(page, block, index) {
