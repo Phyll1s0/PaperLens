@@ -61,6 +61,10 @@ import {
   startsLikeTextContinuation,
   stripPublicationMetadataFragments,
 } from "./lib/segmentation-repair.js";
+import {
+  auditSegmentedParagraphNoise as auditSegmentedNoise,
+  validateAndRepairSegmentedParagraphs as repairSegmentedParagraphs,
+} from "./lib/segmentation-validation.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -143,7 +147,6 @@ const CLAUDE_SEGMENTATION_CHUNK_MAX_CHARS = readIntegerEnv("PAPERLENS_CLAUDE_SEG
 const SEGMENTATION_ITEM_TEXT_LIMIT = 900;
 const SECTION_CONTEXT_TEXT_LIMIT = 900;
 const SEGMENTATION_PLAN_VERSION = 1;
-const SEGMENTATION_VALIDATION_VERSION = 1;
 const EXTRA_BIN_DIRS = [
   path.dirname(process.execPath),
   "/opt/homebrew/bin",
@@ -8283,119 +8286,7 @@ function buildParagraphsFromSegmentItems(items, structureMap = null) {
 }
 
 function validateAndRepairSegmentedParagraphs(paragraphs, structureMap = null) {
-  const repaired = [];
-  const seen = new Set();
-  const repeatedTextIndex = buildRepeatedSegmentationTextIndex(paragraphs || []);
-  const stats = {
-    version: SEGMENTATION_VALIDATION_VERSION,
-    inputParagraphs: Array.isArray(paragraphs) ? paragraphs.length : 0,
-    outputParagraphs: 0,
-    plannedSections: getSegmentationPlan(structureMap).length,
-    removedNonReading: 0,
-    removedDuplicates: 0,
-    mergedFragments: 0,
-    sectionAssignments: 0,
-    qualityAudit: createSegmentationAuditStats(Array.isArray(paragraphs) ? paragraphs.length : 0),
-    warnings: [],
-    updatedAt: new Date().toISOString(),
-  };
-
-  for (const paragraph of paragraphs || []) {
-    const originalClean = normalizeParagraph(paragraph.sourceText || "");
-    const clean = normalizeParagraph(stripPublicationMetadataFragments(originalClean));
-    const auditTarget = {
-      ...paragraph,
-      rawSourceText: paragraph.rawSourceText || originalClean,
-      sourceText: clean || originalClean,
-    };
-    const audit = auditSegmentedParagraphNoise(auditTarget, structureMap, repeatedTextIndex);
-    if (!clean || audit.action === "drop" || (!audit.action && shouldDropParagraphDuringSegmentationValidation(paragraph, structureMap))) {
-      stats.removedNonReading += 1;
-      recordSegmentationAuditReason(stats.qualityAudit, audit.reasons.length ? audit.reasons : ["heuristic-nonreading"], "removed");
-      continue;
-    }
-
-    const dedupeKey = buildSegmentationValidationDedupeKey(paragraph, clean);
-    if (seen.has(dedupeKey)) {
-      stats.removedDuplicates += 1;
-      continue;
-    }
-    seen.add(dedupeKey);
-
-    const next = {
-      ...paragraph,
-      sourceText: clean,
-      pageNumber: normalizePositivePageNumber(paragraph.pageNumber, 1),
-      pageEndNumber: normalizePositivePageNumber(paragraph.pageEndNumber || paragraph.pageNumber, paragraph.pageNumber || 1),
-    };
-    if (next.pageEndNumber < next.pageNumber) {
-      next.pageEndNumber = next.pageNumber;
-    }
-
-    const plannedSection = resolveSegmentationPlanSection(next, structureMap);
-    if (plannedSection) {
-      if (next.plannedSectionId !== plannedSection.id || !next.sectionTitleHint) {
-        stats.sectionAssignments += 1;
-      }
-      next.plannedSectionId = plannedSection.id;
-      next.sectionTitleHint = normalizeSectionTitleHint(next.sectionTitleHint || plannedSection.title);
-      next.segmentationRole = normalizeSegmentationRole(next.segmentationRole || plannedSection.role || "");
-    }
-
-    if (audit.action === "skip-analysis") {
-      applySegmentationNoiseMark(next, audit);
-      recordSegmentationAuditReason(stats.qualityAudit, audit.reasons, "marked");
-      repaired.push(next);
-      continue;
-    }
-
-    const previous = repaired.at(-1);
-    if (shouldMergeDuringSegmentationValidation(previous, next)) {
-      mergeParagraphIntoPrevious(previous, next);
-      stats.mergedFragments += 1;
-      continue;
-    }
-
-    repaired.push(next);
-  }
-
-  repaired.forEach((paragraph, index) => {
-    paragraph.order = index;
-  });
-  stats.outputParagraphs = repaired.length;
-  stats.qualityAudit.outputParagraphs = repaired.length;
-
-  const readingCount = repaired.filter((paragraph) => isReadingParagraph(paragraph)).length;
-  if (readingCount < 3) {
-    stats.warnings.push("reading-paragraph-count-low");
-  }
-  if (!stats.plannedSections) {
-    stats.warnings.push("segmentation-plan-empty");
-  }
-
-  return { paragraphs: repaired, summary: stats };
-}
-
-function shouldDropParagraphDuringSegmentationValidation(paragraph, structureMap) {
-  const text = normalizeParagraph(paragraph?.sourceText || "");
-  if (!text) {
-    return true;
-  }
-
-  const kind = paragraph.kind === "heading" || isLikelyHeading(text) ? "heading" : "paragraph";
-  if (isReferencesSectionTitle(text) || isReferencesSectionTitle(paragraph.sectionTitleHint)) {
-    return true;
-  }
-
-  if (kind !== "heading" && (
-    isNonReadingByStructureMap(paragraph, structureMap) ||
-    isLikelyNonReadingParagraphText(paragraph.rawSourceText || text, paragraph) ||
-    isLikelyNonReadingParagraphText(text, paragraph)
-  )) {
-    return true;
-  }
-
-  return kind !== "heading" && text.length < 20 && !isLikelyHeading(text);
+  return repairSegmentedParagraphs(paragraphs, structureMap);
 }
 
 function createSegmentationAuditStats(inputParagraphs = 0) {
@@ -8507,76 +8398,7 @@ function auditSegmentedParagraphsForNoise(paragraphs, structureMap = null) {
 }
 
 function auditSegmentedParagraphNoise(paragraph, structureMap = null, repeatedTextIndex = new Map()) {
-  const raw = normalizeArtifactText(paragraph?.rawSourceText || paragraph?.sourceText || "");
-  const clean = normalizeParagraph(paragraph?.sourceText || raw);
-  const reasons = [];
-  if (!clean) {
-    return { action: "drop", confidence: "high", reasons: ["empty"] };
-  }
-
-  const context = {
-    ...paragraph,
-    sourceText: clean,
-  };
-
-  if (isLikelyPublicationMetadataText(clean)) {
-    reasons.push("publication-metadata");
-  }
-
-  const kind = paragraph.kind === "heading" || isLikelyHeading(clean) ? "heading" : "paragraph";
-  if (kind === "heading" && !reasons.length) {
-    return { action: "", confidence: "low", reasons: [] };
-  }
-
-  if (isNonReadingByStructureMap(paragraph, structureMap)) {
-    reasons.push("structure-nonbody-zone");
-  }
-  if (isReferencesSectionTitle(clean) || isReferencesSectionTitle(paragraph.sectionTitleHint)) {
-    reasons.push("references-section");
-  }
-  if (isLikelyCaptionText(raw) || isLikelyCaptionText(clean)) {
-    reasons.push("caption");
-  }
-  if (isLikelyAuthorOrAffiliationText(clean, context)) {
-    reasons.push("author-affiliation");
-  }
-  if (isLikelyStandaloneLinkText(clean) || isLikelyArtifactOnlyLinkText(clean)) {
-    reasons.push("standalone-link");
-  }
-  if (isLikelyBibliographyEntry(clean)) {
-    reasons.push("bibliography-entry");
-  }
-  if (isRepeatedHeaderFooterText(clean, repeatedTextIndex)) {
-    reasons.push("header-footer");
-  }
-  if (isLikelyPageNumberOrRunningHeader(clean)) {
-    reasons.push("header-footer");
-  }
-  if (isLikelyDiagramOnlyText(clean, context)) {
-    reasons.push("visual-text");
-  }
-  if (isLikelyPdfExtractionGarbageText(paragraph?.rawSourceText || paragraph?.sourceText || clean)) {
-    reasons.push("pdf-extraction-garbage");
-  }
-
-  const normalizedReasons = normalizeSegmentationNoiseReasons(reasons);
-  if (!normalizedReasons.length) {
-    return { action: "", confidence: "low", reasons: [] };
-  }
-
-  const dropReasons = new Set([
-    "structure-nonbody-zone",
-    "references-section",
-    "caption",
-    "author-affiliation",
-    "publication-metadata",
-    "standalone-link",
-    "bibliography-entry",
-    "pdf-extraction-garbage",
-  ]);
-  const action = normalizedReasons.some((reason) => dropReasons.has(reason)) ? "drop" : "skip-analysis";
-  const confidence = action === "drop" || normalizedReasons.length >= 2 ? "high" : "medium";
-  return { action, confidence, reasons: normalizedReasons };
+  return auditSegmentedNoise(paragraph, structureMap, repeatedTextIndex);
 }
 
 function applySegmentationNoiseMark(paragraph, audit) {
@@ -8696,57 +8518,12 @@ function areObjectsShallowEqual(a, b) {
   return JSON.stringify(a || {}) === JSON.stringify(b || {});
 }
 
-function buildSegmentationValidationDedupeKey(paragraph, text) {
-  const pageNumber = normalizePositivePageNumber(paragraph.pageNumber, 1);
-  const normalized = text
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .trim()
-    .slice(0, 220);
-  return `${paragraph.kind || "paragraph"}:${pageNumber}:${normalized}`;
-}
-
 function normalizePositivePageNumber(value, fallback) {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) {
     return Number(fallback) || 1;
   }
   return Math.trunc(number);
-}
-
-function shouldMergeDuringSegmentationValidation(previous, paragraph) {
-  if (!previous || previous.kind !== "paragraph" || paragraph.kind !== "paragraph") {
-    return false;
-  }
-
-  if (previous.plannedSectionId && paragraph.plannedSectionId &&
-    previous.plannedSectionId !== paragraph.plannedSectionId) {
-    return false;
-  }
-
-  if (previous.sectionTitleHint && paragraph.sectionTitleHint &&
-    previous.sectionTitleHint !== paragraph.sectionTitleHint) {
-    return false;
-  }
-
-  return shouldMergeAcrossPage(previous, paragraph);
-}
-
-function mergeParagraphIntoPrevious(previous, paragraph) {
-  previous.sourceText = mergeParagraphText(previous.sourceText, paragraph.sourceText);
-  previous.pageEndNumber = Math.max(
-    normalizePositivePageNumber(previous.pageEndNumber || previous.pageNumber, previous.pageNumber || 1),
-    normalizePositivePageNumber(paragraph.pageEndNumber || paragraph.pageNumber, paragraph.pageNumber || 1),
-  );
-  previous.continuesToNext = Boolean(paragraph.continuesToNext);
-  previous.contextKeywords = [
-    ...normalizeKeywordList(previous.contextKeywords),
-    ...normalizeKeywordList(paragraph.contextKeywords),
-  ].filter((term, index, all) => all.findIndex((item) => item.toLowerCase() === term.toLowerCase()) === index)
-    .slice(0, 12);
-  previous.plannedSectionId = previous.plannedSectionId || paragraph.plannedSectionId || "";
-  previous.segmentationRole = previous.segmentationRole || paragraph.segmentationRole || "";
 }
 
 function inferSectionsFromSegmentationPlan(paragraphs, structureMap = null) {
