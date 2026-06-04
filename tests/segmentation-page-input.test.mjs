@@ -242,9 +242,205 @@ const twoColumnPage = {
 }
 
 {
+  const page = {
+    pageNumber: 1,
+    width: 612,
+    height: 792,
+    blocks: [
+      {
+        text: "M2XFP: A Metadata-Augmented Microscaling Data Format for Efficient Low-bit Quantization",
+        x: 70,
+        y: 66,
+        width: 473,
+        height: 54,
+        column: 0,
+        lineCount: 2,
+      },
+      {
+        text: "Weiming Hu weiminghu@sjtu.edu.cn Shanghai Jiao Tong University Shanghai, China",
+        x: 74,
+        y: 125,
+        width: 219,
+        height: 251,
+        column: 1,
+        lineCount: 18,
+      },
+      {
+        text: "Abstract",
+        x: 54,
+        y: 406,
+        width: 46,
+        height: 16,
+        column: 1,
+        lineCount: 1,
+      },
+      {
+        text: "Existing low-bit Microscaling formats suffer from accuracy degradation because a shared scale factor can lose dynamic range. This paragraph should follow the abstract heading.",
+        x: 17,
+        y: 223,
+        width: 279,
+        height: 368,
+        column: 1,
+        lineCount: 15,
+      },
+      {
+        text: "1 Introduction",
+        x: 318,
+        y: 653,
+        width: 87,
+        height: 16,
+        column: 2,
+        lineCount: 1,
+      },
+      {
+        text: "Large language models have grown rapidly in scale and capability, motivating low-bit quantization.",
+        x: 318,
+        y: 669,
+        width: 240,
+        height: 50,
+        column: 2,
+        lineCount: 4,
+      },
+    ],
+  };
+  const blocks = getReadablePageBlocks(page);
+  const texts = blocks.map((block) => block.text);
+  assert.equal(texts.includes("Abstract"), true);
+  assert.ok(texts.indexOf("Abstract") < texts.findIndex((text) => text.startsWith("Existing low-bit")));
+  assert.equal(texts.some((text) => /weiminghu@/.test(text)), false);
+}
+
+{
+  const page = {
+    pageNumber: 5,
+    width: 612,
+    height: 792,
+    blocks: [
+      {
+        text: "M2XFP: A Metadata-Augmented Microscaling Data Format for Efficient Low-bit Quantization",
+        x: 54,
+        y: 47,
+        width: 307,
+        height: 10,
+        column: 1,
+        lineCount: 1,
+      },
+      {
+        text: "Weiming Hu et al.",
+        x: 499,
+        y: 48,
+        width: 59,
+        height: 9,
+        column: 2,
+        lineCount: 1,
+      },
+      {
+        text: "Architecture Scaling Factor Data Type Metadata OliVe [27] Tensor/Channel FP16 Tensor/Channel INT4, Flint4 Pair Outlier-victim pair",
+        x: 84,
+        y: 120,
+        width: 418,
+        height: 33,
+        column: 0,
+        lineCount: 2,
+      },
+      {
+        text: "complexity. Supporting multiple custom data types demands numerous decoders and format converters in hardware, significantly inflating area, latency, and energy.",
+        x: 54,
+        y: 299,
+        width: 242,
+        height: 85,
+        column: 1,
+        lineCount: 7,
+      },
+      {
+        text: "4 M2XFP Analysis and Design",
+        x: 318,
+        y: 463,
+        width: 169,
+        height: 17,
+        column: 2,
+        lineCount: 1,
+      },
+    ],
+  };
+  const input = buildSegmentationPageText(page);
+  assert.equal(input.includes("Metadata OliVe"), false);
+  assert.equal(input.includes("Weiming Hu et al."), false);
+  assert.equal(input.includes("Metadata-Augmented Microscaling"), false);
+  assert.ok(input.includes("Supporting multiple custom data types"));
+  assert.ok(input.includes("4 M2XFP Analysis and Design"));
+}
+
+{
+  const page = {
+    pageNumber: 8,
+    width: 612,
+    height: 792,
+    blocks: [
+      {
+        text: "Given that the top1 maximum value within each subgroup must also be identified during decoding, we perform the selection in the 4-bit quantized format.",
+        x: 54,
+        y: 453,
+        width: 242,
+        height: 109,
+        column: 1,
+        lineCount: 9,
+      },
+      {
+        text: "❶ Step 1: Calculate Shared Scale",
+        x: 335,
+        y: 112,
+        width: 143,
+        height: 13,
+        column: 2,
+        lineCount: 1,
+      },
+      {
+        text: "val[3:0] Top-1 Decode Unit FP4[3:0] val[3:0] Comp. (val[3:0], idx[2:0]) FP4[3:0] metadata[1:0] Packer",
+        x: 324,
+        y: 79,
+        width: 227,
+        height: 67,
+        column: 2,
+        lineCount: 18,
+      },
+    ],
+  };
+  const input = buildSegmentationPageText(page);
+  assert.ok(input.includes("top1 maximum value"));
+  assert.equal(input.includes("Step 1"), false);
+  assert.equal(input.includes("Top-1 Decode Unit"), false);
+}
+
+{
   const blocks = extractTextBlocks("Abstract\nThis line starts a paragraph that is split\nacross line breaks.\n\n1 Introduction\nThe next paragraph survives.");
   assert.deepEqual(blocks, [
     "Abstract\nThis line starts a paragraph that is split\nacross line breaks.",
     "1 Introduction\nThe next paragraph survives.",
   ]);
+}
+
+{
+  const page = {
+    pageNumber: 3,
+    width: 612,
+    height: 792,
+    blocks: [
+      {
+        text: "Open Compute Project (OCP) Microscaling. Microscaling (MX) is a block floating-point format defined by the Open Compute Project.",
+        x: 54,
+        y: 357,
+        width: 242,
+        height: 109,
+        column: 1,
+        lineCount: 9,
+        lines: [
+          { text: "Open Compute Project (OCP) Microscaling. Microscal-", x: 64, y: 357, width: 232, height: 14.48 },
+          { text: "ing (MX) is a block floating-point format defined by the Open", x: 54, y: 369, width: 240, height: 13.77 },
+        ],
+      },
+    ],
+  };
+  const input = buildSegmentationPageText(page);
+  assert.ok(input.includes('lead="Open Compute Project (OCP) Microscaling."'));
 }

@@ -224,7 +224,7 @@ assert.equal(report.paperMemory.resources[0].url, "https://github.com/example/pr
 assert.equal(report.paperMemory.formulas[0].pageNumber, 2);
 assert.ok(report.paperMemory.nonReadingGuidance[0].includes("Author block"));
 
-assert.equal(report.issueSummary.total, 11);
+assert.equal(report.issueSummary.total, 12);
 assert.equal(findIssueCategory(report, "author").count, 2);
 assert.equal(findIssueCategory(report, "caption").count, 2);
 assert.equal(findIssueCategory(report, "references").count, 2);
@@ -242,7 +242,7 @@ assert.equal(pageOne.imageWidth, 1224);
 assert.equal(pageOne.width, 612);
 assert.equal(pageOne.keptBlocks, 2);
 assert.equal(pageOne.droppedBlocks, 3);
-assert.deepEqual(pageOne.blocks[0].reasons, ["frontmatter-title"]);
+assert.deepEqual(pageOne.blocks[0].reasons, ["frontmatter-title", "running-header"]);
 assert.ok(pageOne.blocks[1].reasons.includes("author-affiliation"));
 assert.ok(pageOne.blocks[3].cleanText.includes("forecasting accelerator"));
 assert.equal(pageOne.blocks[3].cleanText.includes("arXiv"), false);

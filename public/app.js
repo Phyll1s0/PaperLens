@@ -1,4 +1,5 @@
 import { normalizeFormulaArtifactLatex, normalizeRichTextSource } from "./rich-text-utils.js";
+import katex from "/vendor/katex/katex.mjs";
 
 const state = {
   paper: null,
@@ -13,9 +14,11 @@ const state = {
   artifactEditBusyId: null,
   pipelineBusy: false,
   jobHistory: [],
+  pipelineQuality: null,
   exportQa: null,
   segmentationDebug: null,
   segmentationDebugSelection: null,
+  manualEditAffectedParagraphIds: [],
   visualQaFilter: "issues",
   modelDiagnosticReport: null,
   lastSegmentationError: "",
@@ -128,6 +131,7 @@ const els = {
   resumeAnalyzeButton: document.querySelector("#resumeAnalyzeButton"),
   downloadNotesButton: document.querySelector("#downloadNotesButton"),
   downloadDocxButton: document.querySelector("#downloadDocxButton"),
+  pipelineQualityButton: document.querySelector("#pipelineQualityButton"),
   exportQaButton: document.querySelector("#exportQaButton"),
   segmentationDebugButton: document.querySelector("#segmentationDebugButton"),
   rerunAnalyzeButton: document.querySelector("#rerunAnalyzeButton"),
@@ -218,6 +222,7 @@ function bindEvents() {
   els.resumeAnalyzeButton.addEventListener("click", resumeMissingAnalysis);
   els.downloadNotesButton.addEventListener("click", downloadPaperNotes);
   els.downloadDocxButton.addEventListener("click", downloadPaperDocx);
+  els.pipelineQualityButton.addEventListener("click", runPipelineQualityReport);
   els.exportQaButton.addEventListener("click", runExportQa);
   els.segmentationDebugButton.addEventListener("click", runSegmentationDebug);
   els.rerunAnalyzeButton.addEventListener("click", rerunFullPipeline);
@@ -941,8 +946,10 @@ async function uploadPdf() {
     resetAnalysisJobState();
     state.pendingChatMessages.clear();
     state.query = "";
+    state.pipelineQuality = null;
     state.exportQa = null;
     state.segmentationDebug = null;
+    state.manualEditAffectedParagraphIds = [];
     state.visualQaFilter = "issues";
     els.searchInput.value = "";
     setStatus(isOcrRequiredPaper(paper)
@@ -1035,6 +1042,7 @@ async function segmentPaperWithAi(options = {}) {
     applySecuredSettings(result.settings);
     if (result.paper) {
       state.paper = result.paper;
+      state.pipelineQuality = null;
     }
     renderPaper();
     loadRecentPapers();
@@ -1090,8 +1098,10 @@ async function openPaper(paperId) {
     resetSegmentationJobState();
     state.pendingChatMessages.clear();
     state.query = "";
+    state.pipelineQuality = null;
     state.exportQa = null;
     state.segmentationDebug = null;
+    state.manualEditAffectedParagraphIds = [];
     state.visualQaFilter = "issues";
     state.showHiddenParagraphs = false;
     state.lastProgressParagraphId = state.paper.readingProgress?.paragraphId || "";
@@ -1202,6 +1212,7 @@ async function rebuildVisualArtifacts() {
     }, "重建视觉结构");
     const result = await readResponse(response);
     state.paper = result.paper || state.paper;
+    state.pipelineQuality = null;
     renderPaperPreservingViewport();
     await loadRecentPapers();
     setStatus(result.message || formatVisualRebuildStatus(result.stats));
@@ -1412,6 +1423,30 @@ function getServiceStatus(payload, responseOk) {
     };
   }
 
+  if (payload.deployment?.level === "error") {
+    return {
+      level: "error",
+      title: "部署保护未完成",
+      text: payload.deployment.summary || "当前部署配置存在高风险，请先修正访问保护。",
+      details,
+      actions: payload.deployment.actions?.length
+        ? payload.deployment.actions
+        : ["设置 PAPERLENS_ACCESS_TOKEN", "重启服务"],
+    };
+  }
+
+  if (payload.deployment?.level === "warn") {
+    return {
+      level: "warn",
+      title: "部署配置需要确认",
+      text: getDeploymentWarningText(payload.deployment),
+      details,
+      actions: payload.deployment.actions?.length
+        ? payload.deployment.actions
+        : ["检查 .env 部署配置", "重启服务"],
+    };
+  }
+
   if (payload.security?.publicRisk) {
     return {
       level: "warn",
@@ -1448,6 +1483,14 @@ function getServiceStatusDetails(payload = {}) {
       value: runtime.host && runtime.port ? `${runtime.host}:${runtime.port}` : "本机服务",
     },
     {
+      label: "部署",
+      value: formatServiceDeployment(payload.deployment),
+    },
+    {
+      label: "视觉",
+      value: formatServiceVisualAnalysis(payload.visualAnalysis),
+    },
+    {
       label: "队列",
       value: formatServiceQueue(queue),
     },
@@ -1481,6 +1524,45 @@ function formatServiceSecurity(security = {}) {
   }
 
   return "本机开发";
+}
+
+function formatServiceDeployment(deployment = {}) {
+  if (!deployment.mode) {
+    return "未上报";
+  }
+
+  const suffix = deployment.inferred ? "自动" : "手动";
+  const level = deployment.level === "ok"
+    ? "正常"
+    : deployment.level === "error" ? "高风险" : "需确认";
+  return `${deployment.label || deployment.mode} · ${suffix} · ${level}`;
+}
+
+function getDeploymentWarningText(deployment = {}) {
+  const issue = Array.isArray(deployment.issues)
+    ? deployment.issues.find((item) => item.severity === "warn" || item.severity === "error") || deployment.issues[0]
+    : null;
+  return issue?.message || deployment.summary || "当前部署模式建议补齐安全设置。";
+}
+
+function formatServiceVisualAnalysis(visualAnalysis = {}) {
+  if (!visualAnalysis.provider || visualAnalysis.provider === "heuristic") {
+    return "内置启发式";
+  }
+
+  const status = visualAnalysis.status === "ok"
+    ? "已加载"
+    : visualAnalysis.status === "error" ? "错误" : visualAnalysis.status === "warn" ? "部分失败" : "未启用";
+  const regions = Number(visualAnalysis.regions || 0);
+  const duration = Number(visualAnalysis.durationMs || 0);
+  const errors = Number(visualAnalysis.errors || 0);
+  return [
+    visualAnalysis.provider,
+    status,
+    regions ? `${regions}区` : "",
+    duration ? `${Math.round(duration)}ms` : "",
+    errors ? `错误 ${errors}` : "",
+  ].filter(Boolean).join(" · ");
 }
 
 function formatServiceQueue(queue = {}) {
@@ -1839,6 +1921,48 @@ async function runSegmentationDebug() {
   }
 }
 
+async function runPipelineQualityReport() {
+  if (!state.paper) {
+    return;
+  }
+
+  els.pipelineQualityButton.disabled = true;
+  els.pipelineQualityButton.textContent = "生成中";
+  setStatus("正在生成处理质量报告");
+
+  try {
+    const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}/pipeline-quality`, {}, "质量报告");
+    const result = await readResponse(response);
+    state.pipelineQuality = result;
+    renderPaperPreservingViewport();
+    window.requestAnimationFrame(() => {
+      document.querySelector(".pipeline-quality-panel")?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+    setStatus(formatPipelineQualityStatus(result), result.status === "error");
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    updateAutoButtons();
+  }
+}
+
+function formatPipelineQualityStatus(result) {
+  const summary = result?.summary || {};
+  const statusLabel = result?.status === "ok"
+    ? "可用"
+    : result?.status === "error" ? "需修复" : "需复查";
+  return [
+    `质量报告 ${statusLabel}`,
+    `评分 ${result?.score ?? 0}`,
+    `问题 ${summary.issueCount || 0}`,
+    `讲解 ${summary.analysisComplete || 0}/${summary.readingParagraphs || 0}`,
+    `视觉待查 ${result?.metrics?.visual?.issueArtifacts || 0}`,
+  ].join(" · ");
+}
+
 function formatExportQaStatus(result) {
   const summary = result?.summary || {};
   if (result?.status === "ok") {
@@ -1875,6 +1999,9 @@ function normalizeClientSegmentationRetryStrategy(value) {
   if (["structure", "structure-only", "map", "map-only", "plan", "plan-only"].includes(key)) {
     return "structure-only";
   }
+  if (["planning", "planning-only", "snapshot", "snapshot-only", "planning-snapshot"].includes(key)) {
+    return "planning-only";
+  }
   if (["failed", "failed-chunks", "retry-failed", "retry-failed-chunks"].includes(key)) {
     return "failed-chunks";
   }
@@ -1888,6 +2015,9 @@ function formatClientSegmentationRetryStrategyLabel(value) {
   }
   if (strategy === "structure-only") {
     return "只刷新结构地图";
+  }
+  if (strategy === "planning-only") {
+    return "只重建规划快照";
   }
   if (strategy === "failed-chunks") {
     return "补跑失败分段";
@@ -1919,42 +2049,113 @@ function hasReusableClientPaperMemory(paper) {
   ].some((items) => Array.isArray(items) && items.length > 0);
 }
 
-function chooseSegmentationRetryStrategy() {
+async function chooseSegmentationRetryStrategy() {
   const hasStructure = hasReusableClientStructureMap(state.paper);
   const hasMemory = hasReusableClientPaperMemory(state.paper);
-  const defaultChoice = hasStructure || hasMemory ? "2" : "1";
-  const value = window.prompt([
-    "选择这次重跑方式：",
-    "1 完整重跑：重新扫结构、预读 Paper Memory、切段，并重新生成全部讲解。",
-    "2 复用记忆重切段：保留已有结构/Paper Memory，直接重切段，再重新生成全部讲解。",
-    "3 只刷新结构地图：不改已有段落，不启动讲解。",
-  ].join("\n"), defaultChoice);
-  if (value === null) {
-    return null;
-  }
-
-  const normalized = normalizeClientSegmentationRetryStrategy(value);
-  if (normalized === "reuse-memory" || ["2", "reuse", "memory"].includes(String(value).trim().toLowerCase())) {
-    return {
+  return showSegmentationStrategyMenu([
+    {
+      strategy: "full",
+      title: "完整重跑",
+      description: "重新扫描结构、预读 Paper Memory、切段，并重新生成全部讲解。",
+      runAnalysis: true,
+      statusLabel: "已重新分段并加入后端分析队列",
+      recommended: !hasStructure && !hasMemory,
+    },
+    {
       strategy: "reuse-memory",
+      title: "复用记忆重切段",
+      description: hasStructure || hasMemory
+        ? "保留已有结构/Paper Memory，直接重切段，再重新生成全部讲解。"
+        : "当前可复用材料不足；后端会先补齐规划，再重切段。",
       runAnalysis: true,
       statusLabel: hasStructure || hasMemory
         ? "已复用结构/Paper Memory 重分段，并加入后端分析队列"
         : "已补齐结构/Paper Memory 重分段，并加入后端分析队列",
-    };
-  }
-  if (["3", "structure", "map", "plan"].includes(String(value).trim().toLowerCase()) || normalized === "structure-only") {
-    return {
+      recommended: hasStructure || hasMemory,
+    },
+    {
+      strategy: "planning-only",
+      title: "只重建规划快照",
+      description: "刷新结构地图和 Paper Memory，不改已有段落、翻译和讲解。",
+      runAnalysis: false,
+      statusLabel: "规划快照已重建；已有段落和讲解保持不变",
+      recommended: false,
+    },
+    {
       strategy: "structure-only",
+      title: "只刷新结构地图",
+      description: "只刷新章节计划，不刷新 Paper Memory，不启动讲解。",
       runAnalysis: false,
       statusLabel: "结构地图已刷新；已有段落和讲解保持不变",
-    };
-  }
-  return {
-    strategy: normalized,
-    runAnalysis: true,
-    statusLabel: "已重新分段并加入后端分析队列",
-  };
+      recommended: false,
+    },
+  ]);
+}
+
+function showSegmentationStrategyMenu(options) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "strategy-dialog-backdrop";
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) {
+        close(null);
+      }
+    });
+
+    const dialog = document.createElement("section");
+    dialog.className = "strategy-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-labelledby", "strategyDialogTitle");
+
+    const header = document.createElement("div");
+    header.className = "strategy-dialog-header";
+    const title = document.createElement("h3");
+    title.id = "strategyDialogTitle";
+    title.textContent = "选择重分段方式";
+    const subtitle = document.createElement("p");
+    subtitle.textContent = "选择本次要改动的范围。";
+    header.append(title, subtitle);
+
+    const list = document.createElement("div");
+    list.className = "strategy-option-list";
+    for (const option of options) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `strategy-option ${option.recommended ? "recommended" : ""}`;
+      button.addEventListener("click", () => close(option));
+      const optionTitle = document.createElement("strong");
+      optionTitle.textContent = option.recommended ? `${option.title} · 推荐` : option.title;
+      const optionBody = document.createElement("span");
+      optionBody.textContent = option.description;
+      button.append(optionTitle, optionBody);
+      list.append(button);
+    }
+
+    const footer = document.createElement("div");
+    footer.className = "strategy-dialog-footer";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "secondary-button";
+    cancel.textContent = "取消";
+    cancel.addEventListener("click", () => close(null));
+    footer.append(cancel);
+
+    dialog.append(header, list, footer);
+    overlay.append(dialog);
+    document.body.append(overlay);
+    const previousActive = document.activeElement;
+    const firstRecommended = overlay.querySelector(".strategy-option.recommended") || overlay.querySelector(".strategy-option");
+    window.setTimeout(() => firstRecommended?.focus(), 30);
+
+    function close(value) {
+      overlay.remove();
+      if (previousActive && typeof previousActive.focus === "function") {
+        previousActive.focus();
+      }
+      resolve(value);
+    }
+  });
 }
 
 async function rerunFullPipeline() {
@@ -1971,7 +2172,7 @@ async function rerunFullPipeline() {
     return;
   }
 
-  const retryStrategy = chooseSegmentationRetryStrategy();
+  const retryStrategy = await chooseSegmentationRetryStrategy();
   if (!retryStrategy) {
     return;
   }
@@ -2006,11 +2207,11 @@ async function rerunFullPipeline() {
 
 async function createAnalysisJob(payload = {}) {
   if (!state.paper) {
-    return;
+    return false;
   }
 
   if (!ensureModelSettings()) {
-    return;
+    return false;
   }
 
   const settings = getSettings();
@@ -2026,7 +2227,7 @@ async function createAnalysisJob(payload = {}) {
     );
     renderAnalysisDashboard();
     updateAutoButtons();
-    return;
+    return false;
   }
 
   setStatus("正在创建后端分析任务");
@@ -2047,22 +2248,25 @@ async function createAnalysisJob(payload = {}) {
     applySecuredSettings(result.settings);
     if (result.paper) {
       state.paper = result.paper;
+      state.pipelineQuality = null;
     }
 
     if (!result.job) {
       renderPaperPreservingViewport();
       setStatus(result.message || "没有待分析段落");
       updateAutoButtons();
-      return;
+      return true;
     }
 
     beginAnalysisJob(result.job);
     renderPaperPreservingViewport();
     await loadJobHistory();
     setStatus(payload.statusLabel || "已加入后端分析队列");
+    return true;
   } catch (error) {
     setStatus(error.message, true);
     updateAutoButtons();
+    return false;
   }
 }
 
@@ -2179,6 +2383,9 @@ async function pollSegmentationJob(options = {}) {
         if (strategy === "structure-only") {
           const sectionCount = Array.isArray(state.paper?.segmentationPlan) ? state.paper.segmentationPlan.length : 0;
           setStatus(`结构地图已刷新：${sectionCount} 个章节计划`);
+        } else if (strategy === "planning-only") {
+          const snapshot = state.paper?.segmentationPlanningSnapshot || {};
+          setStatus(`规划快照已重建：${snapshot.counts?.planItems || 0} 个章节计划`);
         } else {
           setStatus(`AI 分段完成：${getReadingParagraphs(state.paper).length} 个段落`);
         }
@@ -2581,6 +2788,7 @@ async function refreshCurrentPaper() {
 
   const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}`, {}, "刷新论文状态");
   state.paper = await readResponse(response);
+  state.pipelineQuality = null;
   renderPaperPreservingViewport();
 }
 
@@ -2890,6 +3098,10 @@ function buildClientVisualQa(paper) {
       if (artifact.cropQuality?.oversized) {
         issueTypes.push("oversized");
       }
+      const formulaFields = getClientFormulaRenderFields(artifact);
+      if (artifact.type === "formula" && formulaFields.latexConfidence === "low") {
+        issueTypes.push("low-confidence-formula");
+      }
       if (hasClientArtifactTypeConflict(artifact)) {
         issueTypes.push("type-conflict");
       }
@@ -2913,8 +3125,12 @@ function buildClientVisualQa(paper) {
         label: artifact.label || "",
         displayLabel: artifact.label || getArtifactLabel(artifact.type, artifact.visualType),
         textPreview: String(artifact.text || "").replace(/\s+/g, " ").trim().slice(0, 180),
-        formulaRole: artifact.formulaRole || "",
-        formulaRoleReason: artifact.formulaRoleReason || "",
+        formulaRole: formulaFields.formulaRole || artifact.formulaRole || "",
+        formulaRoleReason: formulaFields.formulaRoleReason || artifact.formulaRoleReason || "",
+        latexConfidence: formulaFields.latexConfidence || "",
+        latexSource: formulaFields.latexSource || "",
+        renderMode: formulaFields.renderMode || "",
+        formulaLatexRisk: formulaFields.formulaLatexRisk || "",
         hidden: Boolean(artifact.hidden),
         splitCandidate: Boolean(artifact.splitCandidate),
         parentArtifactId: artifact.parentArtifactId || "",
@@ -2941,6 +3157,7 @@ function buildClientVisualQa(paper) {
     missingCrops: items.filter((item) => item.issueTypes.includes("missing-crop")).length,
     missingAssets: items.filter((item) => item.issueTypes.includes("missing-asset")).length,
     lowConfidence: items.filter((item) => item.issueTypes.includes("low-confidence")).length,
+    lowConfidenceFormulas: items.filter((item) => item.issueTypes.includes("low-confidence-formula")).length,
     oversized: items.filter((item) => item.issueTypes.includes("oversized")).length,
     typeConflicts: items.filter((item) => item.issueTypes.includes("type-conflict")).length,
     issueArtifacts: items.filter((item) => item.issueTypes.length).length,
@@ -2967,6 +3184,7 @@ function getVisualQaCategories(summary = {}) {
     { type: "missing-crop", label: "缺裁剪", count: summary.missingCrops || 0 },
     { type: "missing-asset", label: "页图缺失", count: summary.missingAssets || 0 },
     { type: "low-confidence", label: "低置信", count: summary.lowConfidence || 0 },
+    { type: "low-confidence-formula", label: "公式低置信", count: summary.lowConfidenceFormulas || 0 },
     { type: "oversized", label: "过大", count: summary.oversized || 0 },
     { type: "type-conflict", label: "类型冲突", count: summary.typeConflicts || 0 },
     { type: "formula", label: "公式", count: summary.formulas || 0 },
@@ -3309,6 +3527,7 @@ async function startOcrJob() {
     const result = await readResponse(response);
     if (result.paper) {
       state.paper = result.paper;
+      state.pipelineQuality = null;
     }
     if (!result.job) {
       renderPaperPreservingViewport();
@@ -3487,6 +3706,15 @@ function renderParagraphs(paper) {
   const fragment = document.createDocumentFragment();
   let lastSectionId = "";
   const shownPageNumbers = new Set();
+
+  const manualEditPanel = renderManualEditRerunPanel(paper);
+  if (manualEditPanel) {
+    fragment.append(manualEditPanel);
+  }
+
+  if (state.pipelineQuality?.paperId === paper.id) {
+    fragment.append(renderPipelineQualityPanel(state.pipelineQuality));
+  }
 
   if (state.exportQa?.paperId === paper.id) {
     fragment.append(renderExportQaPanel(state.exportQa));
@@ -3750,6 +3978,7 @@ function getVisualQaSummaryItems(summary = {}) {
     { label: "代码", value: summary.codeBlocks || 0 },
     { label: "缺裁剪", value: summary.missingCrops || 0 },
     { label: "低置信", value: summary.lowConfidence || 0 },
+    { label: "公式低置信", value: summary.lowConfidenceFormulas || 0 },
     { label: "过大", value: summary.oversized || 0 },
     { label: "拆分", value: summary.splitCandidates || 0 },
     { label: "类型冲突", value: summary.typeConflicts || 0 },
@@ -3788,6 +4017,9 @@ function formatVisualQaItemContext(item) {
   if (item.formulaRole) {
     parts.push(`公式 ${formatFormulaRoleLabel(item.formulaRole)}`);
   }
+  if (item.type === "formula") {
+    parts.push(formatFormulaRenderState(item));
+  }
   if (item.manual) {
     parts.push("人工修正");
   }
@@ -3803,6 +4035,7 @@ function getVisualQaTypeLabel(type) {
     "missing-crop": "缺裁剪",
     "missing-asset": "页图缺失",
     "low-confidence": "低置信",
+    "low-confidence-formula": "公式低置信",
     oversized: "过大",
     "type-conflict": "类型冲突",
     "figure-text": "图中文字",
@@ -3835,8 +4068,438 @@ function formatFormulaRoleLabel(role) {
   return labels[role] || role;
 }
 
+function formatFormulaRenderState(item = {}) {
+  const confidence = item.latexConfidence || "none";
+  if (item.renderMode === "image") {
+    return "仅图片";
+  }
+  if (item.renderMode === "image-latex" || confidence === "low") {
+    return "低置信 LaTeX";
+  }
+  if (confidence === "high" || confidence === "medium") {
+    return "可渲染 LaTeX";
+  }
+  return "LaTeX 未识别";
+}
+
+function getClientFormulaRenderFields(artifact = {}) {
+  if (artifact.type !== "formula" && artifact.visualType !== "formula") {
+    return {};
+  }
+
+  const text = String(artifact.latex || artifact.text || "").replace(/\s+/g, " ").trim();
+  const formulaRole = artifact.formulaRole || inferClientFormulaRole(text);
+  const latexConfidence = artifact.latexConfidence || inferClientLatexConfidence(artifact, text, formulaRole);
+  const renderMode = artifact.renderMode || inferClientFormulaRenderMode(artifact, text, latexConfidence);
+  return {
+    formulaRole,
+    formulaRoleReason: artifact.formulaRoleReason || "",
+    latexConfidence,
+    latexSource: artifact.latexSource || (artifact.modelGenerated ? "model-label" : "pdf-text"),
+    renderMode,
+    formulaLatexRisk: artifact.formulaLatexRisk || "",
+  };
+}
+
+function inferClientFormulaRole(text) {
+  const clean = String(text || "");
+  if (!clean || /^model formula \d+$/i.test(clean)) {
+    return "noise";
+  }
+  if (/^\(?\d+[a-z]?\)?$/i.test(clean)) {
+    return "equation-number";
+  }
+  if (/[=≤≥≠≈∑∏∫√∞→←↔±×÷∂]|\\[A-Za-z]+/u.test(clean)) {
+    return "display-formula";
+  }
+  return "inline-math";
+}
+
+function inferClientLatexConfidence(artifact, text, formulaRole) {
+  const clean = String(text || "");
+  if (!clean || /^model formula \d+$/i.test(clean)) {
+    return "none";
+  }
+  if (formulaRole !== "display-formula") {
+    return formulaRole === "inline-math" ? "low" : "none";
+  }
+  if (isClientBrokenFormulaText(clean) || hasClientLatexBalanceRisk(clean)) {
+    return "low";
+  }
+  if (/\\[A-Za-z]+|\\[()[\]]|[_^{}]|[≤≥≠≈∑∏∫√∞→←↔±×÷∂]/u.test(clean)) {
+    return artifact.manualEditedAt || hasMathDelimiters(clean) ? "high" : "medium";
+  }
+  return /[A-Za-zα-ωΑ-Ω][\wα-ωΑ-Ω()[\]^+\-−*/|′˜ˆ<>]*\s*[=≤≥≈]\s*/u.test(clean)
+    ? "medium"
+    : "low";
+}
+
+function inferClientFormulaRenderMode(artifact, text, latexConfidence) {
+  const hasCrop = hasArtifactCrop(artifact);
+  if (!text || latexConfidence === "none") {
+    return hasCrop ? "image" : "latex";
+  }
+  if (latexConfidence === "low") {
+    return hasCrop ? "image-latex" : "latex";
+  }
+  return "latex";
+}
+
+function isClientBrokenFormulaText(text) {
+  const tokens = String(text || "").trim().split(/\s+/).filter(Boolean);
+  if (tokens.length < 8) {
+    return false;
+  }
+  const shortTokens = tokens.filter((token) => /^[A-Za-z0-9_{}()[\],.:;=+\-*/^<>≤≥≠≈⋯…|]$/.test(token)).length;
+  const operatorTokens = tokens.filter((token) => /^[:=+\-*/^<>≤≥≠≈⋯…|]$/.test(token)).length;
+  return shortTokens / tokens.length >= 0.68 && operatorTokens >= 2;
+}
+
+function hasClientLatexBalanceRisk(text) {
+  const value = String(text || "");
+  const dollarCount = countClientUnescapedToken(value, "$");
+  if (dollarCount % 2 === 1) {
+    return true;
+  }
+  return countLiteral(value, "\\[") !== countLiteral(value, "\\]") ||
+    countLiteral(value, "\\(") !== countLiteral(value, "\\)") ||
+    hasClientEnvironmentBalanceRisk(value);
+}
+
+function hasClientEnvironmentBalanceRisk(value) {
+  const begins = [...String(value || "").matchAll(/\\begin\{([^}]+)\}/g)].map((match) => match[1]);
+  const ends = [...String(value || "").matchAll(/\\end\{([^}]+)\}/g)].map((match) => match[1]);
+  return begins.length !== ends.length || begins.some((name, index) => name !== ends[index]);
+}
+
+function countLiteral(value, token) {
+  return String(value || "").split(token).length - 1;
+}
+
+function countClientUnescapedToken(value, token) {
+  let count = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] !== token) {
+      continue;
+    }
+    let backslashes = 0;
+    let cursor = index - 1;
+    while (cursor >= 0 && value[cursor] === "\\") {
+      backslashes += 1;
+      cursor -= 1;
+    }
+    if (backslashes % 2 === 0) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
 function getArtifactById(artifactId) {
   return (state.paper?.pageArtifacts || []).find((artifact) => artifact.id === artifactId) || null;
+}
+
+function getParagraphById(paragraphId) {
+  return (state.paper?.paragraphs || []).find((paragraph) => paragraph.id === paragraphId) || null;
+}
+
+function renderManualEditRerunPanel(paper) {
+  const affected = getAffectedManualEditParagraphs(paper);
+  if (!affected.length) {
+    return null;
+  }
+
+  const panel = document.createElement("section");
+  panel.className = "manual-edit-rerun-panel";
+
+  const body = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = "分段已手动修正";
+  const text = document.createElement("p");
+  text.textContent = `${affected.length} 个受影响段落已标记为待补跑。`;
+  body.append(title, text);
+
+  const actions = document.createElement("div");
+  actions.className = "manual-edit-rerun-actions";
+  const rerun = document.createElement("button");
+  rerun.type = "button";
+  rerun.className = "secondary-button";
+  rerun.textContent = `只补跑受影响 ${affected.length}`;
+  rerun.disabled = state.autoAnalyze.running || state.segmentationJob.running || state.pipelineBusy;
+  rerun.addEventListener("click", rerunManualEditAffectedParagraphs);
+
+  const clear = document.createElement("button");
+  clear.type = "button";
+  clear.className = "text-button";
+  clear.textContent = "稍后";
+  clear.addEventListener("click", () => {
+    state.manualEditAffectedParagraphIds = [];
+    renderPaperPreservingViewport();
+  });
+  actions.append(rerun, clear);
+  panel.append(body, actions);
+  return panel;
+}
+
+function getAffectedManualEditParagraphs(paper) {
+  if (!paper || !Array.isArray(state.manualEditAffectedParagraphIds) || !state.manualEditAffectedParagraphIds.length) {
+    return [];
+  }
+  const ids = new Set(state.manualEditAffectedParagraphIds);
+  return (paper.paragraphs || [])
+    .filter((paragraph) =>
+      ids.has(paragraph.id) &&
+      isReadingParagraph(paper, paragraph) &&
+      needsAnalysis(paragraph));
+}
+
+async function rerunManualEditAffectedParagraphs() {
+  if (!state.paper) {
+    return;
+  }
+  const affected = getAffectedManualEditParagraphs(state.paper);
+  if (!affected.length) {
+    state.manualEditAffectedParagraphIds = [];
+    renderPaperPreservingViewport();
+    setStatus("没有需要补跑的受影响段落。");
+    return;
+  }
+
+  const queued = await createAnalysisJob({
+    paragraphIds: affected.map((paragraph) => paragraph.id),
+    force: true,
+    statusLabel: `已补跑受影响段落：${affected.length} 段`,
+  });
+  if (queued) {
+    state.manualEditAffectedParagraphIds = [];
+    renderPaperPreservingViewport();
+  }
+}
+
+function renderPipelineQualityPanel(result) {
+  const panel = document.createElement("section");
+  panel.className = `export-qa-panel pipeline-quality-panel ${result.status || "ok"}`;
+
+  const header = document.createElement("div");
+  header.className = "export-qa-header pipeline-quality-header";
+
+  const titleWrap = document.createElement("div");
+  const title = document.createElement("h3");
+  title.textContent = "处理质量报告";
+  const meta = document.createElement("p");
+  meta.textContent = formatPipelineQualityPanelMeta(result);
+  titleWrap.append(title, meta);
+
+  const score = document.createElement("span");
+  score.className = "pipeline-quality-score";
+  score.textContent = `${result.score ?? 0}`;
+  score.title = getPipelineQualityStatusLabel(result.status);
+  header.append(titleWrap, score);
+  panel.append(header);
+
+  const metrics = document.createElement("div");
+  metrics.className = "pipeline-quality-metrics";
+  for (const item of getPipelineQualityMetricItems(result)) {
+    const metric = document.createElement("div");
+    metric.className = "pipeline-quality-metric";
+    const label = document.createElement("span");
+    label.textContent = item.label;
+    const value = document.createElement("strong");
+    value.textContent = item.value;
+    metric.append(label, value);
+    metrics.append(metric);
+  }
+  panel.append(metrics);
+
+  const checks = Array.isArray(result.checks) ? result.checks : [];
+  const list = document.createElement("div");
+  list.className = "pipeline-quality-checks";
+  for (const check of checks.slice(0, 10)) {
+    list.append(renderPipelineQualityCheck(check));
+  }
+  panel.append(list);
+
+  if (checks.length > 10) {
+    const more = document.createElement("p");
+    more.className = "export-qa-more";
+    more.textContent = `还有 ${checks.length - 10} 条检查未展开。`;
+    panel.append(more);
+  }
+
+  return panel;
+}
+
+function renderPipelineQualityCheck(check) {
+  const row = document.createElement("div");
+  row.className = `pipeline-quality-check severity-${check.severity || "info"}`;
+
+  const marker = document.createElement("span");
+  marker.className = "pipeline-quality-marker";
+  marker.textContent = getPipelineQualitySeverityLabel(check.severity);
+
+  const body = document.createElement("div");
+  body.className = "pipeline-quality-check-body";
+  const title = document.createElement("strong");
+  title.textContent = check.title || "质量检查";
+  const message = document.createElement("p");
+  message.textContent = check.message || "";
+  body.append(title, message);
+  if (check.action) {
+    const action = document.createElement("small");
+    action.textContent = check.action;
+    body.append(action);
+  }
+
+  row.append(marker, body);
+  const actionButton = buildPipelineQualityActionButton(check);
+  if (actionButton) {
+    row.append(actionButton);
+  }
+  return row;
+}
+
+function buildPipelineQualityActionButton(check) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary-button export-qa-locate";
+
+  if (check.category === "segmentation") {
+    button.textContent = "分段调试";
+    button.addEventListener("click", () => runSegmentationDebug());
+    return button;
+  }
+  if (check.category === "planning") {
+    button.textContent = "规划菜单";
+    button.disabled = state.autoAnalyze.running || state.segmentationJob.running || state.pipelineBusy;
+    button.addEventListener("click", () => rerunFullPipeline());
+    return button;
+  }
+  if (check.category === "visual" || check.category === "formula" || check.category === "provider") {
+    button.textContent = "视觉 QA";
+    button.addEventListener("click", () => {
+      document.querySelector(".visual-qa-panel")?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+    return button;
+  }
+  if (check.category === "export") {
+    button.textContent = "导出检查";
+    button.addEventListener("click", () => runExportQa());
+    return button;
+  }
+  if (check.category === "analysis") {
+    button.textContent = "补跑";
+    button.disabled = state.autoAnalyze.running || state.segmentationJob.running || state.pipelineBusy;
+    button.addEventListener("click", () => resumeMissingAnalysis());
+    return button;
+  }
+  if (check.category === "ocr") {
+    button.textContent = "OCR";
+    button.disabled = state.ocrJob.running;
+    button.addEventListener("click", () => startOcrJob());
+    return button;
+  }
+
+  return null;
+}
+
+function formatPipelineQualityPanelMeta(result) {
+  const generatedAt = result?.generatedAt ? new Date(result.generatedAt) : null;
+  const timeLabel = generatedAt && Number.isFinite(generatedAt.getTime())
+    ? generatedAt.toLocaleString()
+    : "";
+  const summary = result?.summary || {};
+  return [
+    getPipelineQualityStatusLabel(result?.status),
+    `${summary.issueCount || 0} 项问题`,
+    timeLabel,
+  ].filter(Boolean).join(" · ");
+}
+
+function getPipelineQualityMetricItems(result) {
+  const metrics = result?.metrics || {};
+  return [
+    {
+      label: "规划",
+      value: formatPipelinePlanningMetric(metrics.planning),
+    },
+    {
+      label: "分段",
+      value: [
+        getSegmentationModeLabel(metrics.segmentation?.mode),
+        metrics.segmentation?.issueCategories ? `${metrics.segmentation.issueCategories} 类问题` : "",
+      ].filter(Boolean).join(" · ") || "未知",
+    },
+    {
+      label: "定位",
+      value: `${metrics.paragraphs?.sourceBoxPercent || 0}%`,
+    },
+    {
+      label: "讲解",
+      value: `${metrics.analysis?.complete || 0}/${metrics.analysis?.total || 0}`,
+    },
+    {
+      label: "视觉",
+      value: `${metrics.visual?.issueArtifacts || 0}/${metrics.visual?.visibleArtifacts || 0} 待查`,
+    },
+    {
+      label: "公式",
+      value: `${metrics.formulas?.riskCount || 0} 风险`,
+    },
+    {
+      label: "导出",
+      value: getPipelineQualityExportLabel(metrics.export?.status),
+    },
+  ];
+}
+
+function formatPipelinePlanningMetric(planning = {}) {
+  const status = planning.status === "ready"
+    ? "完整"
+    : planning.status === "partial" ? "部分" : "缺失";
+  const reuse = planning.reuseLevel === "strong"
+    ? "强复用"
+    : planning.reuseLevel === "partial" ? "可复用" : "弱复用";
+  const fallback = planning.partialFallback ? " · 兜底" : "";
+  return `${status} · ${reuse}${fallback}`;
+}
+
+function getPipelineQualityStatusLabel(status) {
+  if (status === "ok") {
+    return "状态可用";
+  }
+  if (status === "error") {
+    return "需要修复";
+  }
+  return "需要复查";
+}
+
+function getPipelineQualitySeverityLabel(severity) {
+  if (severity === "error") {
+    return "错误";
+  }
+  if (severity === "warn") {
+    return "提示";
+  }
+  if (severity === "ok") {
+    return "正常";
+  }
+  return "信息";
+}
+
+function getPipelineQualityExportLabel(status) {
+  if (status === "ok") {
+    return "通过";
+  }
+  if (status === "error") {
+    return "错误";
+  }
+  if (status === "warn") {
+    return "提示";
+  }
+  return "未检查";
 }
 
 function renderExportQaPanel(result) {
@@ -4153,6 +4816,9 @@ function renderSegmentationDebugIssueCategory(category, result) {
 }
 
 function renderSegmentationDebugIssueSample(sample, result) {
+  const wrap = document.createElement("div");
+  wrap.className = "segmentation-debug-issue-sample-wrap";
+
   const button = document.createElement("button");
   button.type = "button";
   button.className = "segmentation-debug-issue-sample";
@@ -4184,6 +4850,53 @@ function renderSegmentationDebugIssueSample(sample, result) {
     .map((reason) => result?.reasonLegend?.[reason] || getSegmentationDebugSyntheticReasonLabel(reason) || reason)
     .join("；");
   button.append(label, preview, reasons);
+  wrap.append(button);
+
+  if (sample.source !== "block" && sample.paragraphId) {
+    const actions = renderSegmentationDebugIssueSampleActions(sample);
+    if (actions) {
+      wrap.append(actions);
+    }
+  }
+
+  return wrap;
+}
+
+function renderSegmentationDebugIssueSampleActions(sample) {
+  const paragraph = getParagraphById(sample.paragraphId);
+  if (!paragraph) {
+    return null;
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "segmentation-debug-sample-actions";
+  actions.append(
+    createSegmentationSampleAction("隐藏噪声", "把这个可疑段落标记为噪声，并从自动讲解中跳过。", () => {
+      editParagraph(paragraph.id, { action: "mark-noise" });
+    }, { danger: true }),
+    createSegmentationSampleAction("合并下段", "把这个段落和下一段合并，只补跑合并后的段落。", () => {
+      if (window.confirm("合并后会删除下一段，并清空当前段落已有翻译/讲解。确定继续吗？")) {
+        editParagraph(paragraph.id, { action: "merge-next" });
+      }
+    }),
+    createSegmentationSampleAction("补跑该段", "只重新生成这个段落的翻译和讲解。", () => {
+      analyzeParagraph(paragraph.id);
+    }),
+  );
+  return actions;
+}
+
+function createSegmentationSampleAction(label, title, onClick, options = {}) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `segmentation-debug-sample-action${options.danger ? " danger" : ""}`;
+  button.textContent = label;
+  button.title = title;
+  button.disabled = state.paragraphEditBusyId || state.autoAnalyze.running || state.segmentationJob.running || state.pipelineBusy;
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    onClick();
+  });
   return button;
 }
 
@@ -5047,7 +5760,10 @@ function renderPageArtifact(artifact) {
   const labelText = artifact.label
     ? `${artifact.label} · ${getArtifactLabel(artifact.type, artifact.visualType)}`
     : getArtifactLabel(artifact.type, artifact.visualType);
-  meta.textContent = artifact.hidden ? `已隐藏 · ${labelText}` : labelText;
+  const formulaState = artifact.type === "formula"
+    ? ` · ${formatFormulaRenderState(getClientFormulaRenderFields(artifact))}`
+    : "";
+  meta.textContent = artifact.hidden ? `已隐藏 · ${labelText}${formulaState}` : `${labelText}${formulaState}`;
   header.append(meta, renderArtifactActions(artifact));
 
   const body = document.createElement("div");
@@ -5076,16 +5792,27 @@ function getArtifactDisplayMarkdown(artifact) {
     return artifact?.text || "";
   }
 
+  const fields = getClientFormulaRenderFields(artifact);
   const source = String(artifact.latex || artifact.text || "").trim();
   if (!source) {
     return "";
   }
 
+  if (fields.renderMode === "image") {
+    return "";
+  }
+  if (fields.renderMode === "image-latex" || fields.latexConfidence === "low") {
+    return `> 识别文本（低置信，仅供核对）\n>\n> \`${escapeInlineCode(source)}\``;
+  }
   if (hasMathDelimiters(source)) {
     return source;
   }
 
   return `\\[${normalizeFormulaArtifactLatex(source)}\\]`;
+}
+
+function escapeInlineCode(text) {
+  return String(text || "").replace(/`/g, "\\`");
 }
 
 function isVisualCaptionArtifact(artifact) {
@@ -5219,6 +5946,7 @@ async function editArtifact(artifactId, payload) {
     }, "更新视觉材料");
     const result = await readResponse(response);
     state.paper = result.paper || state.paper;
+    state.pipelineQuality = null;
     state.exportQa = null;
     state.segmentationDebug = null;
     state.artifactEditBusyId = null;
@@ -5246,7 +5974,7 @@ function renderArtifactCrop(artifact) {
   frame.style.aspectRatio = `${crop.width} / ${crop.height}`;
   frame.addEventListener("click", () => openArtifactViewer(artifact));
 
-  frame.append(renderCropImage(artifact, { preferCropUrl: true }));
+  frame.append(renderCropImage(artifact));
   return frame;
 }
 
@@ -5263,24 +5991,39 @@ function hasArtifactCrop(artifact) {
 
 function renderCropImage(artifact, options = {}) {
   const crop = artifact.crop;
-  const image = document.createElement("img");
   const cropUrl = options.preferCropUrl ? getArtifactCropUrl(artifact) : "";
-  image.src = cropUrl || artifact.imagePath;
-  image.className = cropUrl ? "is-direct-crop" : "is-page-crop";
-  image.alt = artifact.label
+  const label = artifact.label
     ? `${artifact.label} 裁剪预览`
     : `${getArtifactLabel(artifact.type, artifact.visualType)}裁剪预览`;
-  image.loading = "lazy";
-  image.decoding = "async";
   if (cropUrl) {
+    const image = document.createElement("img");
+    image.src = cropUrl;
+    image.className = "is-direct-crop";
+    image.alt = label;
+    image.loading = "lazy";
+    image.decoding = "async";
     return image;
   }
 
-  image.style.width = `${(crop.pageWidth / crop.width) * 100}%`;
-  image.style.height = `${(crop.pageHeight / crop.height) * 100}%`;
-  image.style.left = `${-(crop.x / crop.width) * 100}%`;
-  image.style.top = `${-(crop.y / crop.height) * 100}%`;
-  return image;
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.classList.add("is-page-crop");
+  svg.setAttribute("viewBox", `${formatCropNumber(crop.x)} ${formatCropNumber(crop.y)} ${formatCropNumber(crop.width)} ${formatCropNumber(crop.height)}`);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", label);
+  svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+
+  const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+  title.textContent = label;
+
+  const image = document.createElementNS("http://www.w3.org/2000/svg", "image");
+  image.setAttribute("href", artifact.imagePath);
+  image.setAttribute("x", "0");
+  image.setAttribute("y", "0");
+  image.setAttribute("width", formatCropNumber(crop.pageWidth));
+  image.setAttribute("height", formatCropNumber(crop.pageHeight));
+  image.setAttribute("preserveAspectRatio", "none");
+  svg.append(title, image);
+  return svg;
 }
 
 function openArtifactViewer(artifact, options = {}) {
@@ -5348,7 +6091,7 @@ function openArtifactViewer(artifact, options = {}) {
   cropFrame.className = "artifact-viewer-crop";
   cropFrame.style.aspectRatio = `${artifact.crop.width} / ${artifact.crop.height}`;
   cropFrame.style.width = `min(100%, 1080px, calc(74vh * ${artifact.crop.width / artifact.crop.height}))`;
-  cropFrame.append(renderCropImage(artifact, { preferCropUrl: true }));
+  cropFrame.append(renderCropImage(artifact));
   viewerBody.append(cropFrame, renderArtifactLocator(artifact, options));
 
   const caption = document.createElement("div");
@@ -5912,7 +6655,7 @@ function renderParagraphCard(paragraph) {
 
   const source = document.createElement("div");
   source.className = "source-text markdown-body";
-  renderMarkdownBlock(source, paragraph.sourceText);
+  renderMarkdownBlock(source, paragraph.sourceMarkdown || paragraph.sourceText);
   content.append(source);
 
   if (relatedArtifacts.length) {
@@ -6205,7 +6948,9 @@ async function editParagraph(paragraphId, payload) {
     }, "更新分段");
     const result = await readResponse(response);
     state.paper = result.paper || state.paper;
+    state.pipelineQuality = null;
     state.segmentationDebug = null;
+    rememberManualEditAffectedParagraphs(result.changedParagraphIds);
     state.paragraphEditBusyId = null;
     renderPaperPreservingViewport();
     await loadRecentPapers();
@@ -6216,6 +6961,21 @@ async function editParagraph(paragraphId, payload) {
     state.paragraphEditBusyId = null;
     updateAutoButtons();
   }
+}
+
+function rememberManualEditAffectedParagraphs(paragraphIds = []) {
+  const nextIds = Array.isArray(paragraphIds)
+    ? paragraphIds.map(String).filter(Boolean)
+    : [];
+  if (!nextIds.length) {
+    return;
+  }
+  state.manualEditAffectedParagraphIds = [
+    ...new Set([
+      ...(Array.isArray(state.manualEditAffectedParagraphIds) ? state.manualEditAffectedParagraphIds : []),
+      ...nextIds,
+    ]),
+  ].slice(0, 40);
 }
 
 function getRelatedArtifactsForParagraph(paper, paragraph) {
@@ -7126,6 +7886,10 @@ function isRenderableMathSource(source, display = false) {
     return false;
   }
 
+  if (/^[A-Za-zΑ-Ωα-ω][A-Za-z0-9Α-Ωα-ω]*$/.test(clean)) {
+    return true;
+  }
+
   return /\\[A-Za-z]+|[_^{}=<>≤≥≠≈∑∏∫√∞→←↔±×÷∂λμσγαβθΩΔ⋯…]|\b(?:argmin|argmax|softmax|log|exp|min|max|sum|prod)\b/i.test(clean) ||
     /^[A-Za-z][A-Za-z0-9]*(?:[_^][A-Za-z0-9{}]+)+$/.test(clean);
 }
@@ -7134,6 +7898,23 @@ function renderMathSegment(source, display = false) {
   const wrapper = document.createElement("span");
   wrapper.className = display ? "math-block" : "math-inline";
   wrapper.title = source;
+  if (katex?.render) {
+    try {
+      wrapper.classList.add("math-katex");
+      katex.render(source, wrapper, {
+        displayMode: display,
+        throwOnError: true,
+        strict: "ignore",
+        trust: false,
+        output: "htmlAndMathml",
+      });
+      return wrapper;
+    } catch {
+      wrapper.classList.remove("math-katex");
+      wrapper.replaceChildren();
+    }
+  }
+
   try {
     renderLatexInto(wrapper, source);
   } catch {
@@ -7182,7 +7963,9 @@ function renderLatexStream(stream, container, stopChar) {
     if ((char === "^" || char === "_") && lastToken) {
       stream.index += 1;
       const script = document.createElement(char === "^" ? "sup" : "sub");
+      script.className = "math-script";
       renderLatexInto(script, readLatexArgument(stream));
+      lastToken.classList.add("math-scripted");
       lastToken.append(script);
       continue;
     }
@@ -7427,8 +8210,19 @@ const LATEX_COMMANDS = {
   simeq: "≃",
   circ: "∘",
   degree: "°",
+  lfloor: "⌊",
+  rfloor: "⌋",
+  lceil: "⌈",
+  rceil: "⌉",
   lbrace: "{",
   rbrace: "}",
+  vert: "|",
+  Vert: "‖",
+  mid: "|",
+  lvert: "|",
+  rvert: "|",
+  lVert: "‖",
+  rVert: "‖",
   langle: "⟨",
   rangle: "⟩",
   log: "log",
@@ -7931,6 +8725,8 @@ function updateAutoButtons() {
     : "补跑未完成";
   els.downloadNotesButton.disabled = !state.paper;
   els.downloadDocxButton.disabled = !state.paper;
+  els.pipelineQualityButton.disabled = !state.paper || busy;
+  els.pipelineQualityButton.textContent = "质量报告";
   els.exportQaButton.disabled = !state.paper || busy;
   els.exportQaButton.textContent = "导出检查";
   els.segmentationDebugButton.disabled = !state.paper || busy;

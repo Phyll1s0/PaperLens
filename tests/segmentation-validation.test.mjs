@@ -188,14 +188,16 @@ const structureMap = {
     paragraph("p6", "References", 10, { kind: "heading" }),
     paragraph("p7", "[17] Ansell et al. Chronos: Learning the Language of Time Series. arXiv preprint arXiv:2403.07815, 2024.", 10),
     paragraph("p8", "This remaining body paragraph should survive because it is ordinary reading material with a complete sentence.", 5),
+    paragraph("p9", "M2XFP: A Metadata-Augmented Microscaling Data Format for Efficient Low-bit Quantization", 5),
+    paragraph("p10", "Weiming Hu et al.", 6),
   ], structureMap);
 
   assert.deepEqual(
     result.paragraphs.map((item) => item.id),
     ["p3", "p8"],
   );
-  assert.equal(result.summary.removedNonReading, 6);
-  assert.equal(result.summary.qualityAudit.reasons["header-footer"], 2);
+  assert.equal(result.summary.removedNonReading, 8);
+  assert.equal(result.summary.qualityAudit.reasons["header-footer"], 4);
   assert.equal(result.summary.qualityAudit.reasons.caption, 1);
   assert.equal(result.summary.qualityAudit.reasons["table-body"], 1);
   assert.equal(result.summary.qualityAudit.reasons["structure-nonbody-zone"], 2);

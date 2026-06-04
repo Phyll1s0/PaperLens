@@ -31,7 +31,7 @@ const paper = {
       translation: "Translated text.",
       explanation: "Explained text.",
       keyTerms: ["Kronos", "kronos", "MAE"],
-      relatedArtifactIds: ["fig-1", "hidden-fig"],
+      relatedArtifactIds: ["fig-1", "formula-low", "hidden-fig"],
     },
     {
       id: "p2",
@@ -76,6 +76,15 @@ const paper = {
       imagePath: "/assets/paper_fixture/page-002.png",
       crop: { x: 1, y: 2, width: 3, height: 4, pageWidth: 10, pageHeight: 12 },
     },
+    {
+      id: "formula-low",
+      type: "formula",
+      visualType: "formula",
+      label: "Equation 1",
+      imagePath: "/assets/paper_fixture/page-001.png",
+      text: "y 1 : L : = { y 1 , ⋯ , y L }",
+      crop: { x: 2, y: 3, width: 5, height: 2, pageWidth: 10, pageHeight: 12 },
+    },
   ],
 };
 
@@ -111,6 +120,8 @@ assert.match(documentXml, /术语：Kronos、MAE/);
 assert.match(documentXml, /相关图表/);
 assert.match(documentXml, /Figure &amp; 1/);
 assert.match(documentXml, /Figure 1: Caption/);
+assert.match(documentXml, /Equation 1/);
+assert.match(documentXml, /识别文本（低置信，仅供核对）：y 1 : L : = \{ y 1 , ⋯ , y L \}/);
 assert.match(documentXml, /<a:blip r:embed="rIdImage1"/);
 assert.match(documentXml, /Second paragraph\./);
 assert.match(documentXml, /尚未生成/);

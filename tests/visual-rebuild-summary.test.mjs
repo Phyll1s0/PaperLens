@@ -66,6 +66,7 @@ assert.deepEqual(
     lowConfidence: 1,
     oversized: 1,
     splitCandidates: 0,
+    modelGenerated: 0,
     manualCrops: 1,
   },
 );
@@ -200,6 +201,12 @@ assert.deepEqual(
       hidden: true,
       visualType: undefined,
       label: undefined,
+      latexConfidence: "none",
+      latexSource: "pdf-text",
+      renderMode: "latex",
+      formulaLatexRisk: "",
+      formulaRole: "noise",
+      formulaRoleReason: "no-math-token",
       crop: undefined,
       cropQuality: undefined,
       cropVersion: undefined,
@@ -320,6 +327,8 @@ assert.deepEqual(
   assert.deepEqual(missing.issueTypes, ["missing-crop"]);
   assert.equal(missing.entersAiContext, true);
   assert.equal(missing.formulaRole, "display-formula");
+  assert.equal(missing.latexConfidence, "medium");
+  assert.equal(missing.renderMode, "latex");
 
   const table = qa.items.find((item) => item.id === "table-low");
   assert.deepEqual(table.issueTypes, ["missing-asset", "low-confidence", "oversized"]);

@@ -31,6 +31,12 @@ import {
   buildPaperExportQa as buildPaperExportQaReport,
 } from "./lib/export-qa.js";
 import {
+  buildPaperPipelineQualityReport,
+} from "./lib/pipeline-quality.js";
+import {
+  attachSegmentationPlanningSnapshot,
+} from "./lib/segmentation-planning-snapshot.js";
+import {
   buildPaperSegmentationDebugReport,
 } from "./lib/segmentation-debug.js";
 import {
@@ -67,6 +73,18 @@ import {
   buildPaperMarkdownExport,
 } from "./lib/export-markdown.js";
 import {
+  buildDeploymentStatus,
+  normalizeDeploymentMode,
+} from "./lib/deployment-mode.js";
+import {
+  openPaperLensSqliteStore,
+} from "./lib/sqlite-store.js";
+import {
+  getVisualAnalysisProviderStatus,
+  loadVisualAnalysisProvider,
+  normalizeVisualAnalysisProvider,
+} from "./lib/visual-analysis-provider.js";
+import {
   buildModelDiagnosticReport as buildModelDiagnosticReportPayload,
   redactProxyUrl,
 } from "./lib/model-diagnostics.js";
@@ -88,6 +106,10 @@ import {
   formatModelError,
   getChatCompletionsEndpoint,
 } from "./lib/openai-compatible-provider.js";
+import {
+  buildSourceMarkdown,
+  detectSourceLeadIn,
+} from "./public/rich-text-utils.js";
 import {
   extractPdfText,
 } from "./lib/pdf-extraction.js";
@@ -128,6 +150,9 @@ import {
   normalizeVisualCrop as normalizeCrop,
 } from "./lib/visual-crop-quality.js";
 import {
+  applyFormulaRenderFields,
+} from "./lib/formula-render-quality.js";
+import {
   ARTIFACT_CROP_VERSION as VISUAL_ARTIFACT_CROP_VERSION,
   VISUAL_STRUCTURE_VERSION as VISUAL_ARTIFACT_STRUCTURE_VERSION,
   buildArtifactCropSvg as buildVisualArtifactCropSvg,
@@ -158,6 +183,7 @@ const AUTH_COOKIE_MAX_AGE_SECONDS = readIntegerEnv("PAPERLENS_AUTH_COOKIE_MAX_AG
 const SECRET_ENCRYPTION_KEY = process.env.PAPERLENS_SECRET_KEY || ACCESS_TOKEN;
 const PDF_ENGINE = process.env.PAPERLENS_PDF_ENGINE || "auto";
 const PUBLIC_DIR = path.join(__dirname, "public");
+const KATEX_DIST_DIR = path.join(__dirname, "node_modules", "katex", "dist");
 const RUNTIME_ROOT_DIR = process.env.PAPERLENS_RUNTIME_DIR
   ? path.resolve(process.env.PAPERLENS_RUNTIME_DIR)
   : __dirname;
@@ -176,6 +202,18 @@ const CACHE_DIR = process.env.PAPERLENS_CACHE_DIR
   : path.join(RUNTIME_ROOT_DIR, ".cache");
 const JOBS_PATH = path.join(DATA_DIR, "jobs.json");
 const SECRETS_PATH = path.join(DATA_DIR, "secrets.json");
+const STORAGE_DRIVER = normalizeStorageDriver(process.env.PAPERLENS_STORAGE || "json");
+const SQLITE_PATH = process.env.PAPERLENS_SQLITE_PATH
+  ? path.resolve(process.env.PAPERLENS_SQLITE_PATH)
+  : path.join(DATA_DIR, "paperlens.sqlite");
+const DEPLOYMENT_MODE = normalizeDeploymentMode(process.env.PAPERLENS_DEPLOYMENT_MODE || "auto");
+const PUBLIC_URL = String(process.env.PAPERLENS_PUBLIC_URL || "").trim();
+const VISUAL_PROVIDER = normalizeVisualAnalysisProvider(process.env.PAPERLENS_VISUAL_PROVIDER || "heuristic");
+const VISUAL_PROVIDER_PATH = String(process.env.PAPERLENS_VISUAL_PROVIDER_PATH || "").trim();
+const VISUAL_PROVIDER_COMMAND = String(process.env.PAPERLENS_VISUAL_PROVIDER_COMMAND || "").trim();
+const VISUAL_PROVIDER_ARGS = String(process.env.PAPERLENS_VISUAL_PROVIDER_ARGS || "").trim();
+const VISUAL_PROVIDER_TIMEOUT_MS = readIntegerEnv("PAPERLENS_VISUAL_PROVIDER_TIMEOUT_MS", 5000, 500, 60000);
+const VISUAL_PROVIDER_MAX_BUFFER_BYTES = readIntegerEnv("PAPERLENS_VISUAL_PROVIDER_MAX_BUFFER_BYTES", 2 * 1024 * 1024, 64 * 1024, 16 * 1024 * 1024);
 const JOB_WORKER_LOCK_DIR = path.join(CACHE_DIR, "job-worker.lock");
 const SERVICE_STATIC_ASSET_PATHS = [
   path.join(PUBLIC_DIR, "index.html"),
@@ -257,6 +295,10 @@ await mkdir(ASSET_DIR, { recursive: true });
 await mkdir(SWIFT_MODULE_CACHE_DIR, { recursive: true });
 await mkdir(TMP_DIR, { recursive: true });
 
+const sqliteStore = STORAGE_DRIVER === "sqlite"
+  ? await openPaperLensSqliteStore({ dbPath: SQLITE_PATH })
+  : null;
+
 const jobStore = {
   jobs: new Map(),
   activeJobId: null,
@@ -305,6 +347,10 @@ const server = http.createServer(async (req, res) => {
       return serveStatic(res, path.join(__dirname, url.pathname));
     }
 
+    if (req.method === "GET" && url.pathname.startsWith("/vendor/katex/")) {
+      return serveKatexAsset(res, url.pathname);
+    }
+
     if (!isAuthorizedRequest(req, url.pathname)) {
       return json(res, {
         error: "需要访问令牌。请先登录 PaperLens。",
@@ -332,6 +378,11 @@ const server = http.createServer(async (req, res) => {
     const exportQaMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/export-qa$/);
     if (req.method === "GET" && exportQaMatch) {
       return await handleExportPaperQa(res, exportQaMatch[1]);
+    }
+
+    const pipelineQualityMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/pipeline-quality$/);
+    if (req.method === "GET" && pipelineQualityMatch) {
+      return await handlePaperPipelineQuality(res, pipelineQualityMatch[1]);
     }
 
     const segmentationDebugMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/segmentation-debug$/);
@@ -586,6 +637,26 @@ async function handlePaperSegmentationDebug(res, paperId) {
   return json(res, buildPaperSegmentationDebugReport(paper));
 }
 
+async function handlePaperPipelineQuality(res, paperId) {
+  const paper = await loadPaper(paperId);
+  const exportQa = buildPaperExportQaReport(paper, {
+    isReadingParagraphForPaper,
+    isVisiblePaperArtifact,
+    isPaperOcrRequired,
+    artifactAssetExists: (artifact) => {
+      const assetPath = getAssetPathFromPublicPath(artifact.imagePath);
+      return Boolean(assetPath && existsSync(assetPath));
+    },
+  });
+  const segmentationDebug = buildPaperSegmentationDebugReport(paper);
+  return json(res, buildPaperPipelineQualityReport(paper, {
+    exportQa,
+    segmentationDebug,
+    isReadingParagraphForPaper,
+    isPaperOcrRequired,
+  }));
+}
+
 async function handleUpdatePaperMetadata(req, res, paperId) {
   const payload = await readJson(req);
   const paper = await loadPaper(paperId);
@@ -615,7 +686,8 @@ async function handleArtifactCropSvg(req, res, paperId, artifactId) {
     return json(res, { error: "Artifact not found." }, 404);
   }
 
-  const svg = buildVisualArtifactCropSvg(artifact, getRequestBaseUrl(req));
+  const imageHref = await buildEmbeddedArtifactImageHref(artifact);
+  const svg = buildVisualArtifactCropSvg(artifact, getRequestBaseUrl(req), imageHref ? { imageHref } : {});
   if (!svg) {
     return json(res, { error: "Artifact crop is not available." }, 404);
   }
@@ -632,6 +704,20 @@ async function handleArtifactCropSvg(req, res, paperId, artifactId) {
 
   res.writeHead(200, headers);
   res.end(svg);
+}
+
+async function buildEmbeddedArtifactImageHref(artifact) {
+  const assetPath = getAssetPathFromPublicPath(artifact?.imagePath);
+  if (!assetPath) {
+    return "";
+  }
+
+  try {
+    const data = await readFile(assetPath);
+    return `data:${getContentType(assetPath)};base64,${data.toString("base64")}`;
+  } catch {
+    return "";
+  }
 }
 
 async function handleRebuildVisualArtifacts(res, paperId) {
@@ -671,7 +757,7 @@ async function handleRebuildVisualArtifacts(res, paperId) {
 }
 
 async function handleRebuildAllVisualArtifacts(res) {
-  const files = await readdir(DATA_DIR).catch(() => []);
+  const paperRecords = await loadAllPaperRecords();
   const summary = {
     papers: 0,
     rebuilt: 0,
@@ -691,13 +777,8 @@ async function handleRebuildAllVisualArtifacts(res) {
     pages: 0,
   };
 
-  for (const file of files) {
-    if (!file.endsWith(".json") || file === "jobs.json" || file === "secrets.json") {
-      continue;
-    }
-
+  for (const raw of paperRecords) {
     try {
-      const raw = await readJsonFileWithRecovery(path.join(DATA_DIR, file), { optional: true });
       if (!raw?.id || !Array.isArray(raw.paragraphs)) {
         continue;
       }
@@ -809,20 +890,36 @@ async function handleSegmentPaper(req, res, paperId) {
   }
 
   if (useLocalFirstSegmentation) {
-    const segmented = strategy === SEGMENTATION_RETRY_STRATEGIES.STRUCTURE_ONLY
-      ? refreshPaperStructureOnly(
+    let segmented;
+    if (strategy === SEGMENTATION_RETRY_STRATEGIES.STRUCTURE_ONLY) {
+      segmented = refreshPaperStructureOnly(
         paper,
         {
           ...buildHeuristicPaperStructureMap(paper, pages),
           fallbackReason: "claude-agent-local-first-structure-only",
         },
         { strategy },
-      )
-      : segmentPaperLocally(paper, "claude-agent-local-first");
+      );
+    } else if (strategy === SEGMENTATION_RETRY_STRATEGIES.PLANNING_ONLY) {
+      const structureMap = {
+        ...buildHeuristicPaperStructureMap(paper, pages),
+        fallbackReason: "claude-agent-local-first-planning-only",
+      };
+      segmented = refreshPaperPlanningSnapshotOnly(
+        paper,
+        structureMap,
+        buildHeuristicPaperMemory(paper, pages, structureMap),
+        { strategy },
+      );
+    } else {
+      segmented = segmentPaperLocally(paper, "claude-agent-local-first");
+    }
     await savePaper(segmented);
     const message = strategy === SEGMENTATION_RETRY_STRATEGIES.STRUCTURE_ONLY
       ? "Claude Agent 通道较慢，已使用本地视觉刷新结构地图；已有段落和讲解保持不变。"
-      : "Claude Agent 通道较慢，已使用本地视觉分段；可以直接开始翻译讲解。";
+      : strategy === SEGMENTATION_RETRY_STRATEGIES.PLANNING_ONLY
+        ? "Claude Agent 通道较慢，已使用本地视觉重建规划快照；已有段落和讲解保持不变。"
+        : "Claude Agent 通道较慢，已使用本地视觉分段；可以直接开始翻译讲解。";
     return json(res, {
       job: null,
       paper: segmented,
@@ -971,6 +1068,7 @@ function applyPaperArtifactEdit(paper, artifactId, payload = {}) {
   }
 
   artifact.manualEditedAt = now;
+  applyFormulaRenderFields(artifact);
   artifact.manualArtifactOverride = {
     action,
     updatedAt: now,
@@ -1112,8 +1210,15 @@ function applyPaperParagraphEdit(paper, paragraphId, payload = {}) {
     }
 
     const splitParagraph = createManualSplitParagraph(paragraph, secondText, now);
+    const splitSourceBoxes = splitManualParagraphSourceBox(paragraph.sourceBox);
     paragraph.sourceText = firstText;
     paragraph.rawSourceText = firstText;
+    if (splitSourceBoxes.first) {
+      paragraph.sourceBox = splitSourceBoxes.first;
+    }
+    if (splitSourceBoxes.second) {
+      splitParagraph.sourceBox = splitSourceBoxes.second;
+    }
     paragraph.continuesToNext = true;
     paragraph.manualSegmentationOverride = "reading";
     paragraph.analysisEligible = true;
@@ -1204,6 +1309,80 @@ function mergeManualParagraphs(previous, next) {
       ...(Array.isArray(next.relatedArtifactIds) ? next.relatedArtifactIds : []),
     ]),
   ];
+  previous.sourceBox = mergeManualParagraphSourceBoxes(previous.sourceBox, next.sourceBox) || previous.sourceBox;
+}
+
+function mergeManualParagraphSourceBoxes(previousBox, nextBox) {
+  const previous = normalizeManualSourceBox(previousBox);
+  const next = normalizeManualSourceBox(nextBox);
+  if (!previous || !next) {
+    return previous || null;
+  }
+  if (previous.pageNumber && next.pageNumber && previous.pageNumber !== next.pageNumber) {
+    return previous;
+  }
+
+  const x1 = Math.min(previous.x, next.x);
+  const y1 = Math.min(previous.y, next.y);
+  const x2 = Math.max(previous.x + previous.width, next.x + next.width);
+  const y2 = Math.max(previous.y + previous.height, next.y + next.height);
+  return {
+    ...previous,
+    x: roundCoordinate(x1),
+    y: roundCoordinate(y1),
+    width: roundCoordinate(x2 - x1),
+    height: roundCoordinate(y2 - y1),
+    pageWidth: previous.pageWidth || next.pageWidth || null,
+    pageHeight: previous.pageHeight || next.pageHeight || null,
+  };
+}
+
+function splitManualParagraphSourceBox(sourceBox) {
+  const box = normalizeManualSourceBox(sourceBox);
+  if (!box || box.height < 12) {
+    return { first: box, second: null };
+  }
+
+  const firstHeight = Math.max(6, Math.round(box.height * 0.5));
+  const secondHeight = Math.max(6, box.height - firstHeight);
+  return {
+    first: {
+      ...box,
+      height: roundCoordinate(firstHeight),
+    },
+    second: {
+      ...box,
+      y: roundCoordinate(box.y + firstHeight),
+      height: roundCoordinate(secondHeight),
+    },
+  };
+}
+
+function normalizeManualSourceBox(box) {
+  if (!box || typeof box !== "object" || Array.isArray(box)) {
+    return null;
+  }
+  const x = Number(box.x);
+  const y = Number(box.y);
+  const width = Number(box.width);
+  const height = Number(box.height);
+  if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+    return null;
+  }
+  return {
+    ...box,
+    x: roundCoordinate(x),
+    y: roundCoordinate(y),
+    width: roundCoordinate(width),
+    height: roundCoordinate(height),
+    pageNumber: Number.isFinite(Number(box.pageNumber)) ? Math.trunc(Number(box.pageNumber)) : box.pageNumber || null,
+    pageWidth: Number.isFinite(Number(box.pageWidth)) ? roundCoordinate(Number(box.pageWidth)) : box.pageWidth || null,
+    pageHeight: Number.isFinite(Number(box.pageHeight)) ? roundCoordinate(Number(box.pageHeight)) : box.pageHeight || null,
+  };
+}
+
+function roundCoordinate(value) {
+  return Math.round(Number(value) * 100) / 100;
 }
 
 function createManualSplitParagraph(source, sourceText, updatedAt) {
@@ -1601,19 +1780,14 @@ async function handleRetryFailedSegmentationJob(res, job) {
 }
 
 async function listPapers(searchParams = new URLSearchParams()) {
-  const files = await readdir(DATA_DIR).catch(() => []);
+  const paperRecords = await loadAllPaperRecords();
   const papers = [];
   const query = normalizeLibraryQuery(searchParams.get("q") || searchParams.get("query") || "");
   const tagFilter = normalizePaperTag(searchParams.get("tag") || "");
   const favoriteOnly = /^(1|true|yes)$/i.test(String(searchParams.get("favorite") || ""));
 
-  for (const file of files) {
-    if (!file.endsWith(".json") || file === "jobs.json") {
-      continue;
-    }
-
+  for (const paper of paperRecords) {
     try {
-      const paper = await readJsonFileWithRecovery(path.join(DATA_DIR, file), { optional: true });
       if (!paper?.id || !Array.isArray(paper.paragraphs)) {
         continue;
       }
@@ -1658,6 +1832,30 @@ async function listPapers(searchParams = new URLSearchParams()) {
     return String(b.updatedAt).localeCompare(String(a.updatedAt));
   });
   return { papers };
+}
+
+async function loadAllPaperRecords() {
+  if (sqliteStore) {
+    return sqliteStore.listPapers();
+  }
+
+  const files = await readdir(DATA_DIR).catch(() => []);
+  const papers = [];
+  for (const file of files) {
+    if (!file.endsWith(".json") || file === "jobs.json" || file === "secrets.json") {
+      continue;
+    }
+
+    try {
+      const paper = await readJsonFileWithRecovery(path.join(DATA_DIR, file), { optional: true });
+      if (paper?.id && Array.isArray(paper.paragraphs)) {
+        papers.push(paper);
+      }
+    } catch {
+      continue;
+    }
+  }
+  return papers;
 }
 
 function summarizePaperForLibrary(paper, query = "") {
@@ -1967,12 +2165,7 @@ function isLocalBindHost(host) {
 }
 
 async function loadJobs() {
-  let payload = null;
-  try {
-    payload = await readJsonFileWithRecovery(JOBS_PATH, { optional: true });
-  } catch {
-    payload = null;
-  }
+  const payload = await readJobsPayloadFromStorage();
 
   const jobs = Array.isArray(payload?.jobs) ? payload.jobs : [];
   for (const job of jobs) {
@@ -1997,12 +2190,7 @@ async function syncJobsFromDisk() {
   }
 
   jobStore.syncPromise = (async () => {
-    let payload = null;
-    try {
-      payload = await readJsonFileWithRecovery(JOBS_PATH, { optional: true });
-    } catch {
-      payload = null;
-    }
+    const payload = await readJobsPayloadFromStorage();
 
     const jobs = Array.isArray(payload?.jobs) ? payload.jobs : [];
     for (const job of jobs) {
@@ -2525,9 +2713,12 @@ function createSegmentationJob({ paper, settings, strategy = SEGMENTATION_RETRY_
   const now = new Date().toISOString();
   const retryStrategy = normalizeSegmentationRetryStrategy(strategy);
   const chunks = chunkPagesForSegmentation(paper.extractionPages || [], getSegmentationChunkOptions(settings));
-  const items = retryStrategy === SEGMENTATION_RETRY_STRATEGIES.STRUCTURE_ONLY
+  const items = retryStrategy === SEGMENTATION_RETRY_STRATEGIES.STRUCTURE_ONLY ||
+    retryStrategy === SEGMENTATION_RETRY_STRATEGIES.PLANNING_ONLY
     ? [{
-        paragraphId: "structure_map",
+        paragraphId: retryStrategy === SEGMENTATION_RETRY_STRATEGIES.PLANNING_ONLY
+          ? "planning_snapshot"
+          : "structure_map",
         chunkIndex: -1,
         pageRange: getPageRangeLabel(paper.extractionPages || []),
         status: "queued",
@@ -2770,9 +2961,30 @@ async function persistJobs() {
   jobStore.savePromise = jobStore.savePromise
     .catch(() => {})
     .then(async () => {
-      await writeJsonFileAtomic(JOBS_PATH, payload);
+      await writeJobsPayloadToStorage(payload);
     });
   await jobStore.savePromise;
+}
+
+async function readJobsPayloadFromStorage() {
+  if (sqliteStore) {
+    return sqliteStore.loadJobsPayload();
+  }
+
+  try {
+    return await readJsonFileWithRecovery(JOBS_PATH, { optional: true });
+  } catch {
+    return null;
+  }
+}
+
+async function writeJobsPayloadToStorage(payload) {
+  if (sqliteStore) {
+    sqliteStore.saveJobsPayload(payload);
+    return;
+  }
+
+  await writeJsonFileAtomic(JOBS_PATH, payload);
 }
 
 function redactJobSettings(settings = {}) {
@@ -3076,6 +3288,17 @@ async function updateSegmentationJobProgress(job, event = {}) {
     job.currentBatchSize = 0;
     job.phase = "validation";
     job.message = `结构地图已刷新：${Number(event.sectionCount || 0)} 个章节计划。`;
+  } else if (event.phase === "planning-only-done") {
+    const item = job.items[0];
+    if (item && item.status !== "done") {
+      item.status = "done";
+      item.completedAt = now;
+      item.error = "";
+    }
+    job.currentParagraphId = "";
+    job.currentBatchSize = 0;
+    job.phase = "planning";
+    job.message = `规划快照已重建：${Number(event.sectionCount || 0)} 个章节计划，Paper Memory ${event.paperMemoryReused ? "已复用" : "已刷新"}。`;
   } else if (event.phase === "memory-start") {
     job.phase = "memory";
     job.message = "精读预读：AI 正在通读全文并整理 Paper Memory。";
@@ -3167,6 +3390,9 @@ function getSegmentationJobStartMessage(strategy) {
   if (normalized === SEGMENTATION_RETRY_STRATEGIES.STRUCTURE_ONLY) {
     return "AI 正在刷新全文结构地图。";
   }
+  if (normalized === SEGMENTATION_RETRY_STRATEGIES.PLANNING_ONLY) {
+    return "AI 正在重建分段规划快照。";
+  }
   if (normalized === SEGMENTATION_RETRY_STRATEGIES.FAILED_CHUNKS) {
     return "正在补跑失败分段页块。";
   }
@@ -3177,6 +3403,10 @@ function formatSegmentationJobDoneMessage(segmented, strategy) {
   const normalized = normalizeSegmentationRetryStrategy(strategy);
   if (normalized === SEGMENTATION_RETRY_STRATEGIES.STRUCTURE_ONLY) {
     return `结构地图已刷新：${getSegmentationPlan(segmented.structureMap).length} 个章节计划。`;
+  }
+  if (normalized === SEGMENTATION_RETRY_STRATEGIES.PLANNING_ONLY) {
+    const snapshot = segmented.segmentationPlanningSnapshot || {};
+    return `规划快照已重建：${snapshot.counts?.planItems || getSegmentationPlan(segmented.structureMap).length} 个章节计划。`;
   }
   if (normalized === SEGMENTATION_RETRY_STRATEGIES.FAILED_CHUNKS) {
     const retry = segmented.segmentationStages?.failedChunkRetry || null;
@@ -5158,7 +5388,10 @@ async function handleChat(req, res) {
 }
 
 function buildPaperRecord({ id, filename, pdfPath, extraction }) {
-  const pages = enhancePagesWithVisualArtifacts(extraction.pages);
+  const visualAnalysisProvider = loadVisualProviderForRuntime();
+  const pages = enhancePagesWithVisualArtifacts(extraction.pages, {
+    visualAnalysisProvider,
+  });
   const paragraphs = splitIntoParagraphs(pages);
   const sections = inferSections(paragraphs);
   const title = inferTitleFromPages(pages, paragraphs, filename);
@@ -5176,6 +5409,7 @@ function buildPaperRecord({ id, filename, pdfPath, extraction }) {
     blocks: Array.isArray(page.blocks) ? page.blocks : [],
     visualRegions: Array.isArray(page.visualRegions) ? page.visualRegions : [],
     visualStructureVersion: page.visualStructureVersion || null,
+    visualAnalysisProvider: page.visualAnalysisProvider || "",
     imagePath: page.imagePath || null,
     imageWidth: page.imageWidth || null,
     imageHeight: page.imageHeight || null,
@@ -5203,10 +5437,24 @@ function buildPaperRecord({ id, filename, pdfPath, extraction }) {
     extractionPages,
     sections,
     paragraphs,
+    visualAnalysis: getVisualAnalysisProviderStatus(visualAnalysisProvider),
   };
 
   attachParagraphArtifactLinks(paper);
+  attachSegmentationPlanningSnapshot(paper);
   return paper;
+}
+
+function loadVisualProviderForRuntime() {
+  return loadVisualAnalysisProvider({
+    provider: VISUAL_PROVIDER,
+    jsonPath: VISUAL_PROVIDER_PATH,
+    command: VISUAL_PROVIDER_COMMAND,
+    commandArgs: VISUAL_PROVIDER_ARGS,
+    timeoutMs: VISUAL_PROVIDER_TIMEOUT_MS,
+    maxBufferBytes: VISUAL_PROVIDER_MAX_BUFFER_BYTES,
+    cwd: __dirname,
+  });
 }
 
 function markPaperNeedsOcr(paper) {
@@ -5496,6 +5744,7 @@ function splitIntoParagraphs(pages) {
       }
 
       const sourceBox = typeof block === "string" ? null : pickBlockBox(block);
+      const sourceRichText = buildParagraphSourceRichText(clean, block);
       appendParagraph(paragraphs, {
         id: `para_${paragraphs.length}_${randomUUID().slice(0, 8)}`,
         kind: isLikelyHeading(clean) ? "heading" : "paragraph",
@@ -5505,6 +5754,7 @@ function splitIntoParagraphs(pages) {
         sourceBox,
         sectionId: "section_0",
         sourceText: clean,
+        ...sourceRichText,
         translation: "",
         explanation: "",
         keyTerms: [],
@@ -5523,10 +5773,37 @@ function splitIntoParagraphs(pages) {
   return paragraphs;
 }
 
+function buildParagraphSourceRichText(sourceText, block = null) {
+  const sourceMarkdown = buildSourceMarkdown(sourceText, block || {});
+  const leadIn = detectSourceLeadIn(sourceText, block || {});
+  const fields = {};
+  if (sourceMarkdown && sourceMarkdown !== sourceText) {
+    fields.sourceMarkdown = sourceMarkdown;
+  }
+  if (leadIn?.text) {
+    fields.sourceLeadIn = leadIn.text;
+    fields.sourceLeadInSource = leadIn.source || "";
+  }
+  return fields;
+}
+
 function appendParagraph(paragraphs, paragraph) {
   const previous = paragraphs.at(-1);
   if (shouldMergeAcrossPage(previous, paragraph)) {
     previous.sourceText = mergeParagraphText(previous.sourceText, paragraph.sourceText);
+    const mergedRichText = buildParagraphSourceRichText(previous.sourceText);
+    if (mergedRichText.sourceMarkdown) {
+      previous.sourceMarkdown = mergedRichText.sourceMarkdown;
+    } else {
+      delete previous.sourceMarkdown;
+    }
+    if (mergedRichText.sourceLeadIn) {
+      previous.sourceLeadIn = mergedRichText.sourceLeadIn;
+      previous.sourceLeadInSource = mergedRichText.sourceLeadInSource;
+    } else {
+      delete previous.sourceLeadIn;
+      delete previous.sourceLeadInSource;
+    }
     previous.pageEndNumber = paragraph.pageEndNumber;
     previous.continuesToNext = Boolean(paragraph.continuesToNext);
     previous.contextKeywords = [
@@ -7073,10 +7350,29 @@ function readIntegerEnv(name, defaultValue, min, max) {
   return Math.trunc(clampNumber(value, min, max));
 }
 
+function normalizeStorageDriver(value) {
+  const clean = String(value || "json").trim().toLowerCase();
+  if (clean === "sqlite" || clean === "sqlite3") {
+    return "sqlite";
+  }
+  return "json";
+}
+
 async function buildHealthPayload(req = null) {
   await syncJobsFromDisk();
   const versionStatus = await getServiceVersionStatus();
   const queueStatus = getJobQueueStatus();
+  const authStatus = buildAuthStatus(req);
+  const deploymentStatus = buildDeploymentStatus({
+    mode: DEPLOYMENT_MODE,
+    publicUrl: PUBLIC_URL,
+    host: HOST,
+    port: PORT,
+    isDocker: isRunningInDocker(),
+    authRequired: AUTH_REQUIRED,
+    secretsEncrypted: Boolean(SECRET_ENCRYPTION_KEY),
+    requestSecure: req ? isSecureRequest(req) : false,
+  });
   const uptimeSeconds = Math.round(process.uptime());
   const startedAt = new Date(SERVICE_STARTED_AT_MS).toISOString();
   return {
@@ -7094,26 +7390,38 @@ async function buildHealthPayload(req = null) {
       port: PORT,
       rootDir: __dirname,
       pdfEngine: PDF_ENGINE,
+      isDocker: isRunningInDocker(),
       startedAt,
       uptimeSeconds,
     },
     queue: queueStatus,
-    security: buildAuthStatus(req),
+    security: {
+      ...authStatus,
+      publicRisk: authStatus.publicRisk || deploymentStatus.level === "error",
+      deploymentMode: deploymentStatus.mode,
+    },
+    deployment: deploymentStatus,
     persistence: buildPersistenceStatus(),
+    visualAnalysis: getVisualAnalysisProviderStatus(loadVisualProviderForRuntime()),
     resourceLimits: getResourceLimitsStatus(),
     ...versionStatus,
   };
 }
 
 function buildPersistenceStatus() {
+  const sqliteStats = sqliteStore ? sqliteStore.getStats() : null;
   return {
-    storage: "json",
-    atomicWrites: true,
-    backupEnabled: JSON_BACKUP_RETENTION > 0,
+    storage: STORAGE_DRIVER,
+    active: sqliteStore ? "sqlite" : "json",
+    sqlitePath: sqliteStore ? SQLITE_PATH : "",
+    sqliteSchemaVersion: sqliteStore?.schemaVersion || null,
+    sqliteStats,
+    atomicWrites: !sqliteStore,
+    backupEnabled: !sqliteStore && JSON_BACKUP_RETENTION > 0,
     backupDir: DATA_BACKUP_DIR,
-    backupRetention: JSON_BACKUP_RETENTION,
-    backupMinIntervalSeconds: Math.round(JSON_BACKUP_MIN_INTERVAL_MS / 1000),
-    recovery: "newest-valid-backup",
+    backupRetention: sqliteStore ? 0 : JSON_BACKUP_RETENTION,
+    backupMinIntervalSeconds: sqliteStore ? 0 : Math.round(JSON_BACKUP_MIN_INTERVAL_MS / 1000),
+    recovery: sqliteStore ? "sqlite-wal" : "newest-valid-backup",
     secretsBackedUp: Boolean(SECRET_ENCRYPTION_KEY && JSON_BACKUP_RETENTION > 0),
   };
 }
@@ -7947,7 +8255,9 @@ function isReferencesHeadingBlock(block) {
 }
 
 function shouldUseLocalFirstSegmentation(settings = {}) {
-  return isClaudeAgentSettings(settings) && !CLAUDE_AGENT_AI_SEGMENTATION;
+  return isClaudeAgentSettings(settings) &&
+    normalizeAnalysisProfile(settings.analysisProfile) === "fast" &&
+    !CLAUDE_AGENT_AI_SEGMENTATION;
 }
 
 function shouldUsePaperMemoryForSegmentation(settings = {}) {
@@ -8259,6 +8569,74 @@ function refreshPaperStructureOnly(paper, structureMap, options = {}) {
   return segmented;
 }
 
+function refreshPaperPlanningSnapshotOnly(paper, structureMap, paperMemory = null, options = {}) {
+  const now = new Date().toISOString();
+  const paragraphs = Array.isArray(paper.paragraphs)
+    ? paper.paragraphs.map((paragraph) => ({ ...paragraph }))
+    : [];
+  const sections = inferSectionsFromSegmentationPlan(paragraphs, structureMap);
+  enrichSectionsWithContext(sections, paragraphs, []);
+  const previousStages = paper.segmentationStages && typeof paper.segmentationStages === "object" && !Array.isArray(paper.segmentationStages)
+    ? paper.segmentationStages
+    : {};
+  const memory = canReusePaperMemory(paperMemory)
+    ? paperMemory
+    : canReusePaperMemory(paper.paperMemory) ? paper.paperMemory : null;
+  const strategy = normalizeSegmentationRetryStrategy(options.strategy);
+  const planned = {
+    ...paper,
+    status: paper.status || (paragraphs.length ? "ready" : "uploaded"),
+    segmentationMode: paper.segmentationMode || "ai",
+    structureMap,
+    paperMemory: memory,
+    segmentationPlan: getSegmentationPlan(structureMap),
+    segmentationStages: {
+      ...previousStages,
+      version: 1,
+      plan: {
+        source: "planning-snapshot",
+        strategy,
+        version: structureMap.segmentationPlanVersion || SEGMENTATION_PLAN_VERSION,
+        sections: getSegmentationPlan(structureMap).length,
+        refreshedAt: now,
+      },
+      paperMemory: {
+        source: memory?.source || "",
+        reused: Boolean(options.reusedPaperMemory),
+        keyTerms: Array.isArray(memory?.keyTerms) ? memory.keyTerms.length : 0,
+        formulas: Array.isArray(memory?.importantFormulas) ? memory.importantFormulas.length : 0,
+        visuals: Array.isArray(memory?.importantVisuals) ? memory.importantVisuals.length : 0,
+        resources: Array.isArray(memory?.resources) ? memory.resources.length : 0,
+        refreshedAt: now,
+      },
+      planningSnapshot: {
+        strategy,
+        pageRange: getPageRangeLabel(paper.extractionPages || []),
+        sections: getSegmentationPlan(structureMap).length,
+        nonBodyZones: Array.isArray(structureMap.nonBodyZones) ? structureMap.nonBodyZones.length : 0,
+        updatedAt: now,
+      },
+    },
+    sections,
+    paragraphs,
+    contextProfile: buildPaperContextProfile(paragraphs, sections, [], structureMap, memory),
+    segmentationJob: {
+      ...(paper.segmentationJob && typeof paper.segmentationJob === "object" ? paper.segmentationJob : {}),
+      status: "done",
+      phase: "planning-only",
+      message: `规划快照已重建：${getSegmentationPlan(structureMap).length} 个章节计划。`,
+      strategy,
+      strategyLabel: formatSegmentationRetryStrategyLabel(strategy),
+      updatedAt: now,
+    },
+    updatedAt: now,
+  };
+
+  attachParagraphArtifactLinks(planned);
+  attachSegmentationPlanningSnapshot(planned, { now: () => new Date(now) });
+  return planned;
+}
+
 async function segmentPaperFailedChunks(paper, settings, options = {}) {
   const pages = Array.isArray(paper.extractionPages) ? paper.extractionPages : [];
   const chunkOptions = getSegmentationChunkOptions(settings);
@@ -8490,6 +8868,20 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
       });
     }
   }
+
+  if (strategy === SEGMENTATION_RETRY_STRATEGIES.PLANNING_ONLY) {
+    await options.onProgress?.({
+      phase: "planning-only-done",
+      sectionCount: getSegmentationPlan(structureMap).length,
+      paperMemoryReused: reusedPaperMemory,
+      totalChunks: chunks.length,
+    });
+    return refreshPaperPlanningSnapshotOnly(paper, structureMap, paperMemory, {
+      strategy,
+      reusedPaperMemory,
+    });
+  }
+
   const items = [];
   const chunkSummaries = [];
   const fallbackChunks = [];
@@ -8534,7 +8926,8 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
         pages: getPageRangeLabel(chunk),
         reason: truncateText(result.fallbackReason || "fallback", 180),
       });
-      if (isClaudeAgentSettings(settings) && isClaudeSegmentationTimeoutFallback(result.fallbackReason)) {
+      if (shouldCascadeClaudeSegmentationFallback(settings) &&
+        isClaudeSegmentationTimeoutFallback(result.fallbackReason)) {
         forceLocalFallback = true;
       }
     }
@@ -8726,6 +9119,11 @@ function isClaudeSegmentationTimeoutFallback(reason = "") {
   return /claude|超时|timeout|timed out|previous-claude-timeout/i.test(String(reason || ""));
 }
 
+function shouldCascadeClaudeSegmentationFallback(settings = {}) {
+  return isClaudeAgentSettings(settings) &&
+    normalizeAnalysisProfile(settings.analysisProfile) === "fast";
+}
+
 function buildLocalSegmentationChunkResult(pages, structureMap = null, error = null) {
   const items = [];
   const keywords = [];
@@ -8771,6 +9169,7 @@ function buildLocalSegmentItemsForPage(page, structureMap = null) {
       plannedSectionId: "",
       rawSourceText,
       sourceText,
+      ...buildParagraphSourceRichText(sourceText, block),
     };
     const plannedSection = resolveSegmentationPlanSection(item, structureMap);
     if (plannedSection) {
@@ -8938,6 +9337,7 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
     items: rawItems
       .map((item) => {
         const rawSourceText = stripSegmentationBlockMarkers(item.sourceText || item.text || "");
+        const sourceText = normalizeParagraph(rawSourceText);
         return {
           kind: String(item.kind || "").toLowerCase() === "heading" ? "heading" : "paragraph",
           pageNumber: Number(item.pageNumber || pages[0]?.pageNumber || 1),
@@ -8949,7 +9349,8 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
           role: normalizeSegmentationRole(item.role || ""),
           plannedSectionId: normalizeSegmentationPlanId(item.plannedSectionId || item.planId || ""),
           rawSourceText,
-          sourceText: normalizeParagraph(rawSourceText),
+          sourceText,
+          ...buildParagraphSourceRichText(sourceText),
         };
       })
       .filter((item) => item.sourceText && (item.kind === "heading" || (
@@ -9166,6 +9567,11 @@ function buildParagraphsFromSegmentItems(items, structureMap = null) {
     const kind = item.kind === "heading" || isLikelyHeading(clean) ? "heading" : "paragraph";
     const plannedSection = resolveSegmentationPlanSection(item, structureMap);
     const sectionTitleHint = normalizeSectionTitleHint(item.sectionTitle || plannedSection?.title || "");
+    const sourceRichText = {
+      ...buildParagraphSourceRichText(clean),
+      ...(item.sourceMarkdown ? { sourceMarkdown: item.sourceMarkdown } : {}),
+      ...(item.sourceLeadIn ? { sourceLeadIn: item.sourceLeadIn, sourceLeadInSource: item.sourceLeadInSource || "segmentation" } : {}),
+    };
     const paragraph = {
       id: `para_${order}_${randomUUID().slice(0, 8)}`,
       kind,
@@ -9183,6 +9589,7 @@ function buildParagraphsFromSegmentItems(items, structureMap = null) {
       continuesFromPrevious: Boolean(item.continuesFromPrevious),
       continuesToNext: Boolean(item.continuesToNext),
       sourceText: clean,
+      ...sourceRichText,
       translation: "",
       explanation: "",
       keyTerms: [],
@@ -10879,16 +11286,72 @@ function formatBackupTimestamp(date) {
 }
 
 async function loadPaper(paperId) {
-  const paperPath = getPaperPath(paperId);
-  const paper = await readJsonFileWithRecovery(paperPath);
+  assertValidPaperId(paperId);
+  const paper = sqliteStore
+    ? sqliteStore.loadPaper(paperId)
+    : await readJsonFileWithRecovery(getPaperPath(paperId));
   const upgradedArtifacts = upgradePaperArtifacts(paper);
   const upgradedContext = upgradePaperContextProfile(paper);
-  if (upgradedArtifacts || upgradedContext) {
+  const upgradedSourceMarkdown = upgradePaperSourceMarkdown(paper);
+  if (upgradedArtifacts || upgradedContext || upgradedSourceMarkdown) {
     await savePaper(paper);
   }
   enrichPaperParagraphLocations(paper);
   attachPaperVisualQa(paper);
+  attachSegmentationPlanningSnapshot(paper);
   return paper;
+}
+
+function upgradePaperSourceMarkdown(paper) {
+  if (!Array.isArray(paper?.paragraphs) || !paper.paragraphs.length) {
+    return false;
+  }
+
+  let changed = false;
+  for (const paragraph of paper.paragraphs) {
+    const sourceText = normalizeParagraph(paragraph?.sourceText || "");
+    if (!sourceText || paragraph.kind === "heading") {
+      continue;
+    }
+
+    const block = findSourceBlockForParagraph(paper, paragraph, sourceText);
+    const richText = buildParagraphSourceRichText(sourceText, block);
+    if (richText.sourceMarkdown && paragraph.sourceMarkdown !== richText.sourceMarkdown) {
+      paragraph.sourceMarkdown = richText.sourceMarkdown;
+      changed = true;
+    } else if (!richText.sourceMarkdown && paragraph.sourceMarkdown) {
+      delete paragraph.sourceMarkdown;
+      changed = true;
+    }
+
+    if (richText.sourceLeadIn && paragraph.sourceLeadIn !== richText.sourceLeadIn) {
+      paragraph.sourceLeadIn = richText.sourceLeadIn;
+      paragraph.sourceLeadInSource = richText.sourceLeadInSource || "";
+      changed = true;
+    } else if (!richText.sourceLeadIn && paragraph.sourceLeadIn) {
+      delete paragraph.sourceLeadIn;
+      delete paragraph.sourceLeadInSource;
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
+function findSourceBlockForParagraph(paper, paragraph, sourceText) {
+  const pages = Array.isArray(paper?.extractionPages) ? paper.extractionPages : [];
+  const pageNumber = Number(paragraph?.pageNumber || 0);
+  const candidates = pages
+    .filter((page) => !pageNumber || Number(page.pageNumber || 0) === pageNumber)
+    .flatMap((page) => Array.isArray(page.blocks) ? page.blocks : []);
+  const normalizedSource = normalizeParagraph(sourceText);
+  return candidates.find((block) =>
+    normalizeParagraph(normalizeSegmentationReadableBlockText(block?.text || "")) === normalizedSource) ||
+    candidates.find((block) => {
+      const blockText = normalizeParagraph(normalizeSegmentationReadableBlockText(block?.text || ""));
+      return blockText.length > 40 && (normalizedSource.startsWith(blockText) || blockText.startsWith(normalizedSource));
+    }) ||
+    null;
 }
 
 function upgradePaperContextProfile(paper) {
@@ -10927,8 +11390,15 @@ function rebuildPaperVisualArtifacts(paper, options = {}) {
   const manualArtifactOverrides = collectManualArtifactOverrides(artifacts);
   const extractionPages = Array.isArray(paper.extractionPages) ? paper.extractionPages : [];
   const previousArtifactCount = artifacts.length;
+  const visualAnalysisProvider = loadVisualProviderForRuntime();
+  const visualAnalysisStatus = getVisualAnalysisProviderStatus(visualAnalysisProvider);
   const needsVisualStructure = extractionPages.some((page) =>
     page.visualStructureVersion !== VISUAL_STRUCTURE_VERSION || !Array.isArray(page.visualRegions));
+  const needsVisualProviderRefresh =
+    (paper.visualAnalysis?.provider || "heuristic") !== visualAnalysisStatus.provider ||
+    (paper.visualAnalysis?.path || "") !== (visualAnalysisStatus.path || "") ||
+    (paper.visualAnalysis?.command || "") !== (visualAnalysisStatus.command || "") ||
+    extractionPages.some((page) => (page.visualAnalysisProvider || "heuristic") !== visualAnalysisStatus.provider);
   const hasExtractableArtifacts = extractionPages.some((page) =>
     Array.isArray(page.blocks) && page.blocks.some((block) => classifyPageArtifact(block)));
   const needsUpgrade = !artifacts.length
@@ -10947,7 +11417,7 @@ function rebuildPaperVisualArtifacts(paper, options = {}) {
     return { changed: false, reason: "missing-extraction-pages", stats: emptyStats };
   }
 
-  if (!force && !needsUpgrade && !needsVisualStructure) {
+  if (!force && !needsUpgrade && !needsVisualStructure && !needsVisualProviderRefresh) {
     return { changed: false, reason: "already-current", stats: emptyStats };
   }
 
@@ -10962,7 +11432,9 @@ function rebuildPaperVisualArtifacts(paper, options = {}) {
       imageWidth: pageImage?.imageWidth || null,
       imageHeight: pageImage?.imageHeight || null,
     };
-  }));
+  }), {
+    visualAnalysisProvider,
+  });
 
   paper.extractionPages = pages.map((page) => ({
     pageNumber: page.pageNumber,
@@ -10970,9 +11442,11 @@ function rebuildPaperVisualArtifacts(paper, options = {}) {
     blocks: Array.isArray(page.blocks) ? page.blocks : [],
     visualRegions: Array.isArray(page.visualRegions) ? page.visualRegions : [],
     visualStructureVersion: page.visualStructureVersion || null,
+    visualAnalysisProvider: page.visualAnalysisProvider || "",
     width: page.width || null,
     height: page.height || null,
   }));
+  paper.visualAnalysis = visualAnalysisStatus;
   paper.pageArtifacts = applyManualArtifactOverrides(extractVisualPageArtifacts(pages), manualArtifactOverrides);
   attachParagraphArtifactLinks(paper);
   attachPaperVisualQa(paper);
@@ -11031,17 +11505,26 @@ function inferStoredPageSize(paper, page) {
 }
 
 async function savePaper(paper) {
+  const updatedAt = new Date().toISOString();
+  paper.updatedAt = updatedAt;
+  attachSegmentationPlanningSnapshot(paper, { now: () => new Date(updatedAt) });
   attachPaperVisualQa(paper);
-  paper.updatedAt = new Date().toISOString();
+  if (sqliteStore) {
+    sqliteStore.savePaper(paper);
+    return;
+  }
   await writeJsonFileAtomic(getPaperPath(paper.id), paper);
 }
 
 function getPaperPath(paperId) {
+  assertValidPaperId(paperId);
+  return path.join(DATA_DIR, `${paperId}.json`);
+}
+
+function assertValidPaperId(paperId) {
   if (!/^paper_\d+_[a-f0-9-]+$/.test(paperId)) {
     throw new Error("Invalid paper id.");
   }
-
-  return path.join(DATA_DIR, `${paperId}.json`);
 }
 
 async function serveStatic(res, filePath) {
@@ -11060,6 +11543,40 @@ async function serveStatic(res, filePath) {
     res.writeHead(200, {
       "content-type": getContentType(normalized),
       "cache-control": "no-store",
+    });
+    res.end(data);
+  } catch {
+    return json(res, { error: "Not found" }, 404);
+  }
+}
+
+async function serveKatexAsset(res, pathname) {
+  let relativePath = "";
+  try {
+    relativePath = decodeURIComponent(pathname.replace(/^\/vendor\/katex\/?/, ""));
+  } catch {
+    return json(res, { error: "Invalid vendor path." }, 400);
+  }
+
+  if (!relativePath || relativePath.includes("\0") || relativePath.startsWith("/") || relativePath.includes("..")) {
+    return json(res, { error: "Invalid vendor path." }, 400);
+  }
+
+  const normalized = path.normalize(path.join(KATEX_DIST_DIR, relativePath));
+  if (!normalized.startsWith(`${KATEX_DIST_DIR}${path.sep}`)) {
+    return json(res, { error: "Forbidden" }, 403);
+  }
+
+  try {
+    const fileStat = await stat(normalized);
+    if (!fileStat.isFile()) {
+      return json(res, { error: "Not found" }, 404);
+    }
+
+    const data = await readFile(normalized);
+    res.writeHead(200, {
+      "content-type": getContentType(normalized),
+      "cache-control": "public, max-age=604800, immutable",
     });
     res.end(data);
   } catch {
@@ -11107,12 +11624,16 @@ function getContentType(filePath) {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
     ".json": "application/json; charset=utf-8",
     ".svg": "image/svg+xml",
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
+    ".woff2": "font/woff2",
+    ".woff": "font/woff",
+    ".ttf": "font/ttf",
   };
 
   return types[ext] || "application/octet-stream";

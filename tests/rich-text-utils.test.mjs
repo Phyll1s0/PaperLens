@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import {
+  buildSourceMarkdown,
+  detectSourceLeadIn,
   isLatexShardLine,
   isLikelyBrokenLatexBlock,
   normalizeBareLatexExpression,
@@ -53,3 +55,17 @@ assert.equal(
   "k×B_{\\mathrm{elem}}+B_{\\mathrm{meta}}+B_{\\mathrm{scale}}",
 );
 assert.equal(normalizeFormulaArtifactLatex("𝑝θ(x)=softmax(x)"), "p_{\\theta}(x)=\\softmax(x)");
+
+const leadBlock = {
+  lines: [
+    { text: "Open Compute Project (OCP) Microscaling. Microscal-", x: 64, y: 357, width: 232, height: 14.48 },
+    { text: "ing (MX) is a block floating-point format defined by the Open", x: 54, y: 369, width: 240, height: 13.77 },
+  ],
+};
+const leadText = "Open Compute Project (OCP) Microscaling. Microscaling (MX) is a block floating-point format.";
+assert.equal(detectSourceLeadIn(leadText, leadBlock)?.text, "Open Compute Project (OCP) Microscaling.");
+assert.equal(
+  buildSourceMarkdown(leadText, leadBlock),
+  "**Open Compute Project (OCP) Microscaling.** Microscaling (MX) is a block floating-point format.",
+);
+assert.equal(buildSourceMarkdown("Recent advances in low-bit quantization have led to strong models. The next sentence remains plain."), "Recent advances in low-bit quantization have led to strong models. The next sentence remains plain.");

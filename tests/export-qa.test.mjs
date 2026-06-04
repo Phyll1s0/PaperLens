@@ -134,3 +134,39 @@ assert.equal(hasExportableArtifactCrop({ ...paper.pageArtifacts[0], crop: { widt
 assert.equal(isExportRelevantArtifact(paper.pageArtifacts[0]), true);
 assert.equal(isExportRelevantArtifact({ type: "figure-text", visualType: "figure-text" }), false);
 assert.equal(isExportRelevantArtifact({ type: "caption", hidden: true }), false);
+
+const formulaQa = buildPaperExportQa({
+  id: "paper_formula_export",
+  paragraphs: [
+    {
+      id: "p1",
+      order: 0,
+      kind: "paragraph",
+      sourceText: "See the formula.",
+      translation: "完整翻译",
+      explanation: "完整讲解",
+      relatedArtifactIds: ["formula-low"],
+      analysisStatus: "done",
+    },
+  ],
+  pageArtifacts: [
+    {
+      id: "formula-low",
+      type: "formula",
+      visualType: "formula",
+      pageNumber: 1,
+      imagePath: "/assets/paper_fixture/page-001.png",
+      text: "y 1 : L : = { y 1 , ⋯ , y L }",
+      crop: { x: 10, y: 20, width: 180, height: 80, pageWidth: 612, pageHeight: 792 },
+      cropQuality: { confidence: "medium", oversized: false },
+    },
+  ],
+}, {
+  now: () => fixedNow,
+});
+assert.equal(formulaQa.status, "warn");
+assert.equal(formulaQa.issues.some((issue) =>
+  issue.type === "low-confidence-formula-latex" &&
+    issue.artifactId === "formula-low" &&
+    issue.renderMode === "image-latex"), true);
+assert.equal(formulaQa.issues.some((issue) => issue.type === "artifact-latex-risk"), false);

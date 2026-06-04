@@ -5,6 +5,10 @@ paper-assets/
 .DS_Store
 *.log
 .cache/
+dist/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
 .env
 .env.*
 !.env.example

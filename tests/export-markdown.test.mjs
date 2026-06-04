@@ -27,7 +27,7 @@ const paper = {
       translation: "Translated text.",
       explanation: "Explained text.",
       keyTerms: ["Kronos", "kronos", "MAE"],
-      relatedArtifactIds: ["fig-1", "hidden-fig", "missing-fig"],
+      relatedArtifactIds: ["fig-1", "formula-low", "hidden-fig", "missing-fig"],
     },
     {
       id: "p2",
@@ -72,6 +72,15 @@ const paper = {
       imagePath: "/assets/paper_fixture/page-002.png",
       crop: { x: 1, y: 2, width: 3, height: 4, pageWidth: 10, pageHeight: 12 },
     },
+    {
+      id: "formula-low",
+      type: "formula",
+      visualType: "formula",
+      label: "Equation 1",
+      imagePath: "/assets/paper_fixture/page-001.png",
+      text: "y 1 : L : = { y 1 , ⋯ , y L }",
+      crop: { x: 2, y: 3, width: 5, height: 2, pageWidth: 10, pageHeight: 12 },
+    },
   ],
 };
 
@@ -94,6 +103,10 @@ assert.match(markdown, /\*\*术语：\*\* `Kronos` `MAE`/);
 assert.match(markdown, /- Figure 1：\/assets\/paper_fixture\/page-001\.png/);
 assert.match(markdown, /!\[Figure 1\]\(http:\/\/127\.0\.0\.1:3000\/api\/papers\/paper%20fixture%2F1\/artifacts\/fig-1\/crop\.svg\)/);
 assert.match(markdown, /Figure 1: Caption\nwith wrapped spacing\./);
+assert.match(markdown, /- Equation 1：\/assets\/paper_fixture\/page-001\.png/);
+assert.match(markdown, /!\[Equation 1\]\(http:\/\/127\.0\.0\.1:3000\/api\/papers\/paper%20fixture%2F1\/artifacts\/formula-low\/crop\.svg\)/);
+assert.match(markdown, /识别文本（低置信，仅供核对）：`y 1 : L : = \{ y 1 , ⋯ , y L \}`/);
+assert.doesNotMatch(markdown, /\\\[y 1 : L/);
 assert.match(markdown, /### P2 · p\.3/);
 assert.match(markdown, /\*\*翻译\*\*\n\n尚未生成/);
 assert.match(markdown, /\*\*术语：\*\* `Alpha` `Beta`/);

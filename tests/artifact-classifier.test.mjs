@@ -163,7 +163,7 @@ assert.equal(isUsefulFormulaArtifactText("MASE( ˆ xi,xi) = C−S"), true);
 assert.equal(
   isLikelyTableBodyBlockText(
     "Architecture Scaling Factor Data Type Metadata OliVe [27] Tensor/Channel FP16 Tensor/Channel INT4, Flint4 Pair Outlier-victim pair",
-    { lineCount: 12 },
+    { lineCount: 2 },
   ),
   true,
 );

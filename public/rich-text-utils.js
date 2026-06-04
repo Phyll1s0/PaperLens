@@ -2,6 +2,99 @@ export function normalizeRichTextSource(text) {
   return normalizeBrokenLatexBlocks(String(text || ""));
 }
 
+export function buildSourceMarkdown(text, block = {}) {
+  const source = normalizeRichTextSource(String(text || "").replace(/\s+/g, " ").trim());
+  if (!source || /^\*\*[^*]+?\*\*/.test(source)) {
+    return source;
+  }
+
+  const leadIn = detectSourceLeadIn(source, block);
+  if (!leadIn?.text) {
+    return source;
+  }
+
+  return `**${leadIn.text}**${source.slice(leadIn.end)}`;
+}
+
+export function detectSourceLeadIn(text, block = {}) {
+  const source = String(text || "").replace(/\s+/g, " ").trim();
+  if (!source || source.length < 28 || /^\*\*/.test(source)) {
+    return null;
+  }
+
+  const match = source.match(/^(.{6,96}?(?:\.|:))\s+(.{8,})/);
+  if (!match) {
+    return null;
+  }
+
+  const lead = match[1].trim();
+  if (!isLikelyTitleCaseLeadIn(lead) && !hasLayoutLeadInCue(block, lead)) {
+    return null;
+  }
+
+  return {
+    text: lead,
+    end: lead.length,
+    source: hasLayoutLeadInCue(block, lead) ? "layout-lead-in" : "titlecase-lead-in",
+  };
+}
+
+function isLikelyTitleCaseLeadIn(lead) {
+  const words = String(lead || "")
+    .replace(/[()[\].,:;]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  if (words.length < 2 || words.length > 12) {
+    return false;
+  }
+
+  const stopWords = new Set(["a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to", "with"]);
+  const significant = words.filter((word) => !stopWords.has(word.toLowerCase()));
+  return significant.length >= 2 && significant.every(isTitleLeadToken);
+}
+
+function isTitleLeadToken(word) {
+  const clean = String(word || "").replace(/^[^\w]+|[^\w]+$/g, "");
+  return /^[A-Z][A-Za-z0-9+-]*$/.test(clean) ||
+    /^[A-Z0-9]{2,}$/.test(clean) ||
+    /^[A-Z]+[a-z]*[A-Z][A-Za-z0-9]*$/.test(clean);
+}
+
+function hasLayoutLeadInCue(block = {}, lead = "") {
+  const lines = Array.isArray(block?.lines) ? block.lines : [];
+  if (lines.length < 2) {
+    return false;
+  }
+
+  const first = lines[0] || {};
+  const firstText = String(first.text || "");
+  const firstNeedle = String(lead || "").slice(0, Math.min(18, lead.length));
+  if (!firstNeedle || !firstText.startsWith(firstNeedle)) {
+    return false;
+  }
+
+  const laterLines = lines.slice(1).filter((line) =>
+    Number.isFinite(Number(line?.x)) && Number.isFinite(Number(line?.height)) && Number(line.height) > 0);
+  if (!laterLines.length) {
+    return false;
+  }
+
+  const firstX = Number(first.x || 0);
+  const firstHeight = Number(first.height || 0);
+  const minLaterX = Math.min(...laterLines.map((line) => Number(line.x)));
+  const medianLaterHeight = median(laterLines.map((line) => Number(line.height)));
+  return firstX > minLaterX + 3 || (firstHeight > 0 && medianLaterHeight > 0 && firstHeight / medianLaterHeight >= 1.035);
+}
+
+function median(values) {
+  const sorted = values.filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
+  if (!sorted.length) {
+    return 0;
+  }
+
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
 export function normalizeBrokenLatexBlocks(text) {
   const lines = String(text || "").split(/\r?\n/);
   if (lines.length < 3) {

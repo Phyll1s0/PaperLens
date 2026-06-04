@@ -60,7 +60,7 @@ try {
     assetPublicBase,
   });
   const page = pages[0];
-  assert.equal(page.visualStructureVersion, 5);
+  assert.equal(page.visualStructureVersion, 6);
   assert.ok(page.visualRegions.length >= 4);
 
   const figureRegion = page.visualRegions.find((region) => region.source === "caption-anchor");
@@ -89,6 +89,8 @@ try {
   assert.equal(splitArtifacts.every((artifact) => artifact.parentArtifactId === figure.id), true);
   assert.equal(splitArtifacts.every((artifact) => artifact.cropQuality?.splitCandidate), true);
   assert.equal(formula?.formulaRole, "display-formula");
+  assert.equal(formula?.latexConfidence, "low");
+  assert.equal(formula?.renderMode, "image-latex");
   assert.equal(formula?.cropQuality?.confidence, "low");
   assert.equal(formula?.cropQuality?.oversized, true);
 
@@ -97,6 +99,10 @@ try {
   assert.match(svg, /<svg\b[^>]*role="img"[^>]*aria-label="Figure 1"/);
   assert.match(svg, /<image href="http:\/\/127\.0\.0\.1:3000\/assets\/visual-fixture\/page-001\.png"/);
   assert.doesNotMatch(svg, /viewBox="0 0 300 200"/);
+  const embeddedSvg = buildArtifactCropSvg(figure, "http://127.0.0.1:3000", {
+    imageHref: "data:image/png;base64,ZmFrZQ==",
+  });
+  assert.match(embeddedSvg, /<image href="data:image\/png;base64,ZmFrZQ=="/);
 
   const stats = buildVisualRebuildStats({
     extractionPages: pages,

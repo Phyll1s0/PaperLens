@@ -34,6 +34,13 @@ try {
   assert.equal(health.runtime.host, "127.0.0.1");
   assert.equal(health.queue.workerScheduled, false);
 
+  const katexModule = await fetch(`${baseUrl}/vendor/katex/katex.mjs`);
+  assert.equal(katexModule.status, 200);
+  assert.match(katexModule.headers.get("content-type") || "", /text\/javascript/);
+  const katexCss = await fetch(`${baseUrl}/vendor/katex/katex.min.css`);
+  assert.equal(katexCss.status, 200);
+  assert.match(katexCss.headers.get("content-type") || "", /text\/css/);
+
   const formData = new FormData();
   formData.append("pdf", new Blob([await readFile(fixturePath)], { type: "application/pdf" }), "minimal-paper.pdf");
   const uploaded = await fetchJson(`${baseUrl}/api/papers/upload`, {
@@ -54,7 +61,25 @@ try {
 
   const persisted = await fetchJson(`${baseUrl}/api/papers/${encodeURIComponent(uploaded.id)}`);
   assert.equal(persisted.id, uploaded.id);
-  assert.equal(persisted.extractionPages[0].visualStructureVersion, 5);
+  assert.equal(persisted.extractionPages[0].visualStructureVersion, 6);
+  assert.equal(Boolean(persisted.segmentationPlanningSnapshot), true);
+
+  const editableParagraphs = persisted.paragraphs.filter((paragraph) => paragraph.kind === "paragraph");
+  assert.ok(editableParagraphs.length >= 2);
+  const firstEditable = editableParagraphs[0];
+  const secondEditable = editableParagraphs[1];
+  const editResult = await fetchJson(`${baseUrl}/api/papers/${encodeURIComponent(uploaded.id)}/paragraphs/${encodeURIComponent(firstEditable.id)}/edit`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "merge-next" }),
+  });
+  assert.deepEqual(new Set(editResult.changedParagraphIds), new Set([firstEditable.id, secondEditable.id]));
+  const mergedParagraph = editResult.paper.paragraphs.find((paragraph) => paragraph.id === firstEditable.id);
+  assert.ok(mergedParagraph.sourceText.includes(firstEditable.sourceText.slice(0, 20)));
+  assert.ok(mergedParagraph.sourceText.includes(secondEditable.sourceText.slice(0, 20)));
+  assert.equal(mergedParagraph.analysisStatus, "pending");
+  assert.equal(mergedParagraph.translation, "");
+  assert.equal(Boolean(editResult.paper.manualSegmentationEdits?.[0]), true);
 
   const pageImage = await fetch(`${baseUrl}/assets/${encodeURIComponent(uploaded.id)}/page-001.png`);
   assert.equal(pageImage.status, 200);
@@ -63,7 +88,8 @@ try {
   const figure = uploaded.pageArtifacts.find((artifact) => artifact.type === "caption" && artifact.crop);
   const crop = await fetchText(`${baseUrl}/api/papers/${encodeURIComponent(uploaded.id)}/artifacts/${encodeURIComponent(figure.id)}/crop.svg`);
   assert.match(crop, /<svg\b/);
-  assert.match(crop, /page-001\.png/);
+  assert.match(crop, /<image href="data:image\/png;base64,/);
+  assert.doesNotMatch(crop, /\/assets\/.+page-001\.png/);
 
   const analysisJobResult = await fetchJson(`${baseUrl}/api/papers/${encodeURIComponent(uploaded.id)}/analysis-jobs`, {
     method: "POST",

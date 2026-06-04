@@ -7,8 +7,12 @@
     "setup": "node scripts/setup.mjs",
     "test": "node scripts/test.mjs",
     "dev": "node scripts/dev.mjs",
+    "app": "node scripts/paperlens-app.mjs",
+    "app:package": "node scripts/package-local-app.mjs",
     "start": "node server.js",
     "health": "node scripts/healthcheck.mjs",
+    "storage:migrate:sqlite": "node scripts/migrate-json-to-sqlite.mjs",
+    "storage:export:json": "node scripts/export-sqlite-to-json.mjs",
     "docker:up": "docker compose up -d --build",
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f paperlens",
@@ -22,5 +26,8 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "katex": "^0.17.0"
   }
 }
