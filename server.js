@@ -153,11 +153,22 @@ const AUTH_COOKIE_MAX_AGE_SECONDS = readIntegerEnv("PAPERLENS_AUTH_COOKIE_MAX_AG
 const SECRET_ENCRYPTION_KEY = process.env.PAPERLENS_SECRET_KEY || ACCESS_TOKEN;
 const PDF_ENGINE = process.env.PAPERLENS_PDF_ENGINE || "auto";
 const PUBLIC_DIR = path.join(__dirname, "public");
-const UPLOAD_DIR = path.join(__dirname, "uploads");
-const DATA_DIR = path.join(__dirname, "data");
+const RUNTIME_ROOT_DIR = process.env.PAPERLENS_RUNTIME_DIR
+  ? path.resolve(process.env.PAPERLENS_RUNTIME_DIR)
+  : __dirname;
+const UPLOAD_DIR = process.env.PAPERLENS_UPLOAD_DIR
+  ? path.resolve(process.env.PAPERLENS_UPLOAD_DIR)
+  : path.join(RUNTIME_ROOT_DIR, "uploads");
+const DATA_DIR = process.env.PAPERLENS_DATA_DIR
+  ? path.resolve(process.env.PAPERLENS_DATA_DIR)
+  : path.join(RUNTIME_ROOT_DIR, "data");
 const DATA_BACKUP_DIR = path.join(DATA_DIR, ".backups");
-const ASSET_DIR = path.join(__dirname, "paper-assets");
-const CACHE_DIR = path.join(__dirname, ".cache");
+const ASSET_DIR = process.env.PAPERLENS_ASSET_DIR
+  ? path.resolve(process.env.PAPERLENS_ASSET_DIR)
+  : path.join(RUNTIME_ROOT_DIR, "paper-assets");
+const CACHE_DIR = process.env.PAPERLENS_CACHE_DIR
+  ? path.resolve(process.env.PAPERLENS_CACHE_DIR)
+  : path.join(RUNTIME_ROOT_DIR, ".cache");
 const JOBS_PATH = path.join(DATA_DIR, "jobs.json");
 const SECRETS_PATH = path.join(DATA_DIR, "secrets.json");
 const JOB_WORKER_LOCK_DIR = path.join(CACHE_DIR, "job-worker.lock");
@@ -169,6 +180,8 @@ const SERVICE_STATIC_ASSET_PATHS = [
 const WORKSPACE_CACHE_KEY = createHash("sha1").update(__dirname).digest("hex").slice(0, 12);
 const SWIFT_MODULE_CACHE_DIR = path.join(CACHE_DIR, `swift-module-cache-${WORKSPACE_CACHE_KEY}`);
 const TMP_DIR = path.join(CACHE_DIR, "tmp");
+const DISABLE_JOB_WORKER = /^(1|true|yes|on)$/i
+  .test(String(process.env.PAPERLENS_DISABLE_JOB_WORKER || ""));
 const MAX_UPLOAD_BYTES = 120 * 1024 * 1024;
 const JSON_BACKUP_RETENTION = readIntegerEnv("PAPERLENS_JSON_BACKUP_RETENTION", 8, 0, 50);
 const JSON_BACKUP_MIN_INTERVAL_MS = readIntegerEnv("PAPERLENS_JSON_BACKUP_MIN_INTERVAL_SECONDS", 300, 0, 86_400) * 1000;
@@ -453,7 +466,9 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`Paper reading assistant running at http://${HOST}:${PORT}`);
+  const address = server.address();
+  const actualPort = typeof address === "object" && address ? address.port : PORT;
+  console.log(`Paper reading assistant running at http://${HOST}:${actualPort}`);
 });
 
 async function handleUpload(req, res) {
@@ -2760,6 +2775,10 @@ function redactJobSettings(settings = {}) {
 }
 
 function scheduleJobWorker() {
+  if (DISABLE_JOB_WORKER) {
+    return;
+  }
+
   if (jobStore.workerScheduled || jobStore.activeJobId) {
     return;
   }
