@@ -11,7 +11,8 @@ Updated: 2026-06-04
 
 ## Next
 
-1. [ ] 服务状态脚本修复：让 `npm run service:status` 识别当前 3000 端口上的 PaperLens 进程，避免 PID 文件不一致时误报 not running。
+1. [ ] 测试覆盖扩展：补视觉重建摘要和真实 PDF fixture 回归测试，覆盖手动裁剪保留、低置信摘要和真实页面图裁剪链路。
+2. [ ] 精读分段入口继续增强：继续改善复杂双栏论文里的 PDF block 排序、章节地图、References、表格主体、流程图文字和跨页自然段。
 
 ## Later
 
@@ -23,6 +24,7 @@ Updated: 2026-06-04
 
 ## Done
 
+- [x] 服务状态脚本修复：`npm run service:status` 会通过 health + 端口监听识别真实 PaperLens PID，自动修复 stale PID 文件；补上 `npm run service:restart`，启动/重启后回显真正监听 3000 的服务进程。
 - [x] 视觉裁剪编辑器：图表/公式/代码块新增“裁剪”入口；放大查看器可直接进入编辑器，支持在整页图上拖动/框选/四角缩放和 x/y/w/h 精调，保存后后端更新 crop SVG、标记 manual crop，并在视觉重建时保留人工裁剪。
 - [x] 长任务预算保护：新增任务级 `Task Budget USD`，分析前显示预计 token、耗时、费用和预算状态；后端创建分析任务/补跑失败项时强制拦截超预算请求，并把预算估算写入 Job 轮询和历史。
 - [x] 章节地图入口升级：新增 `lib/segmentation-structure.js`，本地 layout fallback 会从 PDF heading 识别多章节结构；过滤标题、作者、图注、坐标轴、年份参考文献等伪 heading，并让本地段落按实际 heading 顺序生成 sections。

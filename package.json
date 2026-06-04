@@ -14,6 +14,7 @@
     "docker:logs": "docker compose logs -f paperlens",
     "service:start": "sh scripts/paperlens-service.sh start",
     "service:stop": "sh scripts/paperlens-service.sh stop",
+    "service:restart": "sh scripts/paperlens-service.sh restart",
     "service:status": "sh scripts/paperlens-service.sh status",
     "launchd:install": "sh scripts/paperlens-launchd.sh install",
     "launchd:uninstall": "sh scripts/paperlens-launchd.sh uninstall",
