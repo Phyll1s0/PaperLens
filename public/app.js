@@ -2737,6 +2737,9 @@ function buildClientVisualQa(paper) {
       if (isClientManualArtifact(artifact)) {
         infoTypes.push("manual");
       }
+      if (artifact.splitCandidate) {
+        infoTypes.push("split-candidate");
+      }
       if (artifact.hidden) {
         infoTypes.push("hidden");
       }
@@ -2754,6 +2757,11 @@ function buildClientVisualQa(paper) {
         formulaRole: artifact.formulaRole || "",
         formulaRoleReason: artifact.formulaRoleReason || "",
         hidden: Boolean(artifact.hidden),
+        splitCandidate: Boolean(artifact.splitCandidate),
+        parentArtifactId: artifact.parentArtifactId || "",
+        splitIndex: artifact.splitIndex || null,
+        splitCount: artifact.splitCount || null,
+        splitOrientation: artifact.splitOrientation || "",
         manual: isClientManualArtifact(artifact),
         entersAiContext: doesClientArtifactEnterAiContext(artifact),
         hasCrop: hasArtifactCrop(artifact),
@@ -2770,6 +2778,7 @@ function buildClientVisualQa(paper) {
     hiddenArtifacts: items.filter((item) => item.hidden).length,
     aiContextArtifacts: items.filter((item) => item.entersAiContext).length,
     manualArtifacts: items.filter((item) => item.manual).length,
+    splitCandidates: items.filter((item) => item.splitCandidate).length,
     missingCrops: items.filter((item) => item.issueTypes.includes("missing-crop")).length,
     missingAssets: items.filter((item) => item.issueTypes.includes("missing-asset")).length,
     lowConfidence: items.filter((item) => item.issueTypes.includes("low-confidence")).length,
@@ -2803,6 +2812,7 @@ function getVisualQaCategories(summary = {}) {
     { type: "type-conflict", label: "类型冲突", count: summary.typeConflicts || 0 },
     { type: "formula", label: "公式", count: summary.formulas || 0 },
     { type: "figure-text", label: "图中文字", count: summary.figureText || 0 },
+    { type: "split-candidate", label: "拆分候选", count: summary.splitCandidates || 0 },
     { type: "manual", label: "人工修正", count: summary.manualArtifacts || 0 },
     { type: "hidden", label: "隐藏", count: summary.hiddenArtifacts || 0 },
     { type: "ai-context", label: "进上下文", count: summary.aiContextArtifacts || 0 },
@@ -2851,6 +2861,9 @@ function isClientManualArtifact(artifact = {}) {
 
 function doesClientArtifactEnterAiContext(artifact = {}) {
   if (artifact.hidden) {
+    return false;
+  }
+  if (artifact.splitCandidate && !isClientManualArtifact(artifact)) {
     return false;
   }
   return ["caption", "formula", "code", "figure-text"].includes(artifact.type) &&
@@ -3447,6 +3460,9 @@ function getVisualQaFilteredItems(result, filter) {
   if (filter === "ai-context") {
     return items.filter((item) => item.entersAiContext || item.infoTypes?.includes("ai-context"));
   }
+  if (filter === "split-candidate") {
+    return items.filter((item) => item.splitCandidate || item.infoTypes?.includes("split-candidate"));
+  }
   if (filter === "figure-text") {
     return items.filter((item) => item.type === "figure-text" || item.visualType === "figure-text");
   }
@@ -3463,6 +3479,7 @@ function formatVisualQaPanelMeta(result) {
     `${summary.visibleArtifacts || 0} 个可见`,
     `${summary.aiContextArtifacts || 0} 个进入 AI 上下文`,
     summary.figureText ? `图中文字 ${summary.figureText}` : "",
+    summary.splitCandidates ? `拆分候选 ${summary.splitCandidates}` : "",
   ].filter(Boolean).join(" · ");
 }
 
@@ -3474,6 +3491,7 @@ function getVisualQaSummaryItems(summary = {}) {
     { label: "缺裁剪", value: summary.missingCrops || 0 },
     { label: "低置信", value: summary.lowConfidence || 0 },
     { label: "过大", value: summary.oversized || 0 },
+    { label: "拆分", value: summary.splitCandidates || 0 },
     { label: "类型冲突", value: summary.typeConflicts || 0 },
   ];
 }
@@ -3501,6 +3519,12 @@ function formatVisualQaItemContext(item) {
   if (item.cropQuality?.oversized) {
     parts.push("区域偏大");
   }
+  if (item.splitCandidate) {
+    const splitLabel = item.splitCount
+      ? `拆分候选 ${item.splitIndex || "?"}/${item.splitCount}`
+      : "拆分候选";
+    parts.push(splitLabel);
+  }
   if (item.formulaRole) {
     parts.push(`公式 ${formatFormulaRoleLabel(item.formulaRole)}`);
   }
@@ -3522,6 +3546,7 @@ function getVisualQaTypeLabel(type) {
     oversized: "过大",
     "type-conflict": "类型冲突",
     "figure-text": "图中文字",
+    "split-candidate": "拆分",
     manual: "人工",
     hidden: "隐藏",
     "ai-context": "上下文",

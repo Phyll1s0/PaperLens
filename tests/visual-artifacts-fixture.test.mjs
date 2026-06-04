@@ -37,7 +37,8 @@ try {
       if (command === "pdftoppm") {
         const outputPrefix = args.at(-1);
         await writeFile(`${outputPrefix}-1.png`, makeFixturePng(300, 200, [
-          { x: 64, y: 58, width: 172, height: 36 },
+          { x: 64, y: 58, width: 64, height: 38 },
+          { x: 172, y: 58, width: 64, height: 38 },
         ]));
         return "";
       }
@@ -58,24 +59,34 @@ try {
     assetPublicBase,
   });
   const page = pages[0];
-  assert.equal(page.visualStructureVersion, 4);
-  assert.ok(page.visualRegions.length >= 2);
+  assert.equal(page.visualStructureVersion, 5);
+  assert.ok(page.visualRegions.length >= 4);
 
   const figureRegion = page.visualRegions.find((region) => region.source === "caption-anchor");
   assert.equal(figureRegion?.visualType, "figure");
   assert.equal(figureRegion?.label, "Figure 1");
   assert.equal(figureRegion?.pixelRefined, true);
   assert.equal(figureRegion?.cropQuality?.confidence, "high");
+  const splitRegions = page.visualRegions.filter((region) => region.source === "caption-split");
+  assert.equal(splitRegions.length, 2);
+  assert.deepEqual(splitRegions.map((region) => region.label), ["Figure 1a", "Figure 1b"]);
+  assert.equal(splitRegions.every((region) => region.splitCandidate), true);
+  assert.equal(splitRegions.every((region) => region.parentVisualRegionId === figureRegion.id), true);
 
   const artifacts = extractPageArtifacts(pages, {
     assetDir,
     assetPublicBase,
   });
   const figure = artifacts.find((artifact) => artifact.type === "caption");
+  const splitArtifacts = artifacts.filter((artifact) => artifact.splitCandidate);
   const formula = artifacts.find((artifact) => artifact.type === "formula");
   assert.equal(figure?.label, "Figure 1");
   assert.equal(figure?.imagePath, `${assetPublicBase}/page-001.png`);
   assert.equal(figure?.crop?.pixelRefined, true);
+  assert.equal(splitArtifacts.length, 2);
+  assert.deepEqual(splitArtifacts.map((artifact) => artifact.label), ["Figure 1a", "Figure 1b"]);
+  assert.equal(splitArtifacts.every((artifact) => artifact.parentArtifactId === figure.id), true);
+  assert.equal(splitArtifacts.every((artifact) => artifact.cropQuality?.splitCandidate), true);
   assert.equal(formula?.formulaRole, "display-formula");
   assert.equal(formula?.cropQuality?.confidence, "low");
   assert.equal(formula?.cropQuality?.oversized, true);
@@ -98,9 +109,10 @@ try {
   }, pages, 0);
   assert.equal(stats.pages, 1);
   assert.equal(stats.pagesWithImages, 1);
-  assert.ok(stats.visualRegions >= 2);
-  assert.ok(stats.artifacts >= 2);
-  assert.equal(stats.pixelRefined, 1);
+  assert.ok(stats.visualRegions >= 4);
+  assert.ok(stats.artifacts >= 4);
+  assert.equal(stats.pixelRefined, 3);
+  assert.equal(stats.splitCandidates, 2);
   assert.equal(stats.lowConfidence, 1);
   assert.equal(stats.oversized, 1);
 

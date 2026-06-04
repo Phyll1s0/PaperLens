@@ -65,6 +65,7 @@ assert.deepEqual(
     pixelRefined: 1,
     lowConfidence: 1,
     oversized: 1,
+    splitCandidates: 0,
     manualCrops: 1,
   },
 );
@@ -259,6 +260,22 @@ assert.deepEqual(
         cropQuality: { confidence: "high", oversized: false },
       },
       {
+        id: "fig-split-1",
+        type: "caption",
+        visualType: "figure",
+        label: "Figure 3a",
+        text: "Figure 3a: Split candidate.",
+        pageNumber: 4,
+        splitCandidate: true,
+        parentArtifactId: "fig-parent",
+        splitIndex: 1,
+        splitCount: 2,
+        splitOrientation: "vertical",
+        imagePath: "/assets/fixture/page-004.png",
+        crop: { x: 260, y: 30, width: 180, height: 120, pageWidth: 612, pageHeight: 792, pixelRefined: true },
+        cropQuality: { confidence: "high", oversized: false, splitCandidate: true },
+      },
+      {
         id: "manual-hidden",
         type: "code",
         visualType: "code",
@@ -278,24 +295,26 @@ assert.deepEqual(
   assert.equal(qa.version, 1);
   assert.equal(qa.paperId, "paper_visual_qa");
   assert.equal(qa.status, "warn");
-  assert.equal(qa.summary.totalArtifacts, 5);
-  assert.equal(qa.summary.visibleArtifacts, 4);
+  assert.equal(qa.summary.totalArtifacts, 6);
+  assert.equal(qa.summary.visibleArtifacts, 5);
   assert.equal(qa.summary.hiddenArtifacts, 1);
   assert.equal(qa.summary.aiContextArtifacts, 4);
   assert.equal(qa.summary.manualArtifacts, 1);
+  assert.equal(qa.summary.splitCandidates, 1);
   assert.equal(qa.summary.missingCrops, 1);
   assert.equal(qa.summary.missingAssets, 1);
   assert.equal(qa.summary.lowConfidence, 1);
   assert.equal(qa.summary.oversized, 1);
   assert.equal(qa.summary.typeConflicts, 1);
   assert.equal(qa.summary.issueArtifacts, 3);
-  assert.equal(qa.summary.figures, 2);
+  assert.equal(qa.summary.figures, 3);
   assert.equal(qa.summary.tables, 1);
   assert.equal(qa.summary.formulas, 1);
   assert.equal(qa.summary.codeBlocks, 1);
   assert.equal(qa.categories.some((category) => category.type === "missing-crop" && category.count === 1), true);
   assert.equal(qa.categories.some((category) => category.type === "formula" && category.count === 1), true);
   assert.equal(qa.categories.some((category) => category.type === "ai-context" && category.count === 4), true);
+  assert.equal(qa.categories.some((category) => category.type === "split-candidate" && category.count === 1), true);
 
   const missing = qa.items.find((item) => item.id === "formula-missing");
   assert.deepEqual(missing.issueTypes, ["missing-crop"]);
@@ -309,6 +328,12 @@ assert.deepEqual(
 
   const conflict = qa.items.find((item) => item.id === "type-conflict");
   assert.deepEqual(conflict.issueTypes, ["type-conflict"]);
+
+  const split = qa.items.find((item) => item.id === "fig-split-1");
+  assert.equal(split.splitCandidate, true);
+  assert.equal(split.entersAiContext, false);
+  assert.deepEqual(split.infoTypes, ["split-candidate"]);
+  assert.equal(split.splitOrientation, "vertical");
 
   const hidden = qa.items.find((item) => item.id === "manual-hidden");
   assert.equal(hidden.manual, true);
