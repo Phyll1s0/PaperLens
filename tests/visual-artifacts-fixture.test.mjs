@@ -23,6 +23,7 @@ const ROOT_DIR = path.dirname(path.dirname(__filename));
 const fixturePath = path.join(ROOT_DIR, "tests", "fixtures", "minimal-paper.pdf");
 const assetPublicBase = "/assets/visual-fixture";
 const tempDir = await mkdtemp(path.join(os.tmpdir(), "paperlens-visual-fixture-"));
+const requirePoppler = parseBooleanEnv(process.env.PAPERLENS_REQUIRE_POPPLER);
 
 try {
   const assetDir = path.join(tempDir, "assets");
@@ -116,7 +117,8 @@ try {
   assert.equal(stats.lowConfidence, 1);
   assert.equal(stats.oversized, 1);
 
-  if (await commandExists("pdftotext") && await commandExists("pdftoppm")) {
+  const missingPopplerCommands = await listMissingCommands(["pdftotext", "pdftoppm"]);
+  if (missingPopplerCommands.length === 0) {
     const realAssetDir = path.join(tempDir, "real-assets");
     const realExtraction = await extractPdfWithPoppler(fixturePath, realAssetDir, "/assets/real-fixture", {
       pdfEngine: "poppler",
@@ -125,11 +127,17 @@ try {
     assert.equal(realExtraction.pageCount, 1);
     assert.match(realExtraction.pages[0].imagePath || "", /\/assets\/real-fixture\/page-001\.png$/);
     assert.ok(readPngSize(await readFile(path.join(realAssetDir, "page-001.png"))));
+  } else if (requirePoppler) {
+    assert.fail(`PAPERLENS_REQUIRE_POPPLER is set, but these commands are missing: ${missingPopplerCommands.join(", ")}`);
   } else {
     console.log("SKIP visual-artifacts real poppler render: pdftotext or pdftoppm is not installed");
   }
 } finally {
   await rm(tempDir, { recursive: true, force: true });
+}
+
+function parseBooleanEnv(value) {
+  return /^(1|true|yes|on)$/i.test(String(value || ""));
 }
 
 function buildFixtureBboxXml() {
@@ -228,4 +236,14 @@ async function commandExists(command) {
       resolve(!error);
     });
   });
+}
+
+async function listMissingCommands(commands) {
+  const results = await Promise.all(commands.map(async (command) => ({
+    command,
+    exists: await commandExists(command),
+  })));
+  return results
+    .filter((result) => !result.exists)
+    .map((result) => result.command);
 }

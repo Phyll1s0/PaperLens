@@ -11,6 +11,7 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const ROOT_DIR = path.dirname(path.dirname(__filename));
 const fixturePath = path.join(ROOT_DIR, "tests", "fixtures", "minimal-paper.pdf");
+const requirePoppler = parseBooleanEnv(process.env.PAPERLENS_REQUIRE_POPPLER);
 
 const fixture = await readFile(fixturePath);
 assert.equal(fixture.subarray(0, 5).toString("utf8"), "%PDF-");
@@ -82,8 +83,14 @@ if (await commandExists("pdftotext")) {
   assert.match(extraction.pages[0].text, /PaperLens Fixture/);
   assert.match(extraction.pages[0].text, /Alpha & Beta <Gamma>/);
   assert.match(extraction.pages[0].text, /Page 1 minimal PDF/);
+} else if (requirePoppler) {
+  assert.fail("PAPERLENS_REQUIRE_POPPLER is set, but pdftotext is not installed");
 } else {
   console.log("SKIP pdf-extraction poppler fixture run: pdftotext is not installed");
+}
+
+function parseBooleanEnv(value) {
+  return /^(1|true|yes|on)$/i.test(String(value || ""));
 }
 
 async function commandExists(command) {

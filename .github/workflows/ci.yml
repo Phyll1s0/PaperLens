@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Poppler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y poppler-utils
+
+      - name: Verify Poppler
+        run: |
+          pdftotext -v
+          pdftoppm -v
+
+      - name: Syntax check
+        run: |
+          node --check server.js
+          node --check public/app.js
+
+      - name: Run tests
+        env:
+          PAPERLENS_REQUIRE_POPPLER: "1"
+        run: npm test
