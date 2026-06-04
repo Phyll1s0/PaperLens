@@ -32,6 +32,7 @@ const state = {
     currentId: null,
     currentBatchSize: 0,
     strategy: null,
+    budgetEstimate: null,
     startedAt: 0,
     timer: null,
     pollInFlight: false,
@@ -83,6 +84,7 @@ const els = {
   modelInput: document.querySelector("#modelInput"),
   apiKeyInput: document.querySelector("#apiKeyInput"),
   agentBudgetInput: document.querySelector("#agentBudgetInput"),
+  taskBudgetInput: document.querySelector("#taskBudgetInput"),
   proxyUrlInput: document.querySelector("#proxyUrlInput"),
   modelStatusText: document.querySelector("#modelStatusText"),
   modelDiagnosticsText: document.querySelector("#modelDiagnosticsText"),
@@ -187,7 +189,14 @@ const CLIENT_ANALYSIS_DEFAULTS = {
   deepseek: { batchSize: 12, concurrency: 3, maxBatchSize: 24, expectedBatchSeconds: 34, failedRetryBatchSize: 3 },
   "kimi-direct": { batchSize: 12, concurrency: 3, maxBatchSize: 20, expectedBatchSeconds: 42, failedRetryBatchSize: 2 },
   "claude-agent": { batchSize: 8, concurrency: 2, maxBatchSize: 20, expectedBatchSeconds: 75, failedRetryBatchSize: 2 },
-  "kimi-code-direct": { batchSize: 12, concurrency: 3, maxBatchSize: 20, expectedBatchSeconds: 38, failedRetryBatchSize: 2 },
+  "kimi-code-direct": { batchSize: 4, concurrency: 3, maxBatchSize: 8, expectedBatchSeconds: 46, failedRetryBatchSize: 2 },
+};
+const CLIENT_ANALYSIS_COST_RATES_USD_PER_1M_TOKENS = {
+  general: { input: 0.6, output: 2.4 },
+  deepseek: { input: 0.3, output: 1.2 },
+  "kimi-direct": { input: 0.4, output: 1.6 },
+  "kimi-code-direct": { input: 0.4, output: 1.6 },
+  "claude-agent": { input: 3, output: 15 },
 };
 
 loadSettings();
@@ -273,7 +282,7 @@ function bindEvents() {
     }
   });
 
-  for (const input of [els.baseUrlInput, els.modelInput, els.apiKeyInput, els.agentBudgetInput, els.proxyUrlInput]) {
+  for (const input of [els.baseUrlInput, els.modelInput, els.apiKeyInput, els.agentBudgetInput, els.taskBudgetInput, els.proxyUrlInput]) {
     input.addEventListener("input", () => {
       if (input === els.baseUrlInput) {
         clearSavedApiKeyRef();
@@ -397,6 +406,7 @@ function loadSettings() {
   els.providerSelect.value = provider;
   els.apiKeyInput.value = legacyApiKey;
   els.agentBudgetInput.value = sessionStorage.getItem("paper-reader-agent-budget") || "500";
+  els.taskBudgetInput.value = sessionStorage.getItem("paper-reader-task-budget") || "0";
   els.proxyUrlInput.value = sessionStorage.getItem("paper-reader-proxy-url") || "";
   state.analysisProfile = normalizeAnalysisProfile(sessionStorage.getItem("paper-reader-analysis-profile") || "quality");
   els.aiSegmentInput.checked = sessionStorage.getItem("paper-reader-ai-segment") !== "false";
@@ -418,6 +428,7 @@ function saveSettings() {
   sessionStorage.setItem("paper-reader-model", els.modelInput.value.trim());
   sessionStorage.removeItem(LEGACY_API_KEY_STORAGE_KEY);
   sessionStorage.setItem("paper-reader-agent-budget", els.agentBudgetInput.value.trim());
+  sessionStorage.setItem("paper-reader-task-budget", els.taskBudgetInput.value.trim());
   sessionStorage.setItem("paper-reader-proxy-url", els.proxyUrlInput.value.trim());
   sessionStorage.setItem("paper-reader-analysis-profile", state.analysisProfile);
   sessionStorage.setItem("paper-reader-ai-segment", String(els.aiSegmentInput.checked));
@@ -434,6 +445,7 @@ function getSettings() {
     apiKey,
     apiKeyRef: apiKey ? "" : sessionStorage.getItem(API_KEY_REF_STORAGE_KEY) || "",
     agentBudgetUsd: Number(els.agentBudgetInput.value || 500),
+    taskBudgetUsd: normalizeTaskBudgetUsd(els.taskBudgetInput.value),
     proxyUrl: els.proxyUrlInput.value.trim(),
     analysisProfile: state.analysisProfile,
   };
@@ -464,6 +476,9 @@ function applySecuredSettings(settings) {
   if (settings.analysisProfile) {
     state.analysisProfile = normalizeAnalysisProfile(settings.analysisProfile);
     updateAnalysisProfileButtons();
+  }
+  if (Number.isFinite(Number(settings.taskBudgetUsd))) {
+    els.taskBudgetInput.value = String(settings.taskBudgetUsd || 0);
   }
 
   if (settings.apiKeyRef) {
@@ -521,6 +536,14 @@ function normalizeModelNameInput(value) {
 
 function normalizeAnalysisProfile(value) {
   return value === "fast" ? "fast" : "quality";
+}
+
+function normalizeTaskBudgetUsd(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) {
+    return 0;
+  }
+  return Math.round(number * 10000) / 10000;
 }
 
 function setAnalysisProfile(profile) {
@@ -1869,6 +1892,22 @@ async function createAnalysisJob(payload = {}) {
     return;
   }
 
+  const settings = getSettings();
+  const preflightBudget = buildClientAnalysisBudgetEstimate(
+    getClientAnalysisTargetParagraphs(payload),
+    settings,
+    getClientAnalysisStrategy(settings, state.paper),
+  );
+  if (preflightBudget.exceedsTaskBudget) {
+    setStatus(
+      `预计约 ${formatUsd(preflightBudget.estimatedCostUsd)} / ${formatInteger(preflightBudget.totalTokens)} tokens，超过任务预算 ${formatUsd(preflightBudget.maxTaskBudgetUsd)}。请提高 Task Budget USD、切换快速模式或分批补跑。`,
+      true,
+    );
+    renderAnalysisDashboard();
+    updateAutoButtons();
+    return;
+  }
+
   setStatus("正在创建后端分析任务");
   updateAutoButtons();
 
@@ -1877,7 +1916,7 @@ async function createAnalysisJob(payload = {}) {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        settings: getSettings(),
+        settings,
         paragraphIds: payload.paragraphIds || [],
         rerunAll: Boolean(payload.rerunAll),
         force: Boolean(payload.force),
@@ -2150,6 +2189,7 @@ function applyAnalysisJob(job) {
   state.autoAnalyze.currentId = job.currentParagraphId || "";
   state.autoAnalyze.currentBatchSize = Number(job.currentBatchSize || 0);
   state.autoAnalyze.strategy = job.strategy || null;
+  state.autoAnalyze.budgetEstimate = normalizeAnalysisBudgetEstimate(job.budgetEstimate);
   state.autoAnalyze.startedAt = Date.parse(job.startedAt || job.createdAt) || Date.now();
   state.autoAnalyze.lastProgressKey = getJobProgressKey(job);
 
@@ -2175,6 +2215,7 @@ function resetAnalysisJobState() {
     currentId: null,
     currentBatchSize: 0,
     strategy: null,
+    budgetEstimate: null,
     startedAt: 0,
     pollInFlight: false,
     lastProgressKey: "",
@@ -5703,6 +5744,13 @@ function renderAnalysisDashboard() {
   const estimateSeconds = activeOrKnownJob && strategy.estimatedRemainingSeconds != null
     ? Number(strategy.estimatedRemainingSeconds)
     : estimateAnalysisSeconds(targetCount, strategy);
+  const budgetEstimate = activeOrKnownJob && state.autoAnalyze.budgetEstimate
+    ? state.autoAnalyze.budgetEstimate
+    : buildClientAnalysisBudgetEstimate(
+        getClientAnalysisTargetParagraphs({}, state.paper),
+        getSettings(),
+        strategy,
+      );
   const progressLabel = activeOrKnownJob
     ? `${doneCount}/${state.autoAnalyze.total}`
     : hasPaper ? `${targetCount} 待处理` : "未载入";
@@ -5714,7 +5762,7 @@ function renderAnalysisDashboard() {
   const title = document.createElement("strong");
   title.textContent = "速度与质量";
   const summary = document.createElement("span");
-  summary.textContent = getAnalysisDashboardSummary(profile, strategy, targetCount, estimateSeconds);
+  summary.textContent = getAnalysisDashboardSummary(profile, strategy, targetCount, estimateSeconds, budgetEstimate);
   header.append(title, summary);
   fragment.append(header);
 
@@ -5726,6 +5774,9 @@ function renderAnalysisDashboard() {
     { label: "批次", value: `${strategy.effectiveBatchSize || strategy.batchSize || 1}` },
     { label: "并发", value: `${strategy.concurrency || 1}` },
     { label: "缓存", value: cacheLabel },
+    { label: "Token", value: budgetEstimate.totalTokens ? `≈${formatCompactNumber(budgetEstimate.totalTokens)}` : "0" },
+    { label: "费用", value: budgetEstimate.estimatedCostUsd ? `≈${formatUsd(budgetEstimate.estimatedCostUsd)}` : "$0.00" },
+    { label: "预算", value: getBudgetStatusLabel(budgetEstimate) },
     { label: "失败补跑", value: `${strategy.failedRetryBatchSize || 1}/批` },
     { label: "进度", value: progressLabel },
     { label: "策略", value: strategy.label || strategy.name || "默认" },
@@ -5834,13 +5885,151 @@ function estimateAnalysisSeconds(remaining, strategy) {
   return Math.max(1, Math.ceil(batchCount / concurrency)) * Number(strategy.expectedBatchSeconds || 45);
 }
 
-function getAnalysisDashboardSummary(profile, strategy, targetCount, estimateSeconds) {
+function getClientAnalysisTargetParagraphs(payload = {}, paper = state.paper) {
+  if (!paper) {
+    return [];
+  }
+
+  const readingParagraphs = getReadingParagraphs(paper);
+  const paragraphIds = Array.isArray(payload.paragraphIds)
+    ? payload.paragraphIds.map(String).filter(Boolean)
+    : [];
+  if (paragraphIds.length) {
+    const requested = new Set(paragraphIds);
+    const selected = readingParagraphs.filter((paragraph) => requested.has(paragraph.id));
+    return payload.force || payload.rerunAll
+      ? selected
+      : selected.filter((paragraph) => needsAnalysis(paragraph));
+  }
+
+  if (payload.rerunAll) {
+    return readingParagraphs;
+  }
+
+  return readingParagraphs.filter((paragraph) => needsAnalysis(paragraph));
+}
+
+function buildClientAnalysisBudgetEstimate(paragraphs = [], settings = getSettings(), strategy = null) {
+  const resourceEstimate = buildClientAnalysisResourceEstimate(paragraphs);
+  const providerClass = strategy?.name && CLIENT_ANALYSIS_COST_RATES_USD_PER_1M_TOKENS[strategy.name]
+    ? strategy.name
+    : classifyClientAnalysisProvider(settings);
+  const profile = normalizeAnalysisProfile(settings.analysisProfile);
+  const rates = CLIENT_ANALYSIS_COST_RATES_USD_PER_1M_TOKENS[providerClass] || CLIENT_ANALYSIS_COST_RATES_USD_PER_1M_TOKENS.general;
+  const inputTokens = resourceEstimate.paragraphs
+    ? Math.ceil(resourceEstimate.approxTokens + 650 + resourceEstimate.paragraphs * 180)
+    : 0;
+  const outputMultiplier = profile === "fast" ? 1.05 : 1.35;
+  const outputFloor = profile === "fast" ? 260 : 420;
+  const outputTokens = resourceEstimate.paragraphs
+    ? Math.ceil(resourceEstimate.approxTokens * outputMultiplier + resourceEstimate.paragraphs * outputFloor)
+    : 0;
+  const totalTokens = inputTokens + outputTokens;
+  const estimatedCostUsd = roundUsd((inputTokens / 1_000_000) * rates.input + (outputTokens / 1_000_000) * rates.output);
+  const maxTaskBudgetUsd = normalizeTaskBudgetUsd(settings.taskBudgetUsd);
+  const estimatedSeconds = strategy
+    ? estimateAnalysisSeconds(resourceEstimate.paragraphs, strategy)
+    : 0;
+
+  return {
+    ...resourceEstimate,
+    providerClass,
+    profile,
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    estimatedCostUsd,
+    maxTaskBudgetUsd,
+    exceedsTaskBudget: maxTaskBudgetUsd > 0 && estimatedCostUsd > maxTaskBudgetUsd,
+    estimatedSeconds,
+    approximate: true,
+  };
+}
+
+function buildClientAnalysisResourceEstimate(paragraphs = []) {
+  const pageNumbers = new Set();
+  let chars = 0;
+  for (const paragraph of paragraphs) {
+    chars += String(paragraph?.sourceText || "").length;
+    const pageStart = normalizePositivePageNumber(paragraph?.pageNumber, 0);
+    const pageEnd = normalizePositivePageNumber(paragraph?.pageEndNumber || paragraph?.pageNumber, pageStart);
+    for (let page = pageStart; page <= pageEnd && page > 0; page += 1) {
+      pageNumbers.add(page);
+    }
+  }
+
+  return {
+    paragraphs: paragraphs.length,
+    chars,
+    approxTokens: approximateTokenCount(chars),
+    pages: pageNumbers.size,
+  };
+}
+
+function normalizeAnalysisBudgetEstimate(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  return {
+    paragraphs: Number(value.paragraphs || 0),
+    chars: Number(value.chars || 0),
+    approxTokens: Number(value.approxTokens || 0),
+    pages: Number(value.pages || 0),
+    providerClass: String(value.providerClass || ""),
+    profile: normalizeAnalysisProfile(value.profile),
+    inputTokens: Number(value.inputTokens || 0),
+    outputTokens: Number(value.outputTokens || 0),
+    totalTokens: Number(value.totalTokens || 0),
+    estimatedCostUsd: Number(value.estimatedCostUsd || 0),
+    maxTaskBudgetUsd: Number(value.maxTaskBudgetUsd || 0),
+    exceedsTaskBudget: Boolean(value.exceedsTaskBudget),
+    estimatedSeconds: Number(value.estimatedSeconds || 0),
+    approximate: value.approximate !== false,
+  };
+}
+
+function classifyClientAnalysisProvider(settings = {}) {
+  const provider = String(settings.provider || "").toLowerCase();
+  const baseUrl = String(settings.baseUrl || "").toLowerCase();
+  const model = String(settings.model || "").toLowerCase();
+  const kimiCodeDirectLike = baseUrl === "local:claude-kimi";
+  const agentLike = !kimiCodeDirectLike && (provider.startsWith("claude") || baseUrl.startsWith("local:claude"));
+  if (kimiCodeDirectLike) {
+    return "kimi-code-direct";
+  }
+  if (agentLike) {
+    return "claude-agent";
+  }
+  if (provider.includes("deepseek") || baseUrl.includes("deepseek") || model.includes("deepseek")) {
+    return "deepseek";
+  }
+  if (provider.includes("kimi") || baseUrl.includes("moonshot") || baseUrl.includes("api.kimi.com")) {
+    return "kimi-direct";
+  }
+  return "general";
+}
+
+function getBudgetStatusLabel(estimate = {}) {
+  if (!estimate.maxTaskBudgetUsd) {
+    return "不限";
+  }
+
+  if (estimate.exceedsTaskBudget) {
+    return `超出 ${formatUsd(estimate.maxTaskBudgetUsd)}`;
+  }
+
+  return formatUsd(estimate.maxTaskBudgetUsd);
+}
+
+function getAnalysisDashboardSummary(profile, strategy, targetCount, estimateSeconds, budgetEstimate = null) {
   if (!targetCount) {
     return state.paper ? "当前没有待分析段落" : "载入论文后显示预计耗时和队列策略";
   }
 
   const profileLabel = profile === "fast" ? "吞吐优先" : "质量优先";
-  return `${profileLabel} · ${targetCount} 段 · 约 ${formatDuration(estimateSeconds)} · ${strategy.concurrency || 1} 并发`;
+  const costLabel = budgetEstimate?.estimatedCostUsd ? ` · ≈${formatUsd(budgetEstimate.estimatedCostUsd)}` : "";
+  return `${profileLabel} · ${targetCount} 段 · 约 ${formatDuration(estimateSeconds)} · ${strategy.concurrency || 1} 并发${costLabel}`;
 }
 
 function getAnalysisStrategyLabel(strategy = {}) {
@@ -5869,6 +6058,41 @@ function formatDuration(seconds) {
   const hours = Math.floor(minutes / 60);
   const minuteRest = minutes % 60;
   return minuteRest ? `${hours}h ${minuteRest}m` : `${hours}h`;
+}
+
+function formatInteger(value) {
+  return new Intl.NumberFormat("en-US").format(Number(value || 0));
+}
+
+function formatCompactNumber(value) {
+  return new Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(Number(value || 0));
+}
+
+function formatUsd(value) {
+  const number = Math.max(0, Number(value || 0));
+  if (number > 0 && number < 0.01) {
+    return `$${number.toFixed(4)}`;
+  }
+  return `$${number.toFixed(2)}`;
+}
+
+function approximateTokenCount(chars) {
+  return Math.ceil(Math.max(0, Number(chars || 0)) / 3.5);
+}
+
+function normalizePositivePageNumber(value, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) {
+    return Number(fallback) || 1;
+  }
+  return Math.trunc(number);
+}
+
+function roundUsd(value) {
+  return Math.round(Math.max(0, Number(value || 0)) * 10000) / 10000;
 }
 
 function clampNumber(value, min, max) {

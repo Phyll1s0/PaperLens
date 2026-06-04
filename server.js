@@ -14,6 +14,13 @@ import {
   nextAdaptiveBatchSizeAfterSplit,
 } from "./lib/analysis-batching.js";
 import {
+  approximateTokenCount as estimateApproximateTokenCount,
+  buildAnalysisResourceEstimate as buildAnalysisResourceEstimatePayload,
+  estimateAnalysisBudget,
+  isTaskBudgetExceeded,
+  normalizeTaskBudgetUsd,
+} from "./lib/analysis-budget.js";
+import {
   isLikelyCaptionBlockText,
   isLikelyCodeBlockText,
   isLikelyFormulaBlockText,
@@ -1211,6 +1218,7 @@ async function handleCreateAnalysisJob(req, res, paperId) {
     return rerunAll || forceSelected || needsAnalysisNow;
   });
   const resourceEstimate = buildAnalysisResourceEstimate(targets);
+  const budgetEstimate = buildAnalysisBudgetEstimate(targets, settings, resourceEstimate);
 
   if (!targets.length) {
     if (cacheHits > 0 || cacheWarmups > 0 || segmentationAuditChanged) {
@@ -1224,6 +1232,7 @@ async function handleCreateAnalysisJob(req, res, paperId) {
     });
   }
   enforceAnalysisResourceLimits(resourceEstimate);
+  enforceAnalysisTaskBudget(budgetEstimate);
 
   for (const paragraph of targets) {
     if (rerunAll || forceSelected) {
@@ -1241,6 +1250,7 @@ async function handleCreateAnalysisJob(req, res, paperId) {
     rerunAll,
     cacheHits,
     resourceEstimate,
+    budgetEstimate,
   });
   jobStore.jobs.set(job.id, job);
   await persistJobs();
@@ -1379,7 +1389,19 @@ async function handleRetryFailedJob(res, jobId) {
   if (!failedItems.length) {
     return json(res, { job: serializeJob(job), message: "没有失败项需要重跑。" });
   }
-  enforceAnalysisResourceLimits(buildAnalysisRetryResourceEstimate(failedItems));
+  const paper = await loadPaper(job.paperId);
+  const failedParagraphIds = new Set(failedItems.map((item) => item.paragraphId));
+  const failedParagraphs = getReadingParagraphs(paper).filter((paragraph) => failedParagraphIds.has(paragraph.id));
+  const resourceEstimate = failedParagraphs.length
+    ? buildAnalysisResourceEstimate(failedParagraphs)
+    : buildAnalysisRetryResourceEstimate(failedItems);
+  const budgetEstimate = failedParagraphs.length
+    ? buildAnalysisBudgetEstimate(failedParagraphs, job.settings, resourceEstimate)
+    : null;
+  enforceAnalysisResourceLimits(resourceEstimate);
+  if (budgetEstimate) {
+    enforceAnalysisTaskBudget(budgetEstimate);
+  }
 
   for (const item of failedItems) {
     item.status = "queued";
@@ -1396,6 +1418,8 @@ async function handleRetryFailedJob(res, jobId) {
   job.status = "queued";
   job.cancelRequested = false;
   job.retryFailedOnly = true;
+  job.resourceEstimate = resourceEstimate;
+  job.budgetEstimate = budgetEstimate;
   job.adaptiveBatchSize = getAnalysisProviderStrategy(job.settings, { ...job, retryFailedOnly: true }).failedRetryBatchSize;
   job.retryFailedAt = new Date().toISOString();
   job.currentParagraphId = "";
@@ -2140,6 +2164,7 @@ function normalizeLoadedJob(job) {
     cacheHits: Number.isFinite(Number(job.cacheHits)) ? Number(job.cacheHits) : 0,
     adaptiveBatchSize: Number.isFinite(Number(job.adaptiveBatchSize)) ? Number(job.adaptiveBatchSize) : null,
     resourceEstimate: normalizeJobResourceEstimate(job.resourceEstimate),
+    budgetEstimate: normalizeJobBudgetEstimate(job.budgetEstimate),
     settings: job.settings || {},
     items: normalizedItems,
     total: normalizedItems.length,
@@ -2250,7 +2275,15 @@ async function recoverInterruptedJobs() {
   }
 }
 
-function createAnalysisJob({ paper, paragraphIds, settings, rerunAll, cacheHits = 0, resourceEstimate = null }) {
+function createAnalysisJob({
+  paper,
+  paragraphIds,
+  settings,
+  rerunAll,
+  cacheHits = 0,
+  resourceEstimate = null,
+  budgetEstimate = null,
+}) {
   const now = new Date().toISOString();
   return {
     id: `job_${Date.now()}_${randomUUID().slice(0, 8)}`,
@@ -2264,6 +2297,7 @@ function createAnalysisJob({ paper, paragraphIds, settings, rerunAll, cacheHits 
     cacheHits: Number(cacheHits || 0),
     adaptiveBatchSize: null,
     resourceEstimate: resourceEstimate || null,
+    budgetEstimate: budgetEstimate || null,
     settings,
     items: paragraphIds.map((paragraphId) => ({
       paragraphId,
@@ -2405,6 +2439,7 @@ function serializeJob(job) {
     cacheHits: Number(job.cacheHits || 0),
     adaptiveBatchSize: Number(job.adaptiveBatchSize || 0),
     resourceEstimate: job.resourceEstimate || null,
+    budgetEstimate: job.budgetEstimate || null,
     total: job.total,
     completed: job.completed,
     failed: job.failed,
@@ -2455,6 +2490,7 @@ function serializeJobSummary(job) {
     retryFailedOnly: Boolean(job.retryFailedOnly),
     cacheHits: Number(job.cacheHits || 0),
     resourceEstimate: job.resourceEstimate || null,
+    budgetEstimate: job.budgetEstimate || null,
     total: job.total,
     completed: job.completed,
     failed: job.failed,
@@ -3409,23 +3445,30 @@ function estimateAnalysisSeconds(paragraphCount, batchSize, concurrency, expecte
 }
 
 function buildAnalysisResourceEstimate(paragraphs = []) {
-  const pageNumbers = new Set();
-  let chars = 0;
-  for (const paragraph of paragraphs) {
-    chars += String(paragraph?.sourceText || "").length;
-    const pageStart = normalizePositivePageNumber(paragraph?.pageNumber, 0);
-    const pageEnd = normalizePositivePageNumber(paragraph?.pageEndNumber || paragraph?.pageNumber, pageStart);
-    for (let page = pageStart; page <= pageEnd && page > 0; page += 1) {
-      pageNumbers.add(page);
-    }
-  }
+  return buildAnalysisResourceEstimatePayload(paragraphs);
+}
 
-  return {
-    paragraphs: paragraphs.length,
-    chars,
-    approxTokens: approximateTokenCount(chars),
-    pages: pageNumbers.size,
+function buildAnalysisBudgetEstimate(paragraphs = [], settings = {}, resourceEstimate = null) {
+  const strategy = getAnalysisProviderStrategy(settings);
+  const estimateJob = {
+    settings,
+    retryFailedOnly: false,
+    adaptiveBatchSize: null,
+    items: paragraphs.map(() => ({ status: "queued" })),
   };
+  const effectiveBatchSize = getAnalysisBatchSize(settings, estimateJob);
+  const estimatedSeconds = estimateAnalysisSeconds(
+    paragraphs.length,
+    effectiveBatchSize,
+    strategy.concurrency,
+    strategy.expectedBatchSeconds,
+  );
+  return estimateAnalysisBudget({
+    paragraphs,
+    settings,
+    resourceEstimate,
+    estimatedSeconds,
+  });
 }
 
 function buildAnalysisRetryResourceEstimate(items = []) {
@@ -3452,6 +3495,36 @@ function normalizeJobResourceEstimate(value) {
   };
 }
 
+function normalizeJobBudgetEstimate(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  return {
+    paragraphs: Number(value.paragraphs || 0),
+    chars: Number(value.chars || 0),
+    approxTokens: Number(value.approxTokens || 0),
+    pages: Number(value.pages || 0),
+    providerClass: String(value.providerClass || ""),
+    profile: normalizeAnalysisProfile(value.profile),
+    inputTokens: Number(value.inputTokens || 0),
+    outputTokens: Number(value.outputTokens || 0),
+    totalTokens: Number(value.totalTokens || 0),
+    estimatedCostUsd: Number(value.estimatedCostUsd || 0),
+    maxTaskBudgetUsd: Number(value.maxTaskBudgetUsd || 0),
+    exceedsTaskBudget: Boolean(value.exceedsTaskBudget),
+    estimatedSeconds: Number(value.estimatedSeconds || 0),
+    rate: value.rate && typeof value.rate === "object"
+      ? {
+          inputUsdPer1M: Number(value.rate.inputUsdPer1M || 0),
+          outputUsdPer1M: Number(value.rate.outputUsdPer1M || 0),
+        }
+      : null,
+    source: value.source ? String(value.source) : "",
+    approximate: value.approximate !== false,
+  };
+}
+
 function enforceAnalysisResourceLimits(estimate) {
   if (isResourceLimitExceeded(estimate.paragraphs, MAX_ANALYSIS_JOB_PARAGRAPHS)) {
     throw createResourceLimitError(
@@ -3472,6 +3545,20 @@ function enforceAnalysisResourceLimits(estimate) {
       "PAPERLENS_MAX_ANALYSIS_JOB_CHARS",
     );
   }
+}
+
+function enforceAnalysisTaskBudget(estimate) {
+  if (!isTaskBudgetExceeded(estimate)) {
+    return;
+  }
+
+  throw createResourceLimitError(
+    `这次分析预计约 ${formatUsd(estimate.estimatedCostUsd)} / ${formatInteger(estimate.totalTokens)} tokens，超过任务预算 ${formatUsd(estimate.maxTaskBudgetUsd)}。请提高 Task Budget USD、切换快速模式、先隐藏噪声段落，或分批补跑。`,
+    "analysis.taskBudgetUsd",
+    estimate.estimatedCostUsd,
+    estimate.maxTaskBudgetUsd,
+    "Task Budget USD",
+  );
 }
 
 function enforcePageResourceLimit({ label, pageCount, limit, envName }) {
@@ -3526,11 +3613,19 @@ function isResourceLimitExceeded(value, limit) {
 }
 
 function approximateTokenCount(chars) {
-  return Math.ceil(Number(chars || 0) / 3.5);
+  return estimateApproximateTokenCount(chars);
 }
 
 function formatInteger(value) {
   return new Intl.NumberFormat("en-US").format(Number(value || 0));
+}
+
+function formatUsd(value) {
+  const number = Math.max(0, Number(value || 0));
+  if (number > 0 && number < 0.01) {
+    return `$${number.toFixed(4)}`;
+  }
+  return `$${number.toFixed(2)}`;
 }
 
 function getAnalysisProfileLabel(profile) {
@@ -9664,6 +9759,7 @@ function normalizeSettings(settings = {}) {
   const model = normalizeModelName(String(settings.model || "").trim());
   const baseUrl = resolveBaseUrlForProvider(provider, String(settings.baseUrl || "https://api.openai.com/v1").trim());
   const agentBudgetUsd = Number(settings.agentBudgetUsd || 500);
+  const taskBudgetUsd = normalizeTaskBudgetUsd(settings.taskBudgetUsd);
   const analysisProfile = normalizeAnalysisProfile(settings.analysisProfile);
   const normalizedApiKey = normalizeApiKey(apiKey);
   const proxyUrl = normalizeProxyUrl(String(settings.proxyUrl || ""));
@@ -9680,7 +9776,17 @@ function normalizeSettings(settings = {}) {
     throw badRequest("Model name is required.");
   }
 
-  return { provider, apiKey: normalizedApiKey, apiKeyRef, model, baseUrl, agentBudgetUsd, proxyUrl, analysisProfile };
+  return {
+    provider,
+    apiKey: normalizedApiKey,
+    apiKeyRef,
+    model,
+    baseUrl,
+    agentBudgetUsd,
+    taskBudgetUsd,
+    proxyUrl,
+    analysisProfile,
+  };
 }
 
 function normalizeAnalysisProfile(profile) {
