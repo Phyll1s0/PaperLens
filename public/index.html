@@ -29,6 +29,7 @@
             <h1>论文阅读助手</h1>
             <p id="paperMeta">未载入论文</p>
           </div>
+          <button id="sidebarCollapseButton" class="icon-button layout-toggle-button" type="button" title="收起侧栏" aria-label="收起侧栏">‹</button>
         </div>
 
         <section class="panel">
@@ -130,33 +131,60 @@
 
       <main class="reader">
         <div class="reader-toolbar">
-          <div>
-            <h2 id="paperTitle">选择一篇 PDF</h2>
-            <p id="paperStats">段落会显示在这里</p>
-            <div id="paperLibraryControls" class="paper-library-controls hidden">
-              <button id="favoriteButton" class="icon-button" type="button" title="收藏论文" aria-label="收藏论文">☆</button>
-              <input id="tagInput" type="text" placeholder="标签，用逗号分隔">
-              <button id="saveTagsButton" class="secondary-button" type="button">保存标签</button>
-              <button id="rebuildVisualButton" class="secondary-button" type="button" title="重新生成整篇论文的图片、公式和代码裁剪">重建图表</button>
-              <button id="toggleHiddenParagraphsButton" class="secondary-button" type="button" title="显示或收起被标记为噪声的段落">显示隐藏段落</button>
+          <div class="reader-toolbar-compact">
+            <div class="reader-layout-controls" role="group" aria-label="布局控制">
+              <button id="sidebarToggleButton" class="secondary-button compact-action-button" type="button">侧栏</button>
+              <button id="toolbarToggleButton" class="secondary-button compact-action-button" type="button">收起顶部</button>
             </div>
+            <div class="compact-paper-summary">
+              <strong id="compactPaperTitle">选择一篇 PDF</strong>
+              <span id="compactPaperStats">段落会显示在这里</span>
+            </div>
+            <button id="historyToggleButton" class="secondary-button compact-action-button history-toggle-button" type="button" aria-expanded="false" aria-controls="historyPanel">
+              历史
+              <span id="historyCountBadge" class="history-count-badge">0</span>
+            </button>
           </div>
-          <div class="toolbar-actions">
-            <div class="toolbar-buttons">
-              <button id="autoAnalyzeButton" class="secondary-button" type="button" title="自动翻译并讲解未完成段落">自动讲解</button>
-              <button id="resumeAnalyzeButton" class="secondary-button" type="button" title="只补跑失败、缺翻译或缺讲解的段落">补跑未完成</button>
-              <button id="downloadNotesButton" class="secondary-button" type="button" title="下载包含原文、翻译和讲解的 Markdown 笔记">下载笔记</button>
-              <button id="downloadDocxButton" class="secondary-button" type="button" title="下载包含章节、段落、图片和术语的 Word 文档">下载Word</button>
-              <button id="pipelineQualityButton" class="secondary-button" type="button" title="汇总分段、视觉、公式、讲解和导出风险">质量报告</button>
-              <button id="exportQaButton" class="secondary-button" type="button" title="检查未完成段落、图表引用、裁剪和 LaTeX 风险">导出检查</button>
-              <button id="segmentationDebugButton" class="secondary-button" type="button" title="查看 PDF block、清洗理由和段落来源">分段调试</button>
-              <button id="rerunAnalyzeButton" class="secondary-button" type="button" title="重新 AI 分段，然后重新生成全部段落">重分段+全跑</button>
-              <button id="stopAutoButton" class="secondary-button hidden" type="button">停止</button>
+
+          <div class="reader-toolbar-main">
+            <div>
+              <h2 id="paperTitle">选择一篇 PDF</h2>
+              <p id="paperStats">段落会显示在这里</p>
+              <div id="paperLibraryControls" class="paper-library-controls hidden">
+                <button id="favoriteButton" class="icon-button" type="button" title="收藏论文" aria-label="收藏论文">☆</button>
+                <input id="tagInput" type="text" placeholder="标签，用逗号分隔">
+                <button id="saveTagsButton" class="secondary-button" type="button">保存标签</button>
+                <button id="rebuildVisualButton" class="secondary-button" type="button" title="重新生成整篇论文的图片、公式和代码裁剪">重建图表</button>
+                <button id="toggleHiddenParagraphsButton" class="secondary-button" type="button" title="显示或收起被标记为噪声的段落">显示隐藏段落</button>
+              </div>
             </div>
-            <div id="jobHistory" class="job-history"></div>
-            <input id="searchInput" type="search" placeholder="搜索段落">
+            <div class="toolbar-actions">
+              <div class="toolbar-buttons">
+                <button id="autoAnalyzeButton" class="secondary-button" type="button" title="自动翻译并讲解未完成段落">自动讲解</button>
+                <button id="resumeAnalyzeButton" class="secondary-button" type="button" title="只补跑失败、缺翻译或缺讲解的段落">补跑未完成</button>
+                <button id="downloadNotesButton" class="secondary-button" type="button" title="下载包含原文、翻译和讲解的 Markdown 笔记">下载笔记</button>
+                <button id="downloadDocxButton" class="secondary-button" type="button" title="下载包含章节、段落、图片和术语的 Word 文档">下载Word</button>
+                <button id="pipelineQualityButton" class="secondary-button" type="button" title="汇总分段、视觉、公式、讲解和导出风险">质量报告</button>
+                <button id="exportQaButton" class="secondary-button" type="button" title="检查未完成段落、图表引用、裁剪和 LaTeX 风险">导出检查</button>
+                <button id="segmentationDebugButton" class="secondary-button" type="button" title="查看 PDF block、清洗理由和段落来源">分段调试</button>
+                <button id="rerunAnalyzeButton" class="secondary-button" type="button" title="重新 AI 分段，然后重新生成全部段落">重分段+全跑</button>
+                <button id="stopAutoButton" class="secondary-button hidden" type="button">停止</button>
+              </div>
+              <input id="searchInput" type="search" placeholder="搜索段落">
+            </div>
           </div>
         </div>
+
+        <section id="historyPanel" class="history-panel" aria-label="任务历史记录" aria-hidden="true">
+          <div class="history-panel-header">
+            <div>
+              <strong>历史记录</strong>
+              <span id="historyPanelSummary">当前论文任务</span>
+            </div>
+            <button id="historyCloseButton" class="icon-button" type="button" title="关闭历史记录" aria-label="关闭历史记录">×</button>
+          </div>
+          <div id="jobHistory" class="job-history"></div>
+        </section>
 
         <div id="emptyState" class="empty-state">
           <div class="empty-icon">PDF</div>

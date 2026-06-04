@@ -4,6 +4,7 @@ import {
   extractTextBlocks,
   formatSegmentationPageBlock,
   getReadablePageBlocks,
+  getRecoverableFilteredPageBlocks,
 } from "../lib/segmentation-page-input.js";
 
 const twoColumnPage = {
@@ -103,6 +104,13 @@ const twoColumnPage = {
   assert.ok(leftContinue > leftFirst);
   assert.ok(rightBegins > leftContinue);
   assert.ok(rightThen > rightBegins);
+}
+
+{
+  const recoverable = getRecoverableFilteredPageBlocks(twoColumnPage);
+  assert.ok(recoverable.some((block) => block.filteredReason === "caption" && /Figure 2/.test(block.text)));
+  assert.ok(recoverable.some((block) => /Dataset Horizon/.test(block.text)));
+  assert.ok(recoverable.some((block) => block.filteredReason === "resource-link" && /github.com/.test(block.text)));
 }
 
 {
@@ -443,4 +451,117 @@ const twoColumnPage = {
   };
   const input = buildSegmentationPageText(page);
   assert.ok(input.includes('lead="Open Compute Project (OCP) Microscaling."'));
+}
+
+{
+  const page = {
+    pageNumber: 17,
+    width: 612,
+    height: 792,
+    blocks: [
+      {
+        text: "M2XFP: A Metadata-Augmented Microscaling Data Format for Efficient Low-bit Quantization",
+        x: 54,
+        y: 47,
+        width: 307,
+        height: 10,
+        column: 1,
+        lineCount: 1,
+      },
+      {
+        text: "[68] Hanmei Yang, Summer Deng, Amit Nagpal, Maxim Naumov, Mohammad Janani, Tongping Liu, and Hui Guan. 2025. An Empirical Study of Microscaling Formats for Low-Precision Training and Inference. arXiv preprint.",
+        x: 54,
+        y: 73,
+        width: 242,
+        height: 151,
+        column: 1,
+        lineCount: 16,
+      },
+    ],
+  };
+  assert.equal(buildSegmentationPageText(page).includes("Hanmei Yang"), false);
+  const recoverable = getRecoverableFilteredPageBlocks(page);
+  assert.equal(recoverable.length, 1);
+  assert.equal(recoverable[0].filteredReason, "bibliography");
+  assert.match(recoverable[0].text, /Hanmei Yang/);
+}
+
+{
+  const page = {
+    pageNumber: 1,
+    width: 612,
+    height: 792,
+    visualRegions: [
+      { visualType: "figure", x: 50, y: 100, width: 480, height: 180, pageWidth: 612, pageHeight: 792 },
+    ],
+    blocks: [
+      {
+        text: "Alice Research alice@example.com Bob University bob@example.edu",
+        x: 72,
+        y: 120,
+        width: 420,
+        height: 44,
+        lineCount: 2,
+      },
+      {
+        text: "Code and dataset: https://github.com/example/project and https://www.kaggle.com/datasets/example/paperlens",
+        x: 72,
+        y: 310,
+        width: 420,
+        height: 34,
+        lineCount: 2,
+      },
+    ],
+  };
+  const recoverable = getRecoverableFilteredPageBlocks(page);
+  assert.equal(recoverable.some((block) => /alice@example/.test(block.text)), false);
+  assert.equal(recoverable.length, 1);
+  assert.equal(recoverable[0].filteredReason, "resource-link");
+  assert.match(recoverable[0].text, /github.com/);
+}
+
+{
+  const page = {
+    pageNumber: 6,
+    width: 612,
+    height: 792,
+    visualRegions: [
+      { visualType: "figure", x: 48, y: 100, width: 500, height: 210, pageWidth: 612, pageHeight: 792 },
+    ],
+    blocks: [
+      {
+        text: "Definition 1. Microscaling defines a block floating-point format where k scalar elements share one exponent scale.",
+        x: 72,
+        y: 124,
+        width: 410,
+        height: 38,
+        lineCount: 2,
+      },
+      {
+        text: "Key Takeaway. The E8M0 scale is hardware-friendly but limits mantissa precision.",
+        x: 72,
+        y: 174,
+        width: 400,
+        height: 24,
+        lineCount: 1,
+      },
+      {
+        text: "Figure 3. The microscaling pipeline.",
+        x: 72,
+        y: 226,
+        width: 260,
+        height: 20,
+        lineCount: 1,
+      },
+    ],
+  };
+  const input = buildSegmentationPageText(page);
+  assert.ok(input.includes("Definition 1."));
+  assert.ok(input.includes("Key Takeaway."));
+  assert.equal(input.includes("Figure 3."), false);
+
+  const recoverable = getRecoverableFilteredPageBlocks(page);
+  assert.equal(recoverable.some((block) => /Definition 1/.test(block.text)), false);
+  assert.equal(recoverable.some((block) => /Key Takeaway/.test(block.text)), false);
+  assert.ok(recoverable.some((block) => block.filteredReason === "caption" && /Figure 3/.test(block.text)));
 }

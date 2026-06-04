@@ -469,7 +469,7 @@
           {
             "page": 1,
             "includes": "Reviewed on OpenReview",
-            "reason": "standalone-link"
+            "reason": "resource-link"
           },
           {
             "page": 2,

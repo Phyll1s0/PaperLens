@@ -201,6 +201,26 @@ const paper = {
       sourceText: "This ordinary paragraph lacks a source box, which makes visual debugging and page anchoring weaker.",
       analysisStatus: "pending",
     },
+    {
+      id: "p6",
+      kind: "paragraph",
+      order: 5,
+      sectionId: "s1",
+      pageNumber: 2,
+      sourceBox: { x: 72, y: 680, width: 420, height: 34 },
+      sourceText: "[2] Jane Roe. Recoverable filtered bibliography entry. arXiv preprint arXiv:2501.00001, 2025.",
+      hidden: true,
+      analysisEligible: false,
+      segmentationNoise: {
+        reasons: ["recoverable-filtered-block", "bibliography"],
+      },
+      recoverableFilteredBlock: {
+        reason: "bibliography",
+        originalIndex: 3,
+        source: "segmentation-input-filter",
+      },
+      analysisStatus: "done",
+    },
   ],
 };
 
@@ -209,7 +229,8 @@ assert.equal(report.generatedAt, fixedNow.toISOString());
 assert.equal(report.summary.pages, 2);
 assert.equal(report.summary.extractionBlocks, 11);
 assert.equal(report.summary.droppedBlocks, 7);
-assert.equal(report.summary.paragraphsWithNoise, 1);
+assert.equal(report.summary.paragraphsWithNoise, 2);
+assert.equal(report.summary.recoverableFilteredParagraphs, 1);
 assert.equal(report.summary.paperMemoryAvailable, true);
 assert.equal(report.summary.paperMemoryResources, 1);
 assert.equal(report.summary.paperMemoryFormulas, 1);
@@ -224,10 +245,11 @@ assert.equal(report.paperMemory.resources[0].url, "https://github.com/example/pr
 assert.equal(report.paperMemory.formulas[0].pageNumber, 2);
 assert.ok(report.paperMemory.nonReadingGuidance[0].includes("Author block"));
 
-assert.equal(report.issueSummary.total, 12);
+assert.equal(report.issueSummary.total, 14);
 assert.equal(findIssueCategory(report, "author").count, 2);
 assert.equal(findIssueCategory(report, "caption").count, 2);
-assert.equal(findIssueCategory(report, "references").count, 2);
+assert.equal(findIssueCategory(report, "references").count, 3);
+assert.equal(findIssueCategory(report, "recoverable-filtered").count, 1);
 assert.equal(findIssueCategory(report, "diagram").count, 1);
 assert.equal(findIssueCategory(report, "table").count, 1);
 assert.equal(findIssueCategory(report, "cross-page").count, 1);
@@ -235,6 +257,12 @@ assert.equal(findIssueCategory(report, "short-fragment").count, 1);
 assert.equal(findIssueCategory(report, "missing-source-box").count, 1);
 assert.equal(findIssueCategory(report, "diagram").samples[0].source, "block");
 assert.equal(findIssueCategory(report, "cross-page").samples[0].paragraphId, "p3");
+assert.equal(findIssueCategory(report, "recoverable-filtered").samples[0].paragraphId, "p6");
+
+const limitedReport = buildPaperSegmentationDebugReport(paper, { now: () => fixedNow, maxParagraphs: 5 });
+assert.equal(limitedReport.summary.paragraphLimitReached, false);
+assert.ok(limitedReport.paragraphs.some((item) => item.id === "p6"));
+assert.equal(findIssueCategory(limitedReport, "recoverable-filtered").count, 1);
 
 const pageOne = report.pages[0];
 assert.equal(pageOne.imagePath, "/assets/debug_fixture/page-001.png");
@@ -267,6 +295,28 @@ const standaloneBlock = buildSegmentationBlockDebug({
 }, { pageNumber: 3 });
 assert.equal(standaloneBlock.decision, "drop");
 assert.ok(standaloneBlock.reasons.includes("standalone-link"));
+
+const resourceLinkBlock = buildSegmentationBlockDebug({
+  text: "Code and dataset: https://github.com/example/project and https://www.kaggle.com/datasets/example/paperlens",
+  x: 10,
+  y: 40,
+  width: 360,
+  height: 30,
+  lineCount: 2,
+}, { pageNumber: 3 });
+assert.equal(resourceLinkBlock.decision, "drop");
+assert.ok(resourceLinkBlock.reasons.includes("resource-link"));
+
+const semanticLeadInBlock = buildSegmentationBlockDebug({
+  text: "Definition 1. Microscaling defines a block floating-point format where k scalar elements share one exponent scale.",
+  x: 20,
+  y: 80,
+  width: 360,
+  height: 34,
+  lineCount: 2,
+}, { pageNumber: 3 });
+assert.equal(semanticLeadInBlock.decision, "keep");
+assert.ok(semanticLeadInBlock.tags.includes("semantic-lead-in"));
 
 const diagramLabelBlock = buildSegmentationBlockDebug({
   text: "Raw PDF\nText Blocks\nNoise Filter\nAI Segmenter\nParagraph Queue",

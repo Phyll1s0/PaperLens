@@ -64,6 +64,7 @@ import {
   buildSegmentationPageText as buildSegmentationPageInputText,
   extractTextBlocks as extractSegmentationTextBlocks,
   getReadablePageBlocks as getSegmentationReadablePageBlocks,
+  getRecoverableFilteredPageBlocks as getSegmentationRecoverableFilteredPageBlocks,
   normalizeReadableBlockText as normalizeSegmentationReadableBlockText,
 } from "./lib/segmentation-page-input.js";
 import {
@@ -5766,6 +5767,8 @@ function splitIntoParagraphs(pages) {
     }
   }
 
+  appendRecoverableFilteredParagraphs(paragraphs, pages);
+
   paragraphs.forEach((paragraph, index) => {
     paragraph.order = index;
   });
@@ -5785,6 +5788,169 @@ function buildParagraphSourceRichText(sourceText, block = null) {
     fields.sourceLeadInSource = leadIn.source || "";
   }
   return fields;
+}
+
+function appendRecoverableFilteredParagraphs(paragraphs, pages, structureMap = null, options = {}) {
+  if (!Array.isArray(paragraphs) || !Array.isArray(pages) || !pages.length) {
+    return paragraphs;
+  }
+
+  const additions = [];
+  for (const page of pages) {
+    const blocks = getSegmentationRecoverableFilteredPageBlocks(page, {
+      paperMemory: options.paperMemory,
+    });
+    for (const block of blocks) {
+      const sourceText = normalizeReadableBlockText(block.text || block.rawText || "");
+      if (!sourceText || isRecoverableFilteredBlockCovered([...paragraphs, ...additions], block, sourceText)) {
+        continue;
+      }
+      additions.push(createRecoverableFilteredParagraph(paragraphs.length + additions.length, page, block, sourceText, structureMap));
+    }
+  }
+
+  for (const paragraph of additions.sort(compareRecoverableFilteredParagraphs)) {
+    const insertIndex = findRecoverableParagraphInsertIndex(paragraphs, paragraph);
+    paragraphs.splice(insertIndex + 1, 0, paragraph);
+  }
+
+  paragraphs.forEach((paragraph, index) => {
+    paragraph.order = index;
+  });
+  return paragraphs;
+}
+
+function createRecoverableFilteredParagraph(order, page, block, sourceText, structureMap = null) {
+  const pageNumber = Number(page?.pageNumber || block?.pageNumber || 1);
+  const sourceBox = pickBlockBox(block);
+  const plannedSection = resolveSegmentationPlanSection({
+    pageNumber,
+    pageEndNumber: pageNumber,
+    sourceText,
+  }, structureMap);
+  const sourceRichText = buildParagraphSourceRichText(sourceText, block);
+  const filteredReason = String(block.filteredReason || "filtered");
+  return {
+    id: `para_${order}_${randomUUID().slice(0, 8)}`,
+    kind: "paragraph",
+    order,
+    pageNumber,
+    pageEndNumber: pageNumber,
+    sourceBox,
+    sectionId: "section_0",
+    sectionTitleHint: filteredReason === "bibliography" ? "References" : "Filtered page content",
+    plannedSectionId: plannedSection?.id || "",
+    segmentationRole: normalizeSegmentationRole(plannedSection?.role || ""),
+    contextKeywords: [],
+    continuesFromPrevious: false,
+    continuesToNext: false,
+    sourceText,
+    ...sourceRichText,
+    translation: "",
+    explanation: "",
+    keyTerms: [],
+    relatedArtifactIds: [],
+    chatMessages: [],
+    hidden: true,
+    analysisEligible: false,
+    analysisStatus: "done",
+    analysisError: "",
+    segmentationNoise: {
+      version: 1,
+      action: "skip-analysis",
+      confidence: "high",
+      reasons: ["recoverable-filtered-block", filteredReason].filter(Boolean),
+    },
+    recoverableFilteredBlock: {
+      reason: filteredReason,
+      originalIndex: Number.isFinite(Number(block.originalIndex)) ? Number(block.originalIndex) : null,
+      source: "segmentation-input-filter",
+    },
+  };
+}
+
+function isRecoverableFilteredBlockCovered(paragraphs, block, sourceText) {
+  const pageNumber = Number(block?.pageNumber || 0);
+  const candidate = normalizeRecoverableCoverageText(sourceText);
+  if (!candidate) {
+    return true;
+  }
+
+  return paragraphs.some((paragraph) => {
+    const start = Number(paragraph.pageNumber || 0);
+    const end = Number(paragraph.pageEndNumber || start);
+    if (pageNumber && start && !rangesOverlap(start, end, pageNumber, pageNumber)) {
+      return false;
+    }
+    return recoverableCoverageMatches(normalizeRecoverableCoverageText(paragraph.sourceText || ""), candidate);
+  });
+}
+
+function compareRecoverableFilteredParagraphs(a, b) {
+  const pageDiff = Number(a.pageNumber || 0) - Number(b.pageNumber || 0);
+  if (pageDiff) {
+    return pageDiff;
+  }
+  const aBox = a.sourceBox || {};
+  const bBox = b.sourceBox || {};
+  const yDiff = Number(aBox.y || 0) - Number(bBox.y || 0);
+  if (Math.abs(yDiff) > 2) {
+    return yDiff;
+  }
+  return Number(aBox.x || 0) - Number(bBox.x || 0);
+}
+
+function findRecoverableParagraphInsertIndex(paragraphs, addition) {
+  const pageNumber = Number(addition.pageNumber || 0);
+  const addBox = addition.sourceBox || {};
+  const addY = Number(addBox.y || 0);
+  const addX = Number(addBox.x || 0);
+  let insertIndex = -1;
+
+  for (const [index, paragraph] of paragraphs.entries()) {
+    const start = Number(paragraph.pageNumber || 0);
+    const end = Number(paragraph.pageEndNumber || start);
+    if (end < pageNumber) {
+      insertIndex = index;
+      continue;
+    }
+    if (start > pageNumber) {
+      break;
+    }
+
+    const box = paragraph.sourceBox || {};
+    const y = Number(box.y || 0);
+    const x = Number(box.x || 0);
+    if (!paragraph.sourceBox || y < addY - 2 || Math.abs(y - addY) <= 2 && x <= addX) {
+      insertIndex = index;
+    }
+  }
+
+  return insertIndex;
+}
+
+function normalizeRecoverableCoverageText(text) {
+  return normalizeParagraph(text)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function recoverableCoverageMatches(existing, candidate) {
+  if (!existing || !candidate) {
+    return false;
+  }
+  if (existing === candidate) {
+    return true;
+  }
+  const minLength = Math.min(existing.length, candidate.length);
+  if (minLength < 36) {
+    return false;
+  }
+  const candidateProbe = candidate.slice(0, Math.min(160, Math.max(36, Math.floor(candidate.length * 0.7))));
+  const existingProbe = existing.slice(0, Math.min(160, Math.max(36, Math.floor(existing.length * 0.7))));
+  return existing.includes(candidateProbe) || candidate.includes(existingProbe);
 }
 
 function appendParagraph(paragraphs, paragraph) {
@@ -8946,7 +9112,7 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
     structureMap,
     { pageMetrics: buildSegmentationPageMetrics(pages) },
   );
-  const paragraphs = validation.paragraphs;
+  const paragraphs = appendRecoverableFilteredParagraphs(validation.paragraphs, pages, structureMap, { paperMemory });
   const readingCount = paragraphs.filter((paragraph) => isReadingParagraph(paragraph)).length;
 
   if (readingCount < 3) {
@@ -11293,7 +11459,8 @@ async function loadPaper(paperId) {
   const upgradedArtifacts = upgradePaperArtifacts(paper);
   const upgradedContext = upgradePaperContextProfile(paper);
   const upgradedSourceMarkdown = upgradePaperSourceMarkdown(paper);
-  if (upgradedArtifacts || upgradedContext || upgradedSourceMarkdown) {
+  const upgradedRecoverableBlocks = upgradePaperRecoverableFilteredParagraphs(paper);
+  if (upgradedArtifacts || upgradedContext || upgradedSourceMarkdown || upgradedRecoverableBlocks) {
     await savePaper(paper);
   }
   enrichPaperParagraphLocations(paper);
@@ -11336,6 +11503,28 @@ function upgradePaperSourceMarkdown(paper) {
   }
 
   return changed;
+}
+
+function upgradePaperRecoverableFilteredParagraphs(paper) {
+  if (!Array.isArray(paper?.paragraphs) || !Array.isArray(paper?.extractionPages) || !paper.extractionPages.length) {
+    return false;
+  }
+
+  const originalCount = paper.paragraphs.length;
+  paper.paragraphs = paper.paragraphs.filter((paragraph) => !isAutoRecoverableFilteredParagraph(paragraph));
+  const before = paper.paragraphs.length;
+  appendRecoverableFilteredParagraphs(paper.paragraphs, paper.extractionPages, paper.structureMap, {
+    paperMemory: paper.paperMemory,
+  });
+  return paper.paragraphs.length !== originalCount || paper.paragraphs.length !== before;
+}
+
+function isAutoRecoverableFilteredParagraph(paragraph) {
+  return Boolean(
+    paragraph?.recoverableFilteredBlock &&
+      paragraph.recoverableFilteredBlock.source === "segmentation-input-filter" &&
+      paragraph.analysisEligible === false
+  );
 }
 
 function findSourceBlockForParagraph(paper, paragraph, sourceText) {

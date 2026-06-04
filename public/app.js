@@ -22,6 +22,9 @@ const state = {
   visualQaFilter: "issues",
   modelDiagnosticReport: null,
   lastSegmentationError: "",
+  sidebarCollapsed: sessionStorage.getItem("paperlens-sidebar-collapsed") === "1",
+  toolbarCollapsed: sessionStorage.getItem("paperlens-toolbar-collapsed") === "1",
+  historyOpen: false,
   progressTimer: null,
   lastProgressParagraphId: "",
   pendingChatMessages: new Map(),
@@ -79,6 +82,8 @@ const state = {
 };
 
 const els = {
+  appShell: document.querySelector(".app-shell"),
+  readerToolbar: document.querySelector(".reader-toolbar"),
   authOverlay: document.querySelector("#authOverlay"),
   authForm: document.querySelector("#authForm"),
   authTokenInput: document.querySelector("#authTokenInput"),
@@ -113,6 +118,16 @@ const els = {
   librarySearchInput: document.querySelector("#librarySearchInput"),
   favoriteOnlyInput: document.querySelector("#favoriteOnlyInput"),
   rebuildAllVisualButton: document.querySelector("#rebuildAllVisualButton"),
+  sidebarCollapseButton: document.querySelector("#sidebarCollapseButton"),
+  sidebarToggleButton: document.querySelector("#sidebarToggleButton"),
+  toolbarToggleButton: document.querySelector("#toolbarToggleButton"),
+  historyToggleButton: document.querySelector("#historyToggleButton"),
+  historyCloseButton: document.querySelector("#historyCloseButton"),
+  historyPanel: document.querySelector("#historyPanel"),
+  historyCountBadge: document.querySelector("#historyCountBadge"),
+  historyPanelSummary: document.querySelector("#historyPanelSummary"),
+  compactPaperTitle: document.querySelector("#compactPaperTitle"),
+  compactPaperStats: document.querySelector("#compactPaperStats"),
   paperList: document.querySelector("#paperList"),
   paperMeta: document.querySelector("#paperMeta"),
   paperTitle: document.querySelector("#paperTitle"),
@@ -215,6 +230,11 @@ function bindEvents() {
     loginWithAccessToken();
   });
   els.uploadButton.addEventListener("click", uploadPdf);
+  els.sidebarCollapseButton.addEventListener("click", () => setSidebarCollapsed(true));
+  els.sidebarToggleButton.addEventListener("click", () => setSidebarCollapsed(!state.sidebarCollapsed));
+  els.toolbarToggleButton.addEventListener("click", () => setToolbarCollapsed(!state.toolbarCollapsed));
+  els.historyToggleButton.addEventListener("click", () => setHistoryOpen(!state.historyOpen));
+  els.historyCloseButton.addEventListener("click", () => setHistoryOpen(false));
   els.pingButton.addEventListener("click", pingModel);
   els.diagnosticButton.addEventListener("click", generateModelDiagnosticReport);
   els.copyDiagnosticButton.addEventListener("click", copyModelDiagnosticReport);
@@ -288,6 +308,20 @@ function bindEvents() {
       checkServiceVersion();
     }
   });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.historyOpen) {
+      setHistoryOpen(false);
+    }
+  });
+  document.addEventListener("click", (event) => {
+    if (!state.historyOpen) {
+      return;
+    }
+    if (els.historyPanel?.contains(event.target) || els.historyToggleButton?.contains(event.target)) {
+      return;
+    }
+    setHistoryOpen(false);
+  });
 
   for (const input of [els.baseUrlInput, els.modelInput, els.apiKeyInput, els.agentBudgetInput, els.taskBudgetInput, els.proxyUrlInput]) {
     input.addEventListener("input", () => {
@@ -305,8 +339,46 @@ function bindEvents() {
   }
 }
 
+function setSidebarCollapsed(collapsed) {
+  state.sidebarCollapsed = Boolean(collapsed);
+  sessionStorage.setItem("paperlens-sidebar-collapsed", state.sidebarCollapsed ? "1" : "0");
+  applyLayoutState();
+}
+
+function setToolbarCollapsed(collapsed) {
+  state.toolbarCollapsed = Boolean(collapsed);
+  sessionStorage.setItem("paperlens-toolbar-collapsed", state.toolbarCollapsed ? "1" : "0");
+  applyLayoutState();
+}
+
+function setHistoryOpen(open) {
+  state.historyOpen = Boolean(open);
+  applyLayoutState();
+}
+
+function applyLayoutState() {
+  els.appShell?.classList.toggle("sidebar-collapsed", state.sidebarCollapsed);
+  els.readerToolbar?.classList.toggle("toolbar-collapsed", state.toolbarCollapsed);
+  els.historyPanel?.classList.toggle("open", state.historyOpen);
+  els.historyPanel?.setAttribute("aria-hidden", state.historyOpen ? "false" : "true");
+  els.historyToggleButton?.setAttribute("aria-expanded", state.historyOpen ? "true" : "false");
+
+  if (els.sidebarToggleButton) {
+    els.sidebarToggleButton.textContent = state.sidebarCollapsed ? "打开侧栏" : "收起侧栏";
+    els.sidebarToggleButton.setAttribute("aria-pressed", state.sidebarCollapsed ? "true" : "false");
+  }
+  if (els.sidebarCollapseButton) {
+    els.sidebarCollapseButton.setAttribute("aria-pressed", state.sidebarCollapsed ? "true" : "false");
+  }
+  if (els.toolbarToggleButton) {
+    els.toolbarToggleButton.textContent = state.toolbarCollapsed ? "展开顶部" : "收起顶部";
+    els.toolbarToggleButton.setAttribute("aria-pressed", state.toolbarCollapsed ? "true" : "false");
+  }
+}
+
 async function initializeApp() {
   renderAuthGate();
+  applyLayoutState();
   updateModelDiagnostics();
   updateAutoButtons();
 
@@ -2662,13 +2734,27 @@ function renderJobHistory() {
     return;
   }
 
+  const count = state.paper ? state.jobHistory.length : 0;
+  if (els.historyCountBadge) {
+    els.historyCountBadge.textContent = String(count);
+    els.historyCountBadge.classList.toggle("empty", count === 0);
+  }
+  if (els.historyPanelSummary) {
+    els.historyPanelSummary.textContent = state.paper
+      ? count ? `${count} 条任务记录` : "暂无任务记录"
+      : "未载入论文";
+  }
+
   if (!state.paper || !state.jobHistory.length) {
-    els.jobHistory.replaceChildren();
+    const empty = document.createElement("p");
+    empty.className = "history-empty";
+    empty.textContent = state.paper ? "当前论文暂无任务历史。" : "载入论文后显示任务历史。";
+    els.jobHistory.replaceChildren(empty);
     return;
   }
 
   const fragment = document.createDocumentFragment();
-  for (const job of state.jobHistory.slice(0, 3)) {
+  for (const job of state.jobHistory.slice(0, 12)) {
     const item = document.createElement("div");
     item.className = `job-history-item ${job.status}`;
 
@@ -2694,6 +2780,15 @@ function renderJobHistory() {
   }
 
   els.jobHistory.replaceChildren(fragment);
+}
+
+function syncCompactPaperSummary(title, stats) {
+  if (els.compactPaperTitle) {
+    els.compactPaperTitle.textContent = title || "选择一篇 PDF";
+  }
+  if (els.compactPaperStats) {
+    els.compactPaperStats.textContent = stats || "段落会显示在这里";
+  }
 }
 
 function getJobTypeLabel(type) {
@@ -2943,6 +3038,7 @@ function renderPaper() {
     els.paperLibraryControls.classList.add("hidden");
     els.paragraphList.innerHTML = "";
     els.outline.innerHTML = "";
+    syncCompactPaperSummary("选择一篇 PDF", "段落会显示在这里");
     updateAutoButtons();
     return;
   }
@@ -2963,6 +3059,7 @@ function renderPaper() {
   els.paperStats.textContent = ocrRequired
     ? `${paper.pageCount || 0} 页 · 需要 OCR · 已生成 ${paper.ocr?.pageImageCount || paper.pageImages?.length || 0} 张页图`
     : `${readingParagraphs.length} 个段落 · 讲解 ${analyzedCount}/${readingParagraphs.length} · 阅读 ${progress}% · ${segmentLabel}${hiddenParagraphCount ? ` · 隐藏 ${hiddenParagraphCount}` : ""}${visualLabel ? ` · ${visualLabel}` : ""}${exportLabel}`;
+  syncCompactPaperSummary(els.paperTitle.textContent, els.paperStats.textContent);
   els.paperLibraryControls.classList.remove("hidden");
   els.favoriteButton.textContent = paper.favorite ? "★" : "☆";
   els.favoriteButton.setAttribute("aria-pressed", paper.favorite ? "true" : "false");
@@ -4745,6 +4842,7 @@ function getSegmentationDebugSummaryItems(summary) {
     { label: "丢弃", value: summary.droppedBlocks || 0 },
     { label: "段落", value: summary.paragraphs || 0 },
     { label: "噪声段", value: summary.paragraphsWithNoise || 0 },
+    { label: "可恢复", value: summary.recoverableFilteredParagraphs || 0 },
     { label: "有坐标", value: summary.paragraphsWithSourceBox || 0 },
     { label: "章节", value: summary.sections || 0 },
     { label: "Memory", value: summary.paperMemoryAvailable ? "有" : "无" },
@@ -4834,10 +4932,7 @@ function renderSegmentationDebugIssueSample(sample, result) {
       return;
     }
     if (sample.paragraphId) {
-      document.querySelector(`#${CSS.escape(sample.paragraphId)}`)?.scrollIntoView({
-        behavior: "smooth",
-        block: "center",
-      });
+      revealAndScrollToParagraph(sample.paragraphId);
     }
   });
 
@@ -4886,6 +4981,34 @@ function renderSegmentationDebugIssueSampleActions(sample) {
   return actions;
 }
 
+function revealAndScrollToParagraph(paragraphId) {
+  if (!paragraphId) {
+    return;
+  }
+
+  const paragraph = getParagraphById(paragraphId);
+  const hiddenByFilter = paragraph && !isReadingParagraph(state.paper, paragraph);
+  if (hiddenByFilter && !state.showHiddenParagraphs) {
+    state.showHiddenParagraphs = true;
+    renderPaperPreservingViewport();
+    window.requestAnimationFrame(() => {
+      scrollToParagraphElement(paragraphId);
+      window.setTimeout(() => scrollToParagraphElement(paragraphId), 80);
+      window.setTimeout(() => scrollToParagraphElement(paragraphId), 220);
+    });
+    return;
+  }
+
+  scrollToParagraphElement(paragraphId);
+}
+
+function scrollToParagraphElement(paragraphId) {
+  document.querySelector(`#${CSS.escape(paragraphId)}`)?.scrollIntoView({
+    behavior: "smooth",
+    block: "center",
+  });
+}
+
 function createSegmentationSampleAction(label, title, onClick, options = {}) {
   const button = document.createElement("button");
   button.type = "button";
@@ -4921,6 +5044,7 @@ function getSegmentationDebugSyntheticReasonLabel(reason) {
     "cross-page": "跨页段落。",
     "short-fragment": "短碎片。",
     "missing-source-box": "缺少页图定位坐标。",
+    "recoverable-filtered-block": "已过滤但作为隐藏段落保留。",
   };
   return labels[reason] || "";
 }
