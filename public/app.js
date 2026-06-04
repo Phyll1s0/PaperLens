@@ -3132,6 +3132,9 @@ function renderOcrRequiredNotice(paper) {
   jobBody.textContent = getOcrStatusBody(paper);
   jobStatus.append(jobTitle, jobBody);
 
+  const languageControl = renderOcrLanguageControl(paper);
+  const qualityDetails = renderOcrQualityDetails(paper);
+
   const actions = document.createElement("div");
   actions.className = "ocr-actions";
   const ocrButton = document.createElement("button");
@@ -3174,8 +3177,96 @@ function renderOcrRequiredNotice(paper) {
   const note = document.createElement("p");
   note.textContent = "Docker 镜像会内置 OCRmyPDF、Tesseract 英文和简体中文语言包；中文论文可设置 PAPERLENS_OCR_LANGUAGE=eng+chi_sim。";
 
-  notice.append(title, summary, jobStatus, actions, steps, commands, note);
+  notice.append(title, summary, jobStatus, languageControl);
+  if (qualityDetails) {
+    notice.append(qualityDetails);
+  }
+  notice.append(actions, steps, commands, note);
   return notice;
+}
+
+function renderOcrLanguageControl(paper) {
+  const ocr = paper.ocr || {};
+  const field = document.createElement("label");
+  field.className = "ocr-language-field";
+  const label = document.createElement("span");
+  label.textContent = "OCR 语言";
+
+  const select = document.createElement("select");
+  select.dataset.ocrLanguage = "true";
+  select.disabled = state.ocrJob.running || state.pipelineBusy;
+
+  const recommended = normalizeOcrLanguageValue(ocr.recommendedLanguage || ocr.detectedLanguage || ocr.language || "eng");
+  const current = normalizeOcrLanguageValue(ocr.language || recommended);
+  const options = [
+    { value: "auto", label: recommended ? `自动推荐 (${recommended})` : "自动推荐" },
+    { value: "eng", label: "英文 eng" },
+    { value: "eng+chi_sim", label: "中英混排 eng+chi_sim" },
+    { value: "chi_sim", label: "简体中文 chi_sim" },
+    { value: "jpn", label: "日文 jpn" },
+    { value: "kor", label: "韩文 kor" },
+  ];
+
+  if (current && !options.some((option) => option.value === current)) {
+    options.push({ value: current, label: current });
+  }
+
+  for (const option of options) {
+    const item = document.createElement("option");
+    item.value = option.value;
+    item.textContent = option.label;
+    select.append(item);
+  }
+  select.value = current || "auto";
+
+  field.append(label, select);
+  return field;
+}
+
+function renderOcrQualityDetails(paper) {
+  const ocr = paper.ocr || {};
+  const warnings = Array.isArray(ocr.qualityWarnings)
+    ? ocr.qualityWarnings
+    : Array.isArray(ocr.quality?.warnings) ? ocr.quality.warnings : [];
+  const quality = ocr.quality || {};
+  const details = document.createElement("div");
+  details.className = "ocr-quality";
+
+  const score = Number.isFinite(Number(ocr.qualityScore || quality.score))
+    ? `质量 ${Number(ocr.qualityScore || quality.score)}/100`
+    : "质量待检测";
+  const density = quality.textDensity || {};
+  const densityText = Number.isFinite(Number(density.charsPerPage))
+    ? `每页约 ${Number(density.charsPerPage)} 字`
+    : "";
+  const languageText = ocr.recommendedLanguage
+    ? `推荐语言 ${ocr.recommendedLanguage}`
+    : "";
+
+  const summary = document.createElement("span");
+  summary.textContent = [score, densityText, languageText].filter(Boolean).join(" · ");
+  details.append(summary);
+
+  if (warnings.length) {
+    const list = document.createElement("ul");
+    for (const warning of warnings.slice(0, 4)) {
+      const item = document.createElement("li");
+      item.textContent = warning.message || warning.code || "OCR 质量风险";
+      item.dataset.severity = warning.severity || "warning";
+      list.append(item);
+    }
+    details.append(list);
+  }
+
+  return details;
+}
+
+function normalizeOcrLanguageValue(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_+]/g, "")
+    .slice(0, 80);
 }
 
 function getOcrStatusTitle(paper) {
@@ -3205,10 +3296,15 @@ async function startOcrJob() {
     return;
   }
 
+  const language = getSelectedOcrLanguage();
   setStatus("正在创建本机 OCR 任务");
   try {
     const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}/ocr-jobs`, {
       method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ language }),
     }, "创建 OCR 任务");
     const result = await readResponse(response);
     if (result.paper) {
@@ -3226,6 +3322,11 @@ async function startOcrJob() {
   } catch (error) {
     setStatus(error.message, true);
   }
+}
+
+function getSelectedOcrLanguage() {
+  const selected = document.querySelector("[data-ocr-language]")?.value;
+  return normalizeOcrLanguageValue(selected || state.paper?.ocr?.language || state.paper?.ocr?.recommendedLanguage || "auto") || "auto";
 }
 
 function beginOcrJob(job) {

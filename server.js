@@ -92,6 +92,11 @@ import {
   extractPdfText,
 } from "./lib/pdf-extraction.js";
 import {
+  buildOcrQualityReport,
+  normalizeOcrLanguage,
+  resolveOcrLanguage,
+} from "./lib/ocr-quality.js";
+import {
   isLikelyBibliographyEntryText,
   isLikelyFrontMatterTitleText,
   isLikelyPageNumberOrRunningHeaderText,
@@ -403,7 +408,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && ocrJobsMatch) {
-      return await handleCreateOcrJob(res, ocrJobsMatch[1]);
+      return await handleCreateOcrJob(req, res, ocrJobsMatch[1]);
     }
 
     const activeOcrJobMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/ocr-jobs\/active$/);
@@ -1370,8 +1375,14 @@ async function handleGetActiveAnalysisJob(res, paperId) {
   return json(res, { job: job ? serializeJob(job) : null });
 }
 
-async function handleCreateOcrJob(res, paperId) {
+async function handleCreateOcrJob(req, res, paperId) {
   const paper = await loadPaper(paperId);
+  const payload = await readJson(req);
+  const language = resolveOcrLanguage(
+    payload.language || payload.ocrLanguage || paper.ocr?.language || OCR_LANGUAGE,
+    paper,
+    OCR_LANGUAGE,
+  );
   await syncJobsFromDisk();
   const existing = findActiveOcrJobForPaper(paperId);
   if (existing) {
@@ -1396,7 +1407,7 @@ async function handleCreateOcrJob(res, paperId) {
     envName: "PAPERLENS_MAX_OCR_JOB_PAGES",
   });
 
-  const job = createOcrJob({ paper });
+  const job = createOcrJob({ paper, language });
   paper.status = "needs_ocr";
   paper.segmentationMode = "ocr-required";
   paper.ocr = buildPaperOcrStatus(paper, {
@@ -1405,7 +1416,7 @@ async function handleCreateOcrJob(res, paperId) {
     reason: paper.ocr?.reason || "no-readable-text",
     detectedAt: paper.ocr?.detectedAt || new Date().toISOString(),
     jobId: job.id,
-    language: OCR_LANGUAGE,
+    language,
     queuedAt: job.createdAt,
     error: "",
   });
@@ -2570,8 +2581,9 @@ function createSegmentationJob({ paper, settings, strategy = SEGMENTATION_RETRY_
   };
 }
 
-function createOcrJob({ paper }) {
+function createOcrJob({ paper, language = OCR_LANGUAGE }) {
   const now = new Date().toISOString();
+  const ocrLanguage = normalizeOcrLanguage(language, OCR_LANGUAGE);
   return {
     id: `ocr_${Date.now()}_${randomUUID().slice(0, 8)}`,
     type: "ocr",
@@ -2582,7 +2594,9 @@ function createOcrJob({ paper }) {
     retryFailedOnly: false,
     cacheHits: 0,
     adaptiveBatchSize: null,
-    settings: {},
+    settings: {
+      ocrLanguage,
+    },
     items: [{
       paragraphId: "__ocr__",
       status: "queued",
@@ -2599,7 +2613,7 @@ function createOcrJob({ paper }) {
     phase: "queued",
     message: "等待本机 OCR 工具处理 PDF",
     ocr: {
-      language: OCR_LANGUAGE,
+      language: ocrLanguage,
     },
     error: "",
     createdAt: now,
@@ -3202,6 +3216,8 @@ function mergePaperMetadataAfterSegmentation(previousPaper, nextPaper) {
 
 async function runOcrJob(job, signal) {
   const now = new Date().toISOString();
+  const normalizedJobLanguage = normalizeOcrLanguage(job.settings?.ocrLanguage || job.ocr?.language || OCR_LANGUAGE, OCR_LANGUAGE);
+  const jobLanguage = normalizedJobLanguage === "auto" ? OCR_LANGUAGE : normalizedJobLanguage;
   const item = job.items[0] || {
     paragraphId: "__ocr__",
     status: "queued",
@@ -3226,7 +3242,7 @@ async function runOcrJob(job, signal) {
       status: "running",
       needed: true,
       jobId: job.id,
-      language: OCR_LANGUAGE,
+      language: jobLanguage,
       startedAt: job.startedAt,
       error: "",
     });
@@ -3256,17 +3272,17 @@ async function runOcrJob(job, signal) {
 
     const outputPdfPath = buildOcrOutputPdfPath(paper);
     job.phase = "ocr";
-    job.message = `OCRmyPDF 正在处理 PDF · language=${OCR_LANGUAGE}`;
+    job.message = `OCRmyPDF 正在处理 PDF · language=${jobLanguage}`;
     job.ocr = {
       ...(job.ocr || {}),
-      language: OCR_LANGUAGE,
+      language: jobLanguage,
       tool: diagnostics.version || "ocrmypdf",
       outputPdfPath,
     };
     job.updatedAt = new Date().toISOString();
     await persistJobs();
 
-    await runOcrMyPdf(paper.pdfPath, outputPdfPath, signal);
+    const ocrToolOutput = await runOcrMyPdf(paper.pdfPath, outputPdfPath, signal, jobLanguage);
 
     if (signal.aborted || job.cancelRequested) {
       throw createAbortError("OCR 任务已停止。");
@@ -3292,17 +3308,28 @@ async function runOcrJob(job, signal) {
     });
     mergePaperMetadataAfterOcr(paper, nextPaper);
     nextPaper.originalPdfPath = paper.originalPdfPath || paper.pdfPath;
+    const ocrQuality = buildOcrQualityReport(nextPaper, {
+      selectedLanguage: jobLanguage,
+      defaultLanguage: OCR_LANGUAGE,
+      toolOutput: ocrToolOutput,
+      afterOcr: true,
+    });
+    job.ocr = {
+      ...(job.ocr || {}),
+      quality: ocrQuality,
+    };
     nextPaper.ocr = buildPaperOcrStatus(nextPaper, {
       needed: false,
       status: "done",
       reason: "ocr-completed",
       detectedAt: paper.ocr?.detectedAt || new Date().toISOString(),
       jobId: job.id,
-      language: OCR_LANGUAGE,
+      language: jobLanguage,
       tool: diagnostics.version || "ocrmypdf",
       startedAt: job.startedAt,
       completedAt: new Date().toISOString(),
       outputPdfPath,
+      quality: ocrQuality,
       error: "",
     });
 
@@ -3314,11 +3341,12 @@ async function runOcrJob(job, signal) {
         reason: "ocr-produced-no-readable-text",
         detectedAt: paper.ocr?.detectedAt || new Date().toISOString(),
         jobId: job.id,
-        language: OCR_LANGUAGE,
+        language: jobLanguage,
         tool: diagnostics.version || "ocrmypdf",
         startedAt: job.startedAt,
         completedAt: new Date().toISOString(),
         outputPdfPath,
+        quality: ocrQuality,
         error: "OCR 完成后仍没有提取到可阅读文本，请检查 PDF 是否为照片质量过低、语言包是否正确，或手动 OCR 后重新上传。",
       });
       await savePaper(nextPaper);
@@ -3357,8 +3385,9 @@ async function runOcrJob(job, signal) {
       needed: true,
       reason: error.ocrReason || "ocr-failed",
       jobId: job.id,
-      language: OCR_LANGUAGE,
+      language: jobLanguage,
       completedAt: finishedAt,
+      quality: job.ocr?.quality,
       error: canceled ? "" : error.message,
     }).catch(() => {});
     await persistJobs();
@@ -3404,20 +3433,21 @@ async function getOcrToolDiagnostics() {
   }
 }
 
-async function runOcrMyPdf(inputPath, outputPath, signal) {
+async function runOcrMyPdf(inputPath, outputPath, signal, language = OCR_LANGUAGE) {
   const args = [
     "--skip-text",
     "--deskew",
     "--rotate-pages",
     "-l",
-    OCR_LANGUAGE,
+    normalizeOcrLanguage(language, OCR_LANGUAGE),
     inputPath,
     outputPath,
   ];
-  await execFileText("ocrmypdf", args, {
+  return await execFileText("ocrmypdf", args, {
     cwd: __dirname,
     timeout: OCR_TIMEOUT_MS,
     maxBuffer: 40 * 1024 * 1024,
+    includeStderr: true,
     signal,
   });
 }
@@ -5201,6 +5231,11 @@ function buildPaperOcrStatus(paper, patch = {}) {
     total + String(page.text || "").replace(/\s+/g, "").length, 0);
   const pageImages = Array.isArray(paper.pageImages) ? paper.pageImages : [];
   const readingParagraphs = getReadingParagraphs(paper);
+  const quality = patch.quality || buildOcrQualityReport(paper, {
+    selectedLanguage: patch.language || paper?.ocr?.language || OCR_LANGUAGE,
+    defaultLanguage: OCR_LANGUAGE,
+    afterOcr: patch.status === "done" || Boolean(patch.outputPdfPath),
+  });
   const status = {
     needed: Boolean(patch.needed),
     status: patch.status || "not_required",
@@ -5210,6 +5245,11 @@ function buildPaperOcrStatus(paper, patch = {}) {
     pageImageCount: pageImages.filter((page) => page.imagePath).length,
     textCharacters,
     readableParagraphCount: readingParagraphs.length,
+    detectedLanguage: quality.detectedLanguage || "",
+    recommendedLanguage: quality.recommendedLanguage || OCR_LANGUAGE,
+    qualityScore: quality.score,
+    qualityWarnings: Array.isArray(quality.warnings) ? quality.warnings : [],
+    quality,
     recommendation: "请先用 OCRmyPDF/Tesseract 生成可搜索 PDF，再重新上传 OCR 后的 PDF。",
   };
 
@@ -5233,7 +5273,9 @@ function buildPaperOcrStatus(paper, patch = {}) {
   } else if (status.status === "failed") {
     status.recommendation = "本机 OCR 未完成。请检查 OCRmyPDF/Tesseract 是否安装、语言包是否正确，或手动 OCR 后重新上传。";
   } else if (status.status === "done") {
-    status.recommendation = "OCR 已完成，PaperLens 已重新提取可阅读文本。";
+    status.recommendation = status.qualityWarnings.length
+      ? "OCR 已完成，但质量检查发现风险，建议抽查页面或换语言重跑。"
+      : "OCR 已完成，PaperLens 已重新提取可阅读文本。";
   }
 
   return status;
@@ -7088,6 +7130,7 @@ function getResourceLimitsStatus() {
     },
     ocr: {
       maxPages: MAX_OCR_JOB_PAGES,
+      defaultLanguage: OCR_LANGUAGE,
     },
     visualRebuild: {
       maxPapers: MAX_VISUAL_REBUILD_PAPERS,
@@ -9482,8 +9525,9 @@ function isLikelyHeading(line) {
 }
 
 function execFileText(command, args, options = {}) {
+  const { includeStderr = false, ...execOptions } = options;
   return new Promise((resolve, reject) => {
-    execFile(command, args, options, (error, stdout, stderr) => {
+    execFile(command, args, execOptions, (error, stdout, stderr) => {
       if (error) {
         const message = error.code === "ENOENT"
           ? `${command} 未安装或不在 PATH 中。`
@@ -9492,7 +9536,7 @@ function execFileText(command, args, options = {}) {
         return;
       }
 
-      resolve(stdout);
+      resolve(includeStderr ? [stdout, stderr].filter(Boolean).join("\n") : stdout);
     });
   });
 }

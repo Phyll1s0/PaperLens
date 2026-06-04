@@ -1636,6 +1636,53 @@ select:focus {
   overflow-wrap: anywhere;
 }
 
+.ocr-language-field {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 260px);
+  gap: 10px;
+  align-items: center;
+  color: #4b3d35;
+  font-size: 13px;
+}
+
+.ocr-language-field select {
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 9px;
+  border: 1px solid rgba(180, 83, 42, 0.22);
+  border-radius: 8px;
+  background: #ffffff;
+  color: #2d2926;
+  font: inherit;
+}
+
+.ocr-quality {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid rgba(180, 83, 42, 0.18);
+  border-radius: 8px;
+  background: #fff;
+  color: #6a5144;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ocr-quality ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.ocr-quality li[data-severity="error"] {
+  color: #9f2d20;
+}
+
+.ocr-quality li[data-severity="warning"] {
+  color: #8a4a18;
+}
+
 .ocr-actions {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

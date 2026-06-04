@@ -84,17 +84,19 @@ PAPERLENS_PROXY_URL=http://host.docker.internal:7897
 brew install ocrmypdf tesseract tesseract-lang
 ```
 
-默认 OCR 语言是英文：
+默认 OCR 语言是英文，页面的 OCR 面板也可以按单篇论文选择语言后重跑：
 
 ```text
 PAPERLENS_OCR_LANGUAGE=eng
 ```
 
-中英文混排论文可改成：
+中英文混排论文可在页面选择 `eng+chi_sim`，也可以把本机默认值改成：
 
 ```text
 PAPERLENS_OCR_LANGUAGE=eng+chi_sim
 ```
+
+OCR 完成后，PaperLens 会记录文本密度、推荐语言、页图分辨率风险和 OCRmyPDF 的倾斜/旋转提示；如果质量检查发现风险，页面会提醒你抽查或换语言重跑。
 
 ### 本机前台运行
 
