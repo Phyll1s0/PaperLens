@@ -112,6 +112,17 @@ const structureMap = {
 }
 
 {
+  const result = validateAndRepairSegmentedParagraphs([
+    paragraph("p1", "Raw PDF Text Blocks Noise Filter AI Segmenter Paragraph Queue", 3, { lineCount: 5 }),
+    paragraph("p2", "The segmentation pipeline uses page-level evidence to avoid sending figure labels into the reading queue.", 3, { lineCount: 2 }),
+  ], structureMap);
+
+  assert.deepEqual(result.paragraphs.map((item) => item.id), ["p2"]);
+  assert.equal(result.summary.removedNonReading, 1);
+  assert.equal(result.summary.qualityAudit.reasons["visual-text"], 1);
+}
+
+{
   const audit = auditSegmentedParagraphNoise(
     paragraph("p1", "The model reports MAE and RMSE as evaluation metrics, but this sentence is still a normal explanatory paragraph.", 4),
     structureMap,

@@ -193,3 +193,14 @@ const standaloneBlock = buildSegmentationBlockDebug({
 }, { pageNumber: 3 });
 assert.equal(standaloneBlock.decision, "drop");
 assert.ok(standaloneBlock.reasons.includes("standalone-link"));
+
+const diagramLabelBlock = buildSegmentationBlockDebug({
+  text: "Raw PDF\nText Blocks\nNoise Filter\nAI Segmenter\nParagraph Queue",
+  x: 60,
+  y: 180,
+  width: 150,
+  height: 120,
+  lineCount: 5,
+}, { pageNumber: 3 });
+assert.equal(diagramLabelBlock.decision, "drop");
+assert.ok(diagramLabelBlock.reasons.includes("diagram-only-text"));

@@ -106,6 +106,38 @@ const twoColumnPage = {
 
 {
   const page = {
+    pageNumber: 3,
+    width: 600,
+    height: 800,
+    blocks: [
+      {
+        text: "Raw PDF\nText Blocks\nNoise Filter\nAI Segmenter\nParagraph Queue",
+        x: 64,
+        y: 220,
+        width: 150,
+        height: 124,
+        column: 1,
+        lineCount: 5,
+      },
+      {
+        text: "The segmentation pipeline uses page-level evidence to avoid sending figure labels into the reading queue.",
+        x: 54,
+        y: 370,
+        width: 492,
+        height: 44,
+        column: 0,
+        lineCount: 2,
+      },
+    ],
+  };
+  const input = buildSegmentationPageText(page);
+  assert.equal(input.includes("Raw PDF"), false);
+  assert.equal(input.includes("AI Segmenter"), false);
+  assert.ok(input.includes("page-level evidence"));
+}
+
+{
+  const page = {
     pageNumber: 1,
     width: 600,
     height: 800,
