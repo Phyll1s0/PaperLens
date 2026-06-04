@@ -5453,6 +5453,10 @@ function isLikelyNonReadingParagraphText(text, context = {}) {
     return true;
   }
 
+  if (isLikelyPageNumberOrRunningHeaderText(clean)) {
+    return true;
+  }
+
   if (isLikelyHeading(clean)) {
     return false;
   }
@@ -5474,6 +5478,11 @@ function isLikelyCaptionText(text) {
 function isLikelyAuthorOrAffiliationText(text, context = {}) {
   const pageNumber = Number(context.pageNumber || 0);
   const emails = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
+  const groupedEmail = /\{[^}]{2,180}\}\s*@\s*[A-Z0-9.-]+\.[A-Z]{2,}/i.test(text);
+  if (groupedEmail && pageNumber <= 2 && text.length < 1400) {
+    return true;
+  }
+
   if (emails.length >= 2 && (text.length < 520 || pageNumber <= 2 && text.length < 1400)) {
     return true;
   }
@@ -5482,7 +5491,7 @@ function isLikelyAuthorOrAffiliationText(text, context = {}) {
     return true;
   }
 
-  if (/^\{[^}]+}\s*@/i.test(text) || /\b(?:university|institute|college|department|laboratory|labs|technologies)\b/i.test(text) &&
+  if (groupedEmail || /\b(?:university|institute|college|department|laboratory|labs|technologies)\b/i.test(text) &&
     emails.length && text.length < 420) {
     return true;
   }

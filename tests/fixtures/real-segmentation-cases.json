@@ -1,0 +1,837 @@
+{
+  "version": 1,
+  "generatedFrom": "local PaperLens data snapshots",
+  "cases": [
+    {
+      "id": "m2xfp-first-pages",
+      "title": "M2XFP: A Metadata-Augmented Microscaling Data Format for Efficient Low-bit Quantization",
+      "filename": "2601.19213v2.pdf",
+      "sourcePaperId": "paper_1780542284217_d5157014",
+      "focus": "complex two-column first pages with mixed author/body block and conference metadata",
+      "pages": [
+        {
+          "pageNumber": 1,
+          "width": 612,
+          "height": 792,
+          "blocks": [
+            {
+              "text": "M2XFP: A Metadata-Augmented Microscaling Data Format for Efficient Low-bit Quantization",
+              "x": 69.682,
+              "y": 65.8165414,
+              "width": 472.6361999999999,
+              "height": 54.452758599999925,
+              "lineCount": 2,
+              "column": 0
+            },
+            {
+              "text": "Weiming Hu weiminghu@sjtu.edu.cn Shanghai Jiao Tong University Shanghai, China Shanghai Qi Zhi Institute Shanghai, China Chen Zhang∗ chenzhang.sjtu@sjtu.edu.cn Shanghai Jiao Tong University Shanghai, China Tianchi Hu hutianchi1@huawei.com Computing Product Line, Huawei Shanghai, China Junsong Wang junsongwang@huawei.com Computing Product Line, Huawei Beijing, China",
+              "x": 73.547,
+              "y": 125.48839999999996,
+              "width": 218.88316139999998,
+              "height": 250.57098820000067,
+              "lineCount": 18,
+              "column": 1
+            },
+            {
+              "text": "Abstract",
+              "x": 53.99999999999994,
+              "y": 405.9684272000007,
+              "width": 45.609088000000014,
+              "height": 16.043878399999983,
+              "lineCount": 1,
+              "column": 1
+            },
+            {
+              "text": "Existing low-bit Microscaling (MX) formats, such as MXFP4, often suffer from substantial accuracy degradation due to the use of a shared scaling factor with the Power-of-Two format. In this work, we explore strategies that introduce minimal metadata to recover accuracy lost during quantization while maintaining high bit efficiency across a wide range of large language models. We propose a complete algorithm-hardware co-design based on flexible metadata, featuring an online quantization with simple encoding. To support the proposed method efficiently, we implement a lightweight hardware unit and integrate it into the accelerarXiv:2601.19213v2 [cs.AR] 28 Jan 2026 ator. Evaluation results demonstrate that our method substantially narrows the accuracy gap, achieving on average a 70.63% reduction in accuracy loss compared to MXFP4 and a",
+              "x": 17,
+              "y": 223.24,
+              "width": 278.7301353760001,
+              "height": 367.7723882,
+              "lineCount": 15,
+              "column": 1
+            },
+            {
+              "text": "This work is licensed under a Creative Commons Attribution 4.0 International License. ASPLOS ’26, Pittsburgh, PA, USA © 2026 Copyright held by the owner/author(s). ACM ISBN 979-8-4007-2359-9/2026/03 https://doi.org/10.1145/3779212.3790185",
+              "x": 53.45,
+              "y": 654.8146375,
+              "width": 241.9451921786001,
+              "height": 62.90834929999998,
+              "lineCount": 6,
+              "column": 1
+            },
+            {
+              "text": "Zihan Zhang Haoyan Zhang tiancaizhangdaxian@sjtu.edu.cn h.y.zhang-zdy@sjtu.edu.cn Shanghai Jiao Tong University Shanghai Jiao Tong University Shanghai, China Shanghai, China Shanghai Qi Zhi Institute Shanghai, China Cong Guo Yu Feng guocong@sjtu.edu.cn y-feng@sjtu.edu.cn Shanghai Jiao Tong University Shanghai Jiao Tong University Shanghai, China Shanghai, China Guanglin Li Guipeng Hu liguanglin10@huawei.com huguipeng@huawei.com Computing Product Line, Huawei Computing Product Line, Huawei Shanghai, China Shanghai, China Jingwen Leng∗ leng-jw@sjtu.edu.cn Shanghai Jiao Tong University Shanghai, China Shanghai Qi Zhi Institute Shanghai, China 37.30% reduction relative to the latest NVFP4 on LLM benchmarks. Furthermore, our design delivers up to 1.91×speedup and 1.75×energy savings over state-of-the-art accelerators. Our code is available at https://github.com/SJTU-ReArch- Group/M2XFP_ASPLOS26. CCS Concepts:• Computer systems organization →Single instruction, multiple data; Systolic arrays; Neural networks.",
+              "x": 237.562,
+              "y": 125.48840000000018,
+              "width": 322.2210264,
+              "height": 385.7753327999998,
+              "lineCount": 40,
+              "column": 2
+            },
+            {
+              "text": "Keywords: Low-bit Quantization; Microscaling Data Formats; Hardware Acceleration ACM Reference Format: Weiming Hu, Zihan Zhang, Haoyan Zhang, Chen Zhang, Cong Guo, Yu Feng, Tianchi Hu, Guanglin Li, Guipeng Hu, Junsong Wang, and Jingwen Leng. 2026. M2XFP: A Metadata-Augmented Microscaling Data Format for Efficient Low-bit Quantization. In Proceedings of the 31st ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 (ASPLOS ’26), March 22–26, 2026, Pittsburgh, PA, USA. ACM, New York, NY, USA, 17 pages. https://doi.org/10.1145/3779212.3790185",
+              "x": 316.996,
+              "y": 514.9620749999999,
+              "width": 242.68913537600008,
+              "height": 128.88792020000002,
+              "lineCount": 11,
+              "column": 2
+            },
+            {
+              "text": "1 Introduction",
+              "x": 317.955,
+              "y": 652.6544272,
+              "width": 87.21318400000001,
+              "height": 16.04387840000001,
+              "lineCount": 1,
+              "column": 2
+            },
+            {
+              "text": "Large language models (LLMs) have grown rapidly in scale and capability, with model size emerging as a primary driver of accuracy and generalization. State-of-the-art deployments now involve hundreds of billions of parameters, such as",
+              "x": 317.955,
+              "y": 668.5130750000001,
+              "width": 240.2369408880001,
+              "height": 49.634313199999994,
+              "lineCount": 4,
+              "column": 2
+            }
+          ]
+        },
+        {
+          "pageNumber": 2,
+          "width": 612,
+          "height": 792,
+          "blocks": [
+            {
+              "text": "ASPLOS ’26, March 22–26, 2026, Pittsburgh, PA, USA",
+              "x": 53.753,
+              "y": 47.945700699999975,
+              "width": 172.68815670000004,
+              "height": 9.253286099999968,
+              "lineCount": 1,
+              "column": 1
+            },
+            {
+              "text": "This paper makes the following contributions: •We introduce a taxonomy of MX design dimensions (scaling factor, data type, metadata). Unlike prior work that primarily varies scaling factors or base data types, we perform an EBW-guided design space exploration along the under-explored metadata axis, covering both element-level and subgroup-level metadata under fixed and adaptive shared scales. •We identify an asymmetric behavior between weights and activations and propose M2XFP, a hybrid metadataaugmented MX format that uses element-level extra mantissa for activations and subgroup-level mantissa refinement with adaptive shared scales for weights. •We design a hardware-efficient accelerator integration including a top-1 decode unit, an augmented FP4×FP4 PE, and a streaming quantization engine, and show that M2XFP outperforms state-of-the-art MX accelerators in both accuracy and performance/energy at negligible area cost.",
+              "x": 327.918,
+              "y": 238.1270750000001,
+              "width": 231.99083489600002,
+              "height": 232.80231319999984,
+              "lineCount": 19,
+              "column": 2
+            },
+            {
+              "text": "2 Background",
+              "x": 317.95500000000004,
+              "y": 480.82642719999996,
+              "width": 83.80595199999999,
+              "height": 16.043878399999983,
+              "lineCount": 1,
+              "column": 2
+            },
+            {
+              "text": "2.1 Model Quantization",
+              "x": 317.95500000000004,
+              "y": 497.7909235999999,
+              "width": 112.46779140000001,
+              "height": 13.36980920000002,
+              "lineCount": 1,
+              "column": 2
+            },
+            {
+              "text": "Quantization [2, 5, 15, 20, 26, 27, 39, 43, 44, 46, 58, 64] is a widely used technique for improving computational and memory efficiency by representing parameters with fewer bits. The standard approach maps a full-precision tensor X ∈ R𝑛 to a low-precision grid via a single affine transformation. Formally, for a target integer or floating point type with 𝑘-bit codes having dynamic range [−𝑄max,𝑄max], each element is quantized as , 𝑠 = max(|X|)",
+              "x": 317.955,
+              "y": 511.62907499999994,
+              "width": 241.57551646200017,
+              "height": 122.37761940000007,
+              "lineCount": 10,
+              "column": 2
+            },
+            {
+              "text": ", (1) 𝑄max 𝑥𝑖 = round 𝑥𝑖 where 𝑠 is the per-tensor scaling factor and˜ 𝑥𝑖 is stored as a 𝑘-bit integer or floating-point value. Outliers are the primary cause of quantization error. To mitigate the impact of outliers, recent studies [11, 20, 44, 72] reduce the quantization granularity from the tensor or channel level to finer groups. This approach, known as group-wise",
+              "x": 317.557,
+              "y": 605.9520056,
+              "width": 242.1287331320001,
+              "height": 112.1953826,
+              "lineCount": 10,
+              "column": 2
+            }
+          ]
+        },
+        {
+          "pageNumber": 3,
+          "width": 612,
+          "height": 792,
+          "blocks": [
+            {
+              "text": "M2XFP: A Metadata-Augmented Microscaling Data Format for Efficient Low-bit Quantization",
+              "x": 54,
+              "y": 46.83200320000003,
+              "width": 306.97018180000015,
+              "height": 10.366983599999912,
+              "lineCount": 1,
+              "column": 1
+            },
+            {
+              "text": "OCP MX Format Microsoft Floating Point (MSFP) NVFP 8 8 8 8 8 1 4 3 × × ×",
+              "x": 58.348002643,
+              "y": 72.115875415,
+              "width": 230.40100611900002,
+              "height": 17.74759631400002,
+              "lineCount": 4,
+              "column": 1
+            },
+            {
+              "text": "Figure 1. Microscaling data format.",
+              "x": 101.21600000000001,
+              "y": 166.00507500000003,
+              "width": 145.61336160000002,
+              "height": 14.475657799999908,
+              "lineCount": 1,
+              "column": 1
+            },
+            {
+              "text": "quantization, partitions the tensor’s weights into small, fixedsize blocks (e.g., 64 or 128 values). Each block is quantized independently with its own unique scaling factor, effectively isolating the impact of any outliers within that small region.",
+              "x": 54,
+              "y": 200.3390750000001,
+              "width": 241.73073313200007,
+              "height": 49.633313199999975,
+              "lineCount": 4,
+              "column": 1
+            },
+            {
+              "text": "2.2 Microscaling Data Format",
+              "x": 54,
+              "y": 259.6919236,
+              "width": 139.37677400000004,
+              "height": 13.369809199999963,
+              "lineCount": 1,
+              "column": 1
+            },
+            {
+              "text": "Microscaling (MX) is an emerging low-bit data format widely supported by existing hardware [51, 61, 67], and has been extensively studied and applied in recent works [9, 10, 18, 22, 36, 37, 40, 41, 48–50, 54, 59, 68, 70]. In this section, we introduce the standard MX format along with several of its variants. Notably, the MX format naturally embraces groupwise quantization.",
+              "x": 53.631,
+              "y": 273.530075,
+              "width": 242.1001069726,
+              "height": 85.49931319999996,
+              "lineCount": 7,
+              "column": 1
+            },
+            {
+              "text": "ASPLOS ’26, March 22–26, 2026, Pittsburgh, PA, USA",
+              "x": 385.3108672000002,
+              "y": 46.83200320000003,
+              "width": 172.68815670000004,
+              "height": 10.366983599999912,
+              "lineCount": 1,
+              "column": 2
+            },
+            {
+              "text": "Variants of the Microscaling Format. Several variants of the MX format exist, all sharing a common feature: a shared scaling factor [12, 13]. The concept of block floating-point (BFP), also known as Microsoft Floating Point (MSFP) [12], was introduced by the Brain Project. Fig. 1 illustrates the MSFP-12 and MSFP-16 formats, where the numbers 12 and 16 refer to the combined bit widths of the scalar element and the shared scaling factor.",
+              "x": 317.656,
+              "y": 70.75507500000003,
+              "width": 242.02913537600006,
+              "height": 97.4543132,
+              "lineCount": 8,
+              "column": 2
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "dropped": [
+          {
+            "page": 1,
+            "includes": "M2XFP: A Metadata-Augmented",
+            "reason": "frontmatter-title"
+          },
+          {
+            "page": 1,
+            "includes": "Weiming Hu",
+            "reason": "author-affiliation"
+          },
+          {
+            "page": 1,
+            "includes": "ACM Reference Format",
+            "reason": "publication-metadata"
+          },
+          {
+            "page": 2,
+            "includes": "ASPLOS",
+            "reason": "empty-after-clean"
+          },
+          {
+            "page": 3,
+            "includes": "Figure 1. Microscaling data format",
+            "reason": "caption-text"
+          }
+        ],
+        "rescued": [
+          {
+            "page": 1,
+            "includes": "37.30% reduction relative to the latest NVFP4"
+          }
+        ],
+        "headings": [
+          "Abstract",
+          "1 Introduction",
+          "2 Background",
+          "2.1 Model Quantization",
+          "2.2 Microscaling Data Format"
+        ],
+        "cleanNotIncludes": [
+          {
+            "page": 1,
+            "includes": "Existing low-bit Microscaling",
+            "notIncludes": "ASPLOS"
+          }
+        ]
+      }
+    },
+    {
+      "id": "chronos-opening-pages",
+      "title": "Chronos: Learning the Language of Time Series",
+      "filename": "2024_2403.07815_Chronos.pdf",
+      "sourcePaperId": "paper_1780478535061_1283a3fd",
+      "focus": "front matter links, arXiv stamp stripping, figure caption, and continuation blocks",
+      "pages": [
+        {
+          "pageNumber": 1,
+          "width": 612,
+          "height": 792,
+          "blocks": [
+            {
+              "text": "Published in Transactions on Machine Learning Research (10/2024)",
+              "x": 72,
+              "y": 24.141149799999994,
+              "width": 296.2777614,
+              "height": 14.117004199999997,
+              "lineCount": 1,
+              "column": 0
+            },
+            {
+              "text": "Chronos: Learning the Language of Time Series",
+              "x": 72,
+              "y": 81.86951240000008,
+              "width": 378.91956170000014,
+              "height": 15.287275199999954,
+              "lineCount": 1,
+              "column": 0
+            },
+            {
+              "text": "Abdul Fatir Ansari1∗ , Lorenzo Stella1∗ , Caner Turkmen1, Xiyuan Zhang3†, Pedro Mercado1 Huibin Shen1, Oleksandr Shchur1, Syama Sundar Rangapuram1, Sebastian Pineda Arango4† Shubham Kapoor1, Jasper Zschiegner†, Danielle C. Maddix1, Hao Wang1,5†, Michael W. Mahoney2,6†, Kari Torkkola2, Andrew Gordon Wilson2,7†, Michael Bohlke-Schneider1, Yuyang Wang1 {ansarnd, stellalo}@amazon.com 1AWS AI Labs, 2Amazon Supply Chain Optimization Technologies, 3UC San Diego, 4University of Freiburg, 5Rutgers",
+              "x": 72,
+              "y": 125.35064999999997,
+              "width": 468.46987644,
+              "height": 65.37983159999976,
+              "lineCount": 6,
+              "column": 0
+            },
+            {
+              "text": "Reviewed on OpenReview: https://openreview.net/forum?id=gerNCVqqtR Code and Pretrained Models: https://github.com/amazon-science/chronos-forecasting",
+              "x": 71.99999999999997,
+              "y": 215.59151999999972,
+              "width": 380.6748703999999,
+              "height": 18.974961599999915,
+              "lineCount": 2,
+              "column": 0
+            },
+            {
+              "text": "Abstract",
+              "x": 282.625,
+              "y": 265.04509119999966,
+              "width": 46.75200511999998,
+              "height": 10.616217600000027,
+              "lineCount": 1,
+              "column": 2
+            },
+            {
+              "text": "We introduce Chronos, a simple yet effective framework for pretrained probabilistic time series models. Chronos tokenizes time series values using scaling and quantization into a fixed vocabulary and trains existing transformer-based language model architectures on these tokenized time series via the cross-entropy loss. We pretrained Chronos models based on the T5 family (ranging from 20M to 710M parameters) on a large collection of publicly available datasets, complemented by a synthetic dataset that we generated via Gaussian processes to improve generalization. In a comprehensive benchmark consisting of 42 datasets, and comprising both classical local models and deep learning methods, we show that Chronos models: (a) significantly outperform other methods on datasets that were part of the training corpus; and (b) have comparable and occasionally superior zero-shot performance on new datasets, relative to methods that were trained specifically on them. Our results demonstrate that Chronos models can leverage time series data from diverse domains to improve zero-shot accuracy on unseen forecasting tasks, positioning pretrained models as a viable tool to greatly simplify forecasting pipelines.",
+              "x": 107.86499999999997,
+              "y": 291.15814979999965,
+              "width": 396.27437385999986,
+              "height": 169.53400419999986,
+              "lineCount": 14,
+              "column": 0
+            },
+            {
+              "text": "1 Introduction",
+              "x": 71.9999999999999,
+              "y": 486.97709119999945,
+              "width": 87.04461568,
+              "height": 10.616217600000027,
+              "lineCount": 1,
+              "column": 1
+            },
+            {
+              "text": "Time series forecasting is an essential component of decision-making across various domains, including retail, energy, finance, healthcare, climate science, among others. Traditionally, forecasting has been dominated by statistical models such as ARIMA and ETS. These have served as reliable tools, at least until the recent shift arXiv:2403.07815v3 [cs.LG] 4 Nov 2024 towards deep learning techniques (Hyndman & Athanasopoulos, 2018; Benidis et al., 2022). This shift can be attributed to the availability of large and diverse time series data sources, and the emergence of operational forecasting problems (Kolassa & Januschowski, 2019) that play to the strengths of deep forecasters, i.e., the ability to extract patterns out of a large collection of time series. Despite their impressive performance, deep forecasters still operate in the standard regime of training and prediction on the same dataset. While there have been works dedicated to transfer learning (Ye & Dai, 2018) and domain adaptation (Jin et al., 2022)",
+              "x": 17,
+              "y": 212.81999999999994,
+              "width": 523.0040938599998,
+              "height": 405.3511539999996,
+              "lineCount": 10,
+              "column": 0
+            },
+            {
+              "text": "for forecasting, the field has yet to converge on a unified, general-purpose forecasting model, a goal that remains a beacon for time series researchers.",
+              "x": 71.99999999999989,
+              "y": 616.0091497999995,
+              "width": 468.0011050799998,
+              "height": 26.07200420000001,
+              "lineCount": 2,
+              "column": 0
+            },
+            {
+              "text": "The emergence of large language models (LLMs) with zero-shot learning capabilities has ignited interest in developing “foundation models” for time series. In the context of LLMs, this interest has been pursued through two main avenues: directly prompting pretrained LLMs in natural language (Gruver et al., 2023; this paper describes work performed at Amazon.",
+              "x": 71.99999999999989,
+              "y": 645.8971497999995,
+              "width": 468.00509011999964,
+              "height": 85.51104960000043,
+              "lineCount": 4,
+              "column": 0
+            }
+          ]
+        },
+        {
+          "pageNumber": 2,
+          "width": 612,
+          "height": 792,
+          "blocks": [
+            {
+              "text": "Published in Transactions on Machine Learning Research (10/2024)",
+              "x": 72,
+              "y": 24.141149799999994,
+              "width": 296.2777614,
+              "height": 14.117004199999997,
+              "lineCount": 1,
+              "column": 0
+            },
+            {
+              "text": "range of time series problems with minimal modifications. Time Series Tokenization Training Context Tokens Historical Time Series 2400 2282 2142 2310⋯ ⋯ ⋯ ⋯",
+              "x": 72,
+              "y": 301.7671498000004,
+              "width": 286.70279616000005,
+              "height": 75.08827670479957,
+              "lineCount": 8,
+              "column": 1
+            },
+            {
+              "text": "In this work, we take a step back and ask: what are the fundamental differences between a language model that predicts the next token, and a time series forecasting model that predicts the next values? Despite the apparent distinction — tokens from a finite dictionary versus values from an unbounded, usually continuous domain — both endeavors fundamentally aim to model the sequential structure of the data to predict future patterns. Shouldn’t good language models “just work” on time series? This naive question prompts us to challenge the necessity of time-series-specific modifications, and answering it led us to develop Chronos, a language modeling framework minimally adapted for time series forecasting. Chronos tokenizes time series into discrete bins through simple scaling and quantization of real values. In this way, we can train off-the-shelf language models on this “language of time series,” with no changes to the model architecture (see Figure 1 for a high-level depiction of Chronos). Remarkably, this straightforward approach proves to be effective and efficient, underscoring the potential for language model architectures to address a broad",
+              "x": 71.99999999999994,
+              "y": 170.26014980000014,
+              "width": 468.0030975999999,
+              "height": 133.6690042000003,
+              "lineCount": 11,
+              "column": 0
+            },
+            {
+              "text": "Figure 1: High-level depiction of Chronos. (Left) The input time series is scaled and quantized to obtain a sequence of tokens. (Center) The tokens are fed into a language model which may either be an encoder-decoder or a decoderonly model. The model is trained using the cross-entropy loss. (Right) During inference, we autoregressively sample tokens from the model and map them back to numerical values. Multiple trajectories are sampled to obtain a",
+              "x": 71.99999999999989,
+              "y": 528.50652,
+              "width": 468.0008284800002,
+              "height": 40.89296160000001,
+              "lineCount": 4,
+              "column": 0
+            },
+            {
+              "text": "For the development of a useful general-purpose time series forecasting model, the scarcity of publicly available time series datasets, both in quantity and quality, is arguably more critical than the modeling framework. In addition to the comprehensive collection of public datasets we used to train Chronos, a central aspect of our approach is the integration of data augmentation strategies, including TSMixup and KernelSynth. TSMixup randomly samples a set of base time series from different training datasets, and generates new time series based on a convex combination of them; KernelSynth uses Gaussian processes to generate synthetic time series by randomly composing kernel functions. These techniques address the inherent limitations of small training datasets in time series forecasting, enhancing model robustness and",
+              "x": 71.99999999999989,
+              "y": 593.1041498000001,
+              "width": 468.00509011999964,
+              "height": 97.80400420000004,
+              "lineCount": 8,
+              "column": 0
+            },
+            {
+              "text": "Our comprehensive evaluation across 42 datasets establishes Chronos as a benchmark for both in-domain and zero-shot forecasting, surpassing both traditional models and task-specific deep learning approaches.",
+              "x": 71.99999999999989,
+              "y": 706.6791498,
+              "width": 468.00182270000005,
+              "height": 26.072004199999988,
+              "lineCount": 2,
+              "column": 0
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "dropped": [
+          {
+            "page": 1,
+            "includes": "Published in Transactions",
+            "reason": "running-header"
+          },
+          {
+            "page": 1,
+            "includes": "Abdul Fatir Ansari",
+            "reason": "author-affiliation"
+          },
+          {
+            "page": 1,
+            "includes": "Reviewed on OpenReview",
+            "reason": "standalone-link"
+          },
+          {
+            "page": 2,
+            "includes": "Figure 1: High-level depiction",
+            "reason": "caption-text"
+          }
+        ],
+        "headings": [
+          "Abstract",
+          "1 Introduction"
+        ],
+        "cleanNotIncludes": [
+          {
+            "page": 1,
+            "includes": "Time series forecasting is an essential",
+            "notIncludes": "arXiv:"
+          }
+        ],
+        "continuationPairs": [
+          {
+            "left": {
+              "page": 1,
+              "includes": "domain adaptation"
+            },
+            "right": {
+              "page": 1,
+              "includes": "for forecasting, the field"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "kronos-structure-and-visual-noise",
+      "title": "Kronos: A Foundation Model for the Language of Financial Markets",
+      "filename": "2025_2508.02739_Kronos.pdf",
+      "sourcePaperId": "paper_1780469681022_c2f677dd",
+      "focus": "section boundaries, cross-page paragraph continuation, chart/table/formula noise",
+      "pages": [
+        {
+          "pageNumber": 1,
+          "width": 612,
+          "height": 792,
+          "blocks": [
+            {
+              "text": "Kronos: A Foundation Model for the Language of Financial Markets",
+              "x": 105.645,
+              "y": 106.10912200000007,
+              "width": 420.9031618,
+              "height": 12.89723379999998,
+              "lineCount": 1,
+              "column": 0
+            },
+            {
+              "text": "Yu Shi1,†, Zongliang Fu2,†, Shuo Chen1, Bohan Zhao1, Wei Xu1, Changshui Zhang2, Jian Li1 1Institute for Interdisciplinary Information Sciences, 2Department of Automation",
+              "x": 74.328,
+              "y": 131.21327220000012,
+              "width": 465.83405000000016,
+              "height": 26.744649399999957,
+              "lineCount": 2,
+              "column": 0
+            },
+            {
+              "text": "Abstract",
+              "x": 154.71500000000015,
+              "y": 230.04680599999983,
+              "width": 37.07083460000001,
+              "height": 8.956377399999951,
+              "lineCount": 1,
+              "column": 1
+            },
+            {
+              "text": "The success of large-scale pre-training paradigm, exemplified by Large Language Models (LLMs), has inspired the development of Time Series Foundation Models (TSFMs). However, their application to financial candlestick (K-line) data remains limited, often underperforming non-pre-trained architectures. Moreover, existing TSFMs often overlook crucial downstream tasks such as volatility prediction and synthetic data generation. To address these limitations, we propose Kronos, a unified, scalable pre-training framework tailored to financial K-line modeling. Kronos introduces a specialized tokenizer that discretizes continuous market information into token sequences, preserving both price dynamics and trade activity patterns. We pre-train Kronos using an autoregressive objective on a massive, multi-market corpus of over 12 billion K-line records from 45 global exchanges, enabling it to learn nuanced temporal and cross-asset representations. Kronos excels in a zero-shot setting across a diverse set of financial tasks. On benchmark datasets, Kronos boosts price series forecasting RankIC by 93% over the leading TSFM and 87% over the best non-pre-trained baseline.",
+              "x": 63.96300000000015,
+              "y": 246.78678079999986,
+              "width": 218.5772144,
+              "height": 197.30596160000016,
+              "lineCount": 20,
+              "column": 1
+            },
+            {
+              "text": "It also achieves a 9% lower MAE in volatility forecasting and a 22% improvement in generative fidelity for synthetic K-line sequences. These results establish Kronos as a robust, versatile foundation model for end-to-end financial time series analysis. Our pre-trained model is publicly available at https://github.com/shiyu-coder/Kronos.",
+              "x": 63.963000000000164,
+              "y": 446.0397808,
+              "width": 218.5739328,
+              "height": 57.82896160000007,
+              "lineCount": 6,
+              "column": 1
+            },
+            {
+              "text": "1 Introduction",
+              "x": 131.84400000000016,
+              "y": 519.8899120000001,
+              "width": 82.81367040000003,
+              "height": 10.747724800000015,
+              "lineCount": 1,
+              "column": 1
+            },
+            {
+              "text": "The emergence of Foundation Models (FMs) has initiated a paradigm shift across artificial intelligence, reshaping the methodologies of representation learning and downstream arXiv:2508.02739v1 [q-fin.ST] 2 Aug 2025 task adaptation. This shift is exemplified by the success of Large Language Models (LLMs) for natural language processing (Brown et al. 2020; Achiam et al. 2023), with parallel breakthroughs in computer vision (Radford et al. 2021; Kirillov et al. 2023).",
+              "x": 17,
+              "y": 215.45999999999992,
+              "width": 275.50464400000016,
+              "height": 404.99392160000014,
+              "lineCount": 9,
+              "column": 1
+            },
+            {
+              "text": "Figure 1: Comprehensive performance of Kronos across several quantitative finance tasks. The chart benchmarks our Kronos models (blue family) against several categories of specialized baselines. A greater distance from the center signifies superior performance.",
+              "x": 319.5,
+              "y": 400.31635719999997,
+              "width": 238.50464399999998,
+              "height": 52.74256439999999,
+              "lineCount": 5,
+              "column": 2
+            },
+            {
+              "text": "However, applying general-purpose TSFMs to financial",
+              "x": 329.4629999999999,
+              "y": 695.2453572000001,
+              "width": 228.54204399999998,
+              "height": 8.906564400000008,
+              "lineCount": 1,
+              "column": 2
+            },
+            {
+              "text": "{shi-y23, fzl22, zhaobh23}@mails.tsinghua.edu.cn, ChenSh2003@outlook.com, weixu@tsinghua.edu.cn, zcs@mail.tsinghua.edu.cn, lapordge@gmail.com",
+              "x": 93.96700000000016,
+              "y": 170.25204999999994,
+              "width": 424.06729979999983,
+              "height": 20.582871599999976,
+              "lineCount": 2,
+              "column": 0
+            }
+          ]
+        },
+        {
+          "pageNumber": 2,
+          "width": 612,
+          "height": 792,
+          "blocks": [
+            {
+              "text": "K-line data presents significant challenges, due to two principal factors. First, K-line sequences exhibit unique statistical properties—such as low signal-to-noise ratios, strong non-stationarities, and intricate, high-order dependencies among OHLCVA attributes (Zhang and Hua 2025; Baidya and Lee 2024)—that are often misaligned with the inductive biases of generic TSFMs. Second, the financial domain has largely been underserved by mainstream TSFM research; financial sequences constitute a minor fraction of pre-training corpora for most existing TSFMs (Das et al. 2024; Gao et al. 2024; Xiaoming et al. 2025) , and the spectrum of downstream tasks critical to quantitative finance—spanning volatility estimation, synthetic sequence generation, and risk management—remains largely unaddressed. These factors lead to an important observation, which we empirically validate in this work: general-purpose TSFMs often underperform specialized, non-pre-trained models (e.g., iTransformer (Liu et al. 2023)) on financial tasks and fail to generalize across the broader landscape of quantitative finance.",
+              "x": 54,
+              "y": 57.20835720000002,
+              "width": 238.50464399999998,
+              "height": 206.16656439999906,
+              "lineCount": 19,
+              "column": 1
+            },
+            {
+              "text": "Our main contributions can be summarized as follows:",
+              "x": 63.963,
+              "y": 507.6023571999991,
+              "width": 217.8720994,
+              "height": 8.90656439999998,
+              "lineCount": 1,
+              "column": 1
+            },
+            {
+              "text": "• We propose a novel modeling framework for financial Kline data that learns hierarchical representations. It features a specialized tokenizer that quantizes each multivariate K-line record into structured, dual-component (coarse and fine) tokens, coupled with a tailored autoregressive objective that predicts these subtokens sequentially. This coarse-to-fine prediction scheme allows Kronos to explicitly model multi-scale market dynamics. • We conduct large-scale pre-training for a family of Kronos models with varying capacities. This is performed on a massive, diverse financial corpus of over 12 billion Kline records from over 45 global exchanges, which is fundamental to learning the robust and generalizable market representations that underpin the models’ effectiveness. • We conduct comprehensive empirical evaluations across a set of quantitative finance tasks. Our results show that",
+              "x": 58.483000000000004,
+              "y": 524.4413571999991,
+              "width": 234.02147399999996,
+              "height": 179.71056440000004,
+              "lineCount": 16,
+              "column": 1
+            },
+            {
+              "text": "2 Preliminary",
+              "x": 399.011,
+              "y": 137.86991199999886,
+              "width": 79.4781696,
+              "height": 10.747724800000015,
+              "lineCount": 1,
+              "column": 2
+            },
+            {
+              "text": "Let D-dimensional vector xt ∈RD denote the K-line observation at discrete time t, comprising D key financial indicators. In this work, we fix the dimension D= 6 to represent OHLCVA attributes (Open, High, Low, Close prices, trading Volume, and Amount). The rationale for this input choice is detailed in Appendix H (Q1). Given a historical sequence x1:T = (x1,x2,...,xT), our objective is to predict the following H observationsˆ xT+1:T+H = (ˆ xT+1, xT+2,..., xT+H). Rather than operating on raw continuous inputs, Kronos first quantizes each multivariate observation xt into a discrete token bt via a learnable codebook C. Consequently, the original sequence x1:T = (x1,...,xT) is mapped to b1:T = (b1,...,bT). The forecasting task then reduces to an autoregressive token-sequence modeling problem:",
+              "x": 319.49999999999994,
+              "y": 151.454182799999,
+              "width": 238.50464400000004,
+              "height": 164.03173879999946,
+              "lineCount": 19,
+              "column": 2
+            },
+            {
+              "text": "p(bT+1:T+H |b1:T) = p bT+h |b1:T+h−1. (1) h=1",
+              "x": 332.96400000000017,
+              "y": 332.42349599999847,
+              "width": 225.03539160000003,
+              "height": 21.80442119999998,
+              "lineCount": 3,
+              "column": 2
+            },
+            {
+              "text": "3 Methodology",
+              "x": 396.24300000000017,
+              "y": 404.29291199999847,
+              "width": 85.01342720000002,
+              "height": 10.747724800000015,
+              "lineCount": 1,
+              "column": 2
+            },
+            {
+              "text": "Kronos abstracts financial K-line sequences as a discrete language and implements this via a two-phase framework illustrated in Figure 2: (1) K-line Tokenization and (2) Autoregressive Pre-training. In the first phase, we design a specialized Transformer-based tokenizer to quantize a continuous, multivariate K-line sequence into a corresponding sequence of discrete tokens, via a learnable codebook. Each K-line item (OHLCVA) is treated as an individual instance and quantized into a discrete token. Each token is composed of a coarse-grained subtoken and a fine-grained subtoken. This property is enforced via a hierarchical reconstruction loss, which explicitly compels the subtokens to model distinct levels of information, thereby creating a coarse-to-fine informational hierarchy. In the second phase, an autoregressive decoder-only Transformer is pre-trained on these tokenized sequences, using the standard next-token prediction objective to sequentially forecast both subtoken levels at each future time step conditioned on the given historical context. This unified discretize-and-generate paradigm enables Kronos to construct a high-fidelity, hierarchical representation of market dynamics, providing a robust foundation for downstream quantitative analysis.",
+              "x": 319.5000000000001,
+              "y": 419.5783571999985,
+              "width": 238.50464399999998,
+              "height": 239.0435644000001,
+              "lineCount": 22,
+              "column": 2
+            },
+            {
+              "text": "K-line Tokenization The first stage of Kronos transforms a continuous, Ddimensional K-line sequence x = (x1,...,xT), where xt ∈",
+              "x": 319.5000000000001,
+              "y": 669.7227209999986,
+              "width": 238.50006542000006,
+              "height": 35.1241962,
+              "lineCount": 3,
+              "column": 2
+            }
+          ]
+        },
+        {
+          "pageNumber": 4,
+          "width": 612,
+          "height": 792,
+          "blocks": [
+            {
+              "text": "Figure 3: Architecture of the K-line Tokenizer. It employs a Transformer-based autoencoder with a Binary Spherical Quantization (BSQ) layer.",
+              "x": 54,
+              "y": 258.2433572,
+              "width": 238.50464399999998,
+              "height": 30.824564399999872,
+              "lineCount": 3,
+              "column": 1
+            },
+            {
+              "text": "Hierarchical Autoregressive Modeling Following the tokenization stage, the resulting discrete sequences are modeled using a decoder-only Transformer, denoted as Ear, which employs causal-attention to ensure that predictions at each time step depend exclusively on historical context. The primary objective is to estimate the joint distribution over the token sequence b= {b1,...,bT}. A simplified form of Equation 1 can be derived as:",
+              "x": 54,
+              "y": 312.18072099999983,
+              "width": 238.5048488,
+              "height": 89.28420060000002,
+              "lineCount": 8,
+              "column": 1
+            },
+            {
+              "text": "p(b) = p(bt|b<t), (3) t=1",
+              "x": 128.57700000000003,
+              "y": 419.7040499999998,
+              "width": 163.92339160000003,
+              "height": 20.458867199999986,
+              "lineCount": 3,
+              "column": 1
+            },
+            {
+              "text": "p(bt|b<t) = p(bc t|b<t)·p(bf t|b<t,bc t). (4) This formulation allows the model to first predict the coarsegrained subtoken, which serves as a scaffold for subsequently generating the fine-grained residual subtoken. Consequently, the pre-training objective reduces to maximizing the log-likelihood of the observed sequence under this hierarchical factorization.",
+              "x": 54.000000000000114,
+              "y": 509.5261827999998,
+              "width": 238.50464399999998,
+              "height": 84.0267388,
+              "lineCount": 10,
+              "column": 1
+            },
+            {
+              "text": "Layers dmodel dff Heads Vocab. (2k) Params Kronossmall 8 512 1024 8 20 24.7M Kronosbase 12 832 2048 16 20 102.3M Kronoslarge 18 1664 3072 32 20 499.2M",
+              "x": 322.90398700000003,
+              "y": 57.06534734775994,
+              "width": 231.68804316512,
+              "height": 42.010183324479954,
+              "lineCount": 4,
+              "column": 2
+            },
+            {
+              "text": "Table 1: Model configurations for the Kronos family. We detail the number of Transformer layers, model dimension (dmodel), feed-forward dimension (dff), number of attention heads, vocabulary size, and the total number of parameters.",
+              "x": 319.5,
+              "y": 112.47735720000003,
+              "width": 238.504823,
+              "height": 41.78356439999982,
+              "lineCount": 4,
+              "column": 2
+            },
+            {
+              "text": "Coarse Subtoken Prediction. The history vector ht is projected by a linear head Wc to produce logits for the first subtoken’s distribution:",
+              "x": 319.4999999999999,
+              "y": 298.7179555999994,
+              "width": 238.50005420000002,
+              "height": 30.98396600000001,
+              "lineCount": 3,
+              "column": 2
+            },
+            {
+              "text": "p(bc t|b<t) = softmax(Wcht) (6) Fine Subtoken Prediction. To model the conditional dependency in Equation (4), the context needs to be updated with the predicted coarse subtoken,ˆ bc t. During training, we use the model’s own prediction from the previous step,ˆ bc t, which is sampled from the predicted distribution p(bc t|b<t), rather than using the ground-truth subtoken (i.e., teacher-forcing). We find that this sampling strategy enhances model robustness by mitigating exposure bias, better aligning the training distribution with the auto-regressive nature of multi-step inference where ground-truth tokens are unavailable. We use a cross-attention mechanism where the embedding ofˆ bc t acts as the query, and the history ht provides the key and value. The result is projected by the second head Wf:",
+              "x": 319.4999999999999,
+              "y": 336.27918279999943,
+              "width": 238.50475819999997,
+              "height": 175.43273440000002,
+              "lineCount": 23,
+              "column": 2
+            },
+            {
+              "text": "hupdate t = CrossAttn(q= ec( bc t),k= v= ht) p(bf t|b<t,bc t) = softmax(Wfhupdate t ) (7) The overall training objective Lar is the negative loglikelihood of the data, summed over both prediction steps:",
+              "x": 319.5000000000001,
+              "y": 519.4627635999994,
+              "width": 238.50146240000004,
+              "height": 57.566158,
+              "lineCount": 10,
+              "column": 2
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "dropped": [
+          {
+            "page": 1,
+            "includes": "Kronos: A Foundation Model",
+            "reason": "frontmatter-title"
+          },
+          {
+            "page": 1,
+            "includes": "Figure 1: Comprehensive performance",
+            "reason": "caption-text"
+          },
+          {
+            "page": 4,
+            "includes": "Table 1: Model configurations",
+            "reason": "caption-text"
+          },
+          {
+            "page": 4,
+            "includes": "Layers dmodel dff Heads",
+            "reason": "table-body-like"
+          }
+        ],
+        "headings": [
+          "Abstract",
+          "1 Introduction",
+          "2 Preliminary",
+          "3 Methodology"
+        ],
+        "cleanNotIncludes": [
+          {
+            "page": 1,
+            "includes": "The emergence of Foundation Models",
+            "notIncludes": "arXiv:"
+          }
+        ],
+        "openEndedContinuations": [
+          {
+            "left": {
+              "page": 1,
+              "includes": "However, applying general-purpose TSFMs to financial"
+            },
+            "right": {
+              "page": 2,
+              "includes": "K-line data presents significant challenges"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
