@@ -14,6 +14,7 @@ import {
   nextAdaptiveBatchSizeAfterSplit,
 } from "./lib/analysis-batching.js";
 import {
+  isLikelyCaptionBlockText,
   isLikelyCodeBlockText,
   isLikelyFormulaBlockText,
   isLikelyTableBodyBlockText,
@@ -6774,7 +6775,7 @@ function classifyPageArtifact(block) {
     return "";
   }
 
-  if (/^(figure|fig\.|table)\s+\d+[a-z]?\s*:/i.test(text)) {
+  if (isLikelyCaptionBlockText(text)) {
     return "caption";
   }
 

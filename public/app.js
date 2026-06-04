@@ -1,4 +1,4 @@
-import { normalizeRichTextSource } from "./rich-text-utils.js";
+import { normalizeFormulaArtifactLatex, normalizeRichTextSource } from "./rich-text-utils.js";
 
 const state = {
   paper: null,
@@ -3196,32 +3196,6 @@ function getArtifactDisplayMarkdown(artifact) {
   return `\\[${normalizeFormulaArtifactLatex(source)}\\]`;
 }
 
-function normalizeFormulaArtifactLatex(source) {
-  return String(source || "")
-    .replace(/\s+/g, " ")
-    .replace(/−/g, "-")
-    .replace(/ℓ/g, "\\ell")
-    .replace(/θ/g, "\\theta")
-    .replace(/α/g, "\\alpha")
-    .replace(/β/g, "\\beta")
-    .replace(/γ/g, "\\gamma")
-    .replace(/σ/g, "\\sigma")
-    .replace(/μ/g, "\\mu")
-    .replace(/λ/g, "\\lambda")
-    .replace(/η/g, "\\eta")
-    .replace(/Ω/g, "\\Omega")
-    .replace(/Δ/g, "\\Delta")
-    .replace(/\b(log|exp|min|max|softmax|argmin|argmax)\b/g, "\\$1")
-    .replace(/\b(WQL|MASE|CRPS|NLL|RMSE|MSE|QL)\b/g, "\\mathrm{$1}")
-    .replace(/\b([A-Za-z])([A-Z]\s*[+\-]\s*[A-Za-z0-9]+(?:\s*[+\-]\s*[A-Za-z0-9]+)*)\b/g, "$1_{$2}")
-    .replace(/\b([A-Za-z])(\d+(?::[A-Za-z0-9+\-]+)?(?:[+\-][A-Za-z0-9]+)*)\b/g, "$1_{$2}")
-    .replace(/p_?\{?\\theta\}?/g, "p_{\\theta}")
-    .replace(/\s*([=<>≤≥≠≈+\-*/→←↔±×÷])\s*/g, "$1")
-    .replace(/\s*,\s*/g, ",")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 function isVisualCaptionArtifact(artifact) {
   return artifact?.type === "caption" &&
     (artifact.visualType === "figure" || artifact.visualType === "table" || !artifact.visualType);
@@ -3372,7 +3346,7 @@ function renderArtifactCrop(artifact) {
   frame.style.aspectRatio = `${crop.width} / ${crop.height}`;
   frame.addEventListener("click", () => openArtifactViewer(artifact));
 
-  frame.append(renderCropImage(artifact));
+  frame.append(renderCropImage(artifact, { preferCropUrl: true }));
   return frame;
 }
 
@@ -3468,7 +3442,7 @@ function openArtifactViewer(artifact, options = {}) {
   cropFrame.className = "artifact-viewer-crop";
   cropFrame.style.aspectRatio = `${artifact.crop.width} / ${artifact.crop.height}`;
   cropFrame.style.width = `min(100%, 1080px, calc(74vh * ${artifact.crop.width / artifact.crop.height}))`;
-  cropFrame.append(renderCropImage(artifact));
+  cropFrame.append(renderCropImage(artifact, { preferCropUrl: true }));
   viewerBody.append(cropFrame, renderArtifactLocator(artifact, options));
 
   const caption = document.createElement("div");

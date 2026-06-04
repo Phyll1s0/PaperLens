@@ -27,6 +27,7 @@ Updated: 2026-06-03
 
 ## Done
 
+- [x] 图表/公式展示修复：图表卡片和放大预览改为直接使用后端裁剪 SVG，避免整页图 CSS 位移导致白图/错位；caption 识别兼容 `Figure 1.` / `Table 1.`；公式 artifact 渲染增加数学 Unicode 字母和常见下标词归一。
 - [x] Job Queue 恢复回归测试：抽出 `lib/job-recovery.js`，让服务启动恢复和测试共用任务状态规则；覆盖 running/canceling/queued/done/error/canceled、运行中 item 清理、外部活跃 worker 跳过和中断任务重新入队。
 - [x] 最小 PDF fixture 回归测试：抽出 `lib/pdf-extraction.js`，让上传/OCR 重提取和测试共用 PDF 提取逻辑；新增最小 PDF fixture，覆盖 Poppler bbox XML 解析、实体转义、区块坐标，并在本机 Poppler 可用时跑真实 PDF 提取。
 - [x] Word 导出回归测试：抽出 `lib/export-docx.js`，让 `.docx` 下载 API 和测试共用导出逻辑；覆盖 docx zip 结构、document XML、媒体关系、图片文件、隐藏图表过滤和 XML 转义。

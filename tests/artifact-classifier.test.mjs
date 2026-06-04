@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import {
+  isLikelyCaptionBlockText,
   isLikelyCodeBlockText,
   isLikelyFormulaBlockText,
   isLikelyTableBodyBlockText,
   isUsefulFormulaArtifactText,
 } from "../lib/artifact-classifier.js";
+
+assert.equal(isLikelyCaptionBlockText("Figure 2. FP4 quantization: A comparison of FP16 and E8M0 scaling factors."), true);
+assert.equal(isLikelyCaptionBlockText("Table 1. The features of DNN accelerators across different scaling factors."), true);
+assert.equal(isLikelyCaptionBlockText("Figure 2 shows the quantization process in detail."), false);
 
 assert.equal(
   isLikelyCodeBlockText(
