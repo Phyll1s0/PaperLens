@@ -14,11 +14,10 @@ Updated: 2026-06-04
 
 1. [ ] 分段调试视图：显示每段来自哪些 PDF block、页码/坐标、清洗原因、删除/保留理由和 fallback 来源。
 2. [ ] 真实 PDF 分段 fixture 扩展：从 M2XFP/Chronos/Kronos 本地论文导出最小 JSON fixture，覆盖复杂双栏、跨页图表和章节边界。
-3. [ ] 章节地图入口升级：本地 fallback 也必须基于 heading 生成多 section 结构，不能只剩 1 个正文 section。
-4. [ ] 视觉重建回归集：固化 `Figure 1.` / `Table 1.`、低置信裁剪、过大裁剪和公式/代码误分类样例。
-5. [ ] 自动化测试扩展：补模型诊断报告回归测试。
-6. [ ] 长任务预算保护：每篇论文显示预计 token、预计时长、预计费用/额度，支持任务级最大预算，超限前提示。
-7. [ ] 视觉裁剪编辑器：允许用户点击页面图像后手动框选/调整图片、公式、代码块，并重建相关段落引用。
+3. [ ] 视觉重建回归集：固化 `Figure 1.` / `Table 1.`、低置信裁剪、过大裁剪和公式/代码误分类样例。
+4. [ ] 自动化测试扩展：补模型诊断报告回归测试。
+5. [ ] 长任务预算保护：每篇论文显示预计 token、预计时长、预计费用/额度，支持任务级最大预算，超限前提示。
+6. [ ] 视觉裁剪编辑器：允许用户点击页面图像后手动框选/调整图片、公式、代码块，并重建相关段落引用。
 
 ## Later
 
@@ -30,6 +29,7 @@ Updated: 2026-06-04
 
 ## Done
 
+- [x] 章节地图入口升级：新增 `lib/segmentation-structure.js`，本地 layout fallback 会从 PDF heading 识别多章节结构；过滤标题、作者、图注、坐标轴、年份参考文献等伪 heading，并让本地段落按实际 heading 顺序生成 sections。
 - [x] 分段入口清洗一期：PDF block 进入精读前会剥离嵌入正文的 arXiv stamp/会议元数据，过滤首页标题、作者多邮箱块和版权/ACM 元数据；论文标题改从原始首页 block 推断；页面明确标出 layout 本地兜底。
 - [x] 精读分段样例集一期：抽出 `lib/segmentation-validation.js`，让服务和测试共用分段验证/噪声巡检；覆盖 Chronos 跨页续段、Kronos 章节边界、M2XFP 表格主体、caption、References 和重复页眉噪声。
 - [x] 分段噪声回归基础：抽出 References/参考文献条目/页码页眉判断到 `lib/segmentation-repair.js`，覆盖 arXiv/URL 引用、References heading 和 running header，避免它们误入正文精读。

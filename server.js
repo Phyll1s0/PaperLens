@@ -66,6 +66,9 @@ import {
   auditSegmentedParagraphNoise as auditSegmentedNoise,
   validateAndRepairSegmentedParagraphs as repairSegmentedParagraphs,
 } from "./lib/segmentation-validation.js";
+import {
+  inferHeuristicStructureSectionsFromPages,
+} from "./lib/segmentation-structure.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -7504,6 +7507,12 @@ function buildHeuristicPaperStructureMap(paper, pages) {
         description: "本地版面扫描识别到 References/Bibliography 起点。",
       }]
     : [];
+  const sections = inferHeuristicStructureSectionsFromPages(pages, {
+    firstPage,
+    lastPage,
+    referencesStartPage,
+    bodyEndPage,
+  });
   return {
     version: 1,
     paperTitle: paper.title || paper.filename || "",
@@ -7511,8 +7520,8 @@ function buildHeuristicPaperStructureMap(paper, pages) {
     bodyStartPage: firstPage,
     referencesStartPage,
     keywords: [],
-    sections: [],
-    segmentationPlan: buildSegmentationPlanFromSections([], firstPage, bodyEndPage),
+    sections,
+    segmentationPlan: buildSegmentationPlanFromSections(sections, firstPage, bodyEndPage),
     segmentationPlanVersion: SEGMENTATION_PLAN_VERSION,
     nonBodyZones,
     updatedAt: new Date().toISOString(),
@@ -7566,7 +7575,10 @@ function segmentPaperLocally(paper, reason = "local-layout") {
     ...(validationSummary.qualityAudit || createSegmentationAuditStats(initialParagraphs.length)),
     updatedAt: validationSummary.updatedAt,
   };
-  const sections = inferSectionsFromSegmentationPlan(paragraphs, structureMap);
+  const directSections = inferSections(paragraphs);
+  const sections = directSections.length > 1
+    ? directSections
+    : inferSectionsFromSegmentationPlan(paragraphs, structureMap);
   enrichSectionsWithContext(sections, paragraphs, []);
   const segmented = {
     ...paper,
