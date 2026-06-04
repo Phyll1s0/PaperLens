@@ -114,6 +114,38 @@ const paper = {
           height: 40,
           lineCount: 2,
         },
+        {
+          text: "References",
+          x: 72,
+          y: 650,
+          width: 100,
+          height: 18,
+          lineCount: 1,
+        },
+        {
+          text: "[1] Doe et al. Forecasting with transformers. arXiv preprint arXiv:2401.00001, 2024.",
+          x: 72,
+          y: 680,
+          width: 420,
+          height: 34,
+          lineCount: 2,
+        },
+        {
+          text: "Raw PDF\nText Blocks\nNoise Filter\nAI Segmenter\nParagraph Queue",
+          x: 330,
+          y: 260,
+          width: 150,
+          height: 120,
+          lineCount: 5,
+        },
+        {
+          text: "Dataset Horizon MAE RMSE MAPE Chronos 24 0.31 0.52 8.4 PaperLens 24 0.29 0.48 7.9",
+          x: 330,
+          y: 410,
+          width: 220,
+          height: 60,
+          lineCount: 3,
+        },
       ],
     },
   ],
@@ -139,14 +171,44 @@ const paper = {
       segmentationNoise: { reason: "caption-text" },
       analysisStatus: "pending",
     },
+    {
+      id: "p3",
+      kind: "paragraph",
+      order: 2,
+      sectionId: "s1",
+      pageNumber: 2,
+      pageEndNumber: 3,
+      sourceBox: { x: 72, y: 720, width: 420, height: 44 },
+      sourceText: "This paragraph begins near the end of one page and continues naturally on the next page with the same section context.",
+      analysisStatus: "pending",
+    },
+    {
+      id: "p4",
+      kind: "paragraph",
+      order: 3,
+      sectionId: "s1",
+      pageNumber: 2,
+      sourceBox: { x: 72, y: 210, width: 180, height: 18 },
+      sourceText: "Short fragment",
+      analysisStatus: "pending",
+    },
+    {
+      id: "p5",
+      kind: "paragraph",
+      order: 4,
+      sectionId: "s1",
+      pageNumber: 2,
+      sourceText: "This ordinary paragraph lacks a source box, which makes visual debugging and page anchoring weaker.",
+      analysisStatus: "pending",
+    },
   ],
 };
 
 const report = buildPaperSegmentationDebugReport(paper, { now: () => fixedNow });
 assert.equal(report.generatedAt, fixedNow.toISOString());
 assert.equal(report.summary.pages, 2);
-assert.equal(report.summary.extractionBlocks, 7);
-assert.equal(report.summary.droppedBlocks, 3);
+assert.equal(report.summary.extractionBlocks, 11);
+assert.equal(report.summary.droppedBlocks, 7);
 assert.equal(report.summary.paragraphsWithNoise, 1);
 assert.equal(report.summary.paperMemoryAvailable, true);
 assert.equal(report.summary.paperMemoryResources, 1);
@@ -161,6 +223,18 @@ assert.ok(report.paperMemory.keyTerms.includes("Paper Memory"));
 assert.equal(report.paperMemory.resources[0].url, "https://github.com/example/project");
 assert.equal(report.paperMemory.formulas[0].pageNumber, 2);
 assert.ok(report.paperMemory.nonReadingGuidance[0].includes("Author block"));
+
+assert.equal(report.issueSummary.total, 11);
+assert.equal(findIssueCategory(report, "author").count, 2);
+assert.equal(findIssueCategory(report, "caption").count, 2);
+assert.equal(findIssueCategory(report, "references").count, 2);
+assert.equal(findIssueCategory(report, "diagram").count, 1);
+assert.equal(findIssueCategory(report, "table").count, 1);
+assert.equal(findIssueCategory(report, "cross-page").count, 1);
+assert.equal(findIssueCategory(report, "short-fragment").count, 1);
+assert.equal(findIssueCategory(report, "missing-source-box").count, 1);
+assert.equal(findIssueCategory(report, "diagram").samples[0].source, "block");
+assert.equal(findIssueCategory(report, "cross-page").samples[0].paragraphId, "p3");
 
 const pageOne = report.pages[0];
 assert.equal(pageOne.imagePath, "/assets/debug_fixture/page-001.png");
@@ -204,3 +278,9 @@ const diagramLabelBlock = buildSegmentationBlockDebug({
 }, { pageNumber: 3 });
 assert.equal(diagramLabelBlock.decision, "drop");
 assert.ok(diagramLabelBlock.reasons.includes("diagram-only-text"));
+
+function findIssueCategory(report, id) {
+  const category = report.issueSummary.categories.find((item) => item.id === id);
+  assert.ok(category, `missing issue category ${id}`);
+  return category;
+}

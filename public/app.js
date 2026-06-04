@@ -3290,6 +3290,7 @@ function renderSegmentationDebugPanel(result) {
   layout.append(renderSegmentationDebugPages(result));
   const side = document.createElement("div");
   side.className = "segmentation-debug-side";
+  side.append(renderSegmentationDebugIssues(result));
   side.append(renderSegmentationDebugMemory(result));
   side.append(renderSegmentationDebugEvidence(result));
   side.append(renderSegmentationDebugParagraphs(result));
@@ -3349,6 +3350,139 @@ function getSegmentationDebugSummaryItems(summary) {
     { label: "章节", value: summary.sections || 0 },
     { label: "Memory", value: summary.paperMemoryAvailable ? "有" : "无" },
   ];
+}
+
+function renderSegmentationDebugIssues(result) {
+  const wrap = document.createElement("div");
+  wrap.className = "segmentation-debug-section segmentation-debug-issues";
+  const heading = document.createElement("h4");
+  heading.textContent = "问题类型汇总";
+  wrap.append(heading);
+
+  const categories = Array.isArray(result?.issueSummary?.categories) ? result.issueSummary.categories : [];
+  if (!categories.length) {
+    const empty = document.createElement("p");
+    empty.className = "export-qa-empty";
+    empty.textContent = "当前报告没有聚合到明显分段问题。";
+    wrap.append(empty);
+    return wrap;
+  }
+
+  const meta = document.createElement("div");
+  meta.className = "segmentation-debug-issue-meta";
+  const total = document.createElement("span");
+  total.textContent = `共 ${result.issueSummary?.total || 0} 个证据`;
+  const kinds = document.createElement("span");
+  kinds.textContent = `${categories.length} 类问题`;
+  meta.append(total, kinds);
+  wrap.append(meta);
+
+  const list = document.createElement("div");
+  list.className = "segmentation-debug-issue-list";
+  for (const category of categories.slice(0, 10)) {
+    list.append(renderSegmentationDebugIssueCategory(category, result));
+  }
+  wrap.append(list);
+  return wrap;
+}
+
+function renderSegmentationDebugIssueCategory(category, result) {
+  const card = document.createElement("article");
+  card.className = `segmentation-debug-issue-card severity-${category.severity || "low"}`;
+
+  const top = document.createElement("div");
+  top.className = "segmentation-debug-issue-top";
+  const title = document.createElement("strong");
+  title.textContent = category.label || category.id || "问题";
+  const count = document.createElement("span");
+  count.textContent = `${category.count || 0}`;
+  count.title = getSegmentationDebugIssueSeverityLabel(category.severity);
+  top.append(title, count);
+
+  const recommendation = document.createElement("p");
+  recommendation.textContent = category.recommendation || "";
+  card.append(top, recommendation);
+
+  const samples = Array.isArray(category.samples) ? category.samples : [];
+  if (samples.length) {
+    const sampleList = document.createElement("div");
+    sampleList.className = "segmentation-debug-issue-samples";
+    for (const sample of samples.slice(0, 3)) {
+      sampleList.append(renderSegmentationDebugIssueSample(sample, result));
+    }
+    card.append(sampleList);
+  }
+
+  return card;
+}
+
+function renderSegmentationDebugIssueSample(sample, result) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "segmentation-debug-issue-sample";
+  button.title = sample.source === "block" ? "定位到 PDF block" : "定位到段落";
+  button.addEventListener("click", () => {
+    if (sample.source === "block") {
+      state.segmentationDebugSelection = {
+        paperId: result?.paperId || "",
+        pageNumber: sample.pageNumber,
+        blockIndex: sample.blockIndex,
+      };
+      renderPaperPreservingViewport();
+      return;
+    }
+    if (sample.paragraphId) {
+      document.querySelector(`#${CSS.escape(sample.paragraphId)}`)?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+    }
+  });
+
+  const label = document.createElement("span");
+  label.textContent = formatSegmentationDebugIssueSampleLabel(sample);
+  const preview = document.createElement("strong");
+  preview.textContent = sample.preview || "空样例";
+  const reasons = document.createElement("small");
+  reasons.textContent = (sample.reasons || [])
+    .map((reason) => result?.reasonLegend?.[reason] || getSegmentationDebugSyntheticReasonLabel(reason) || reason)
+    .join("；");
+  button.append(label, preview, reasons);
+  return button;
+}
+
+function formatSegmentationDebugIssueSampleLabel(sample) {
+  const page = sample.pageNumber
+    ? sample.pageEndNumber && sample.pageEndNumber !== sample.pageNumber
+      ? `p.${sample.pageNumber}-${sample.pageEndNumber}`
+      : `p.${sample.pageNumber}`
+    : "";
+  if (sample.source === "block") {
+    return [page, Number.isFinite(Number(sample.blockIndex)) ? `block #${Number(sample.blockIndex) + 1}` : ""]
+      .filter(Boolean)
+      .join(" · ") || "PDF block";
+  }
+  return [page, Number.isFinite(Number(sample.order)) ? `段落 ${Number(sample.order) + 1}` : ""]
+    .filter(Boolean)
+    .join(" · ") || "段落";
+}
+
+function getSegmentationDebugSyntheticReasonLabel(reason) {
+  const labels = {
+    "cross-page": "跨页段落。",
+    "short-fragment": "短碎片。",
+    "missing-source-box": "缺少页图定位坐标。",
+  };
+  return labels[reason] || "";
+}
+
+function getSegmentationDebugIssueSeverityLabel(severity) {
+  const labels = {
+    high: "高优先级",
+    medium: "中优先级",
+    low: "低优先级",
+  };
+  return labels[severity] || "问题";
 }
 
 function renderSegmentationDebugMemory(result) {

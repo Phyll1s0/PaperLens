@@ -1054,6 +1054,129 @@ select:focus {
   background: rgba(255, 255, 255, 0.78);
 }
 
+.segmentation-debug-issues {
+  padding: 10px;
+  border: 1px solid rgba(51, 90, 158, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.segmentation-debug-issue-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.segmentation-debug-issue-meta span {
+  padding: 4px 7px;
+  border: 1px solid rgba(51, 90, 158, 0.13);
+  border-radius: 999px;
+  background: rgba(51, 90, 158, 0.06);
+  color: #2f4f8c;
+  font-size: 11px;
+  font-weight: 780;
+}
+
+.segmentation-debug-issue-list {
+  display: grid;
+  gap: 8px;
+}
+
+.segmentation-debug-issue-card {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid rgba(100, 112, 108, 0.13);
+  border-left-width: 3px;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.segmentation-debug-issue-card.severity-high {
+  border-left-color: #b45309;
+}
+
+.segmentation-debug-issue-card.severity-medium {
+  border-left-color: #2f4f8c;
+}
+
+.segmentation-debug-issue-card.severity-low {
+  border-left-color: #64706c;
+}
+
+.segmentation-debug-issue-top {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.segmentation-debug-issue-top strong {
+  min-width: 0;
+  color: #1d2522;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.segmentation-debug-issue-top span {
+  flex: 0 0 auto;
+  min-width: 24px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(180, 83, 9, 0.1);
+  color: #92400e;
+  font-size: 11px;
+  font-weight: 850;
+  text-align: center;
+}
+
+.segmentation-debug-issue-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.segmentation-debug-issue-samples {
+  display: grid;
+  gap: 5px;
+}
+
+.segmentation-debug-issue-sample {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: 7px;
+  border: 1px solid rgba(100, 112, 108, 0.12);
+  border-radius: 8px;
+  background: rgba(247, 249, 253, 0.72);
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.segmentation-debug-issue-sample:hover {
+  border-color: rgba(51, 90, 158, 0.34);
+  background: rgba(51, 90, 158, 0.06);
+}
+
+.segmentation-debug-issue-sample span,
+.segmentation-debug-issue-sample small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.segmentation-debug-issue-sample strong {
+  color: #1d2522;
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 .segmentation-debug-memory-meta,
 .segmentation-debug-memory-tags {
   display: flex;
