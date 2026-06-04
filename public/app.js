@@ -16,6 +16,7 @@ const state = {
   exportQa: null,
   segmentationDebug: null,
   segmentationDebugSelection: null,
+  visualQaFilter: "issues",
   modelDiagnosticReport: null,
   lastSegmentationError: "",
   progressTimer: null,
@@ -941,6 +942,7 @@ async function uploadPdf() {
     state.query = "";
     state.exportQa = null;
     state.segmentationDebug = null;
+    state.visualQaFilter = "issues";
     els.searchInput.value = "";
     setStatus(isOcrRequiredPaper(paper)
       ? "检测到扫描版 PDF：需要先 OCR，再进行分段和讲解。"
@@ -1078,6 +1080,7 @@ async function openPaper(paperId) {
     state.query = "";
     state.exportQa = null;
     state.segmentationDebug = null;
+    state.visualQaFilter = "issues";
     state.showHiddenParagraphs = false;
     state.lastProgressParagraphId = state.paper.readingProgress?.paragraphId || "";
     els.searchInput.value = "";
@@ -2632,6 +2635,19 @@ function getSegmentationDisplayLabel(paper) {
 }
 
 function getVisualArtifactSummary(paper) {
+  const qaSummary = paper?.visualQa?.summary;
+  if (qaSummary?.totalArtifacts) {
+    return {
+      total: qaSummary.visibleArtifacts || qaSummary.totalArtifacts || 0,
+      captions: Number(qaSummary.figures || 0) + Number(qaSummary.tables || 0),
+      formulas: qaSummary.formulas || 0,
+      codeBlocks: qaSummary.codeBlocks || 0,
+      missingCrops: qaSummary.missingCrops || 0,
+      lowConfidence: qaSummary.lowConfidence || 0,
+      oversized: qaSummary.oversized || 0,
+    };
+  }
+
   const artifacts = Array.isArray(paper?.pageArtifacts)
     ? paper.pageArtifacts.filter((artifact) => !artifact.hidden && artifact.type !== "figure-text")
     : [];
@@ -2690,6 +2706,152 @@ function formatVisualArtifactSummary(summary = {}) {
   }
 
   return parts.join(" · ");
+}
+
+function getPaperVisualQa(paper) {
+  if (paper?.visualQa?.version && Array.isArray(paper.visualQa.items)) {
+    return paper.visualQa;
+  }
+  return buildClientVisualQa(paper);
+}
+
+function buildClientVisualQa(paper) {
+  const artifacts = Array.isArray(paper?.pageArtifacts) ? paper.pageArtifacts : [];
+  const items = artifacts
+    .filter((artifact) => artifact?.id)
+    .map((artifact) => {
+      const issueTypes = [];
+      const infoTypes = [];
+      if (!hasArtifactCrop(artifact)) {
+        issueTypes.push("missing-crop");
+      }
+      if (artifact.cropQuality?.confidence === "low") {
+        issueTypes.push("low-confidence");
+      }
+      if (artifact.cropQuality?.oversized) {
+        issueTypes.push("oversized");
+      }
+      if (hasClientArtifactTypeConflict(artifact)) {
+        issueTypes.push("type-conflict");
+      }
+      if (isClientManualArtifact(artifact)) {
+        infoTypes.push("manual");
+      }
+      if (artifact.hidden) {
+        infoTypes.push("hidden");
+      }
+      if (doesClientArtifactEnterAiContext(artifact)) {
+        infoTypes.push("ai-context");
+      }
+      return {
+        id: artifact.id,
+        pageNumber: artifact.pageNumber || null,
+        type: artifact.type || "unknown",
+        visualType: artifact.visualType || artifact.type || "unknown",
+        label: artifact.label || "",
+        displayLabel: artifact.label || getArtifactLabel(artifact.type, artifact.visualType),
+        textPreview: String(artifact.text || "").replace(/\s+/g, " ").trim().slice(0, 180),
+        hidden: Boolean(artifact.hidden),
+        manual: isClientManualArtifact(artifact),
+        entersAiContext: doesClientArtifactEnterAiContext(artifact),
+        hasCrop: hasArtifactCrop(artifact),
+        crop: artifact.crop || null,
+        cropQuality: artifact.cropQuality || {},
+        issueTypes,
+        infoTypes,
+        status: issueTypes.length ? "warn" : "ok",
+      };
+    });
+  const summary = {
+    totalArtifacts: items.length,
+    visibleArtifacts: items.filter((item) => !item.hidden).length,
+    hiddenArtifacts: items.filter((item) => item.hidden).length,
+    aiContextArtifacts: items.filter((item) => item.entersAiContext).length,
+    manualArtifacts: items.filter((item) => item.manual).length,
+    missingCrops: items.filter((item) => item.issueTypes.includes("missing-crop")).length,
+    missingAssets: items.filter((item) => item.issueTypes.includes("missing-asset")).length,
+    lowConfidence: items.filter((item) => item.issueTypes.includes("low-confidence")).length,
+    oversized: items.filter((item) => item.issueTypes.includes("oversized")).length,
+    typeConflicts: items.filter((item) => item.issueTypes.includes("type-conflict")).length,
+    issueArtifacts: items.filter((item) => item.issueTypes.length).length,
+    figures: items.filter((item) => item.type === "caption" && item.visualType !== "table").length,
+    tables: items.filter((item) => item.type === "caption" && item.visualType === "table").length,
+    formulas: items.filter((item) => item.type === "formula").length,
+    codeBlocks: items.filter((item) => item.type === "code").length,
+    figureText: items.filter((item) => item.type === "figure-text").length,
+  };
+  return {
+    version: 0,
+    paperId: paper?.id || "",
+    status: summary.issueArtifacts ? "warn" : "ok",
+    summary,
+    categories: getVisualQaCategories(summary),
+    items,
+  };
+}
+
+function getVisualQaCategories(summary = {}) {
+  return [
+    { type: "all", label: "全部", count: summary.totalArtifacts || 0 },
+    { type: "issues", label: "待处理", count: summary.issueArtifacts || 0 },
+    { type: "missing-crop", label: "缺裁剪", count: summary.missingCrops || 0 },
+    { type: "missing-asset", label: "页图缺失", count: summary.missingAssets || 0 },
+    { type: "low-confidence", label: "低置信", count: summary.lowConfidence || 0 },
+    { type: "oversized", label: "过大", count: summary.oversized || 0 },
+    { type: "type-conflict", label: "类型冲突", count: summary.typeConflicts || 0 },
+    { type: "figure-text", label: "图中文字", count: summary.figureText || 0 },
+    { type: "manual", label: "人工修正", count: summary.manualArtifacts || 0 },
+    { type: "hidden", label: "隐藏", count: summary.hiddenArtifacts || 0 },
+    { type: "ai-context", label: "进上下文", count: summary.aiContextArtifacts || 0 },
+  ].filter((category) => category.type === "all" || category.type === "issues" || category.count > 0);
+}
+
+function hasClientArtifactTypeConflict(artifact = {}) {
+  const type = artifact.type || "";
+  const visualType = artifact.visualType || "";
+  const label = artifact.label || artifact.text || "";
+  if (!["caption", "formula", "code", "figure-text"].includes(type)) {
+    return true;
+  }
+  if (type === "caption") {
+    if (visualType && !["figure", "table"].includes(visualType)) {
+      return true;
+    }
+    if (/^table\b/i.test(label) && visualType && visualType !== "table") {
+      return true;
+    }
+    if (/^(?:fig(?:ure)?\.?)\b/i.test(label) && visualType === "table") {
+      return true;
+    }
+  }
+  if (type === "formula") {
+    return Boolean(visualType && visualType !== "formula");
+  }
+  if (type === "code") {
+    return Boolean(visualType && visualType !== "code");
+  }
+  if (type === "figure-text") {
+    return Boolean(visualType && !["figure", "figure-text"].includes(visualType));
+  }
+  return false;
+}
+
+function isClientManualArtifact(artifact = {}) {
+  return Boolean(
+    artifact.manualArtifactOverride ||
+      artifact.manualEditedAt ||
+      artifact.manualCropEditedAt ||
+      artifact.crop?.manuallyEdited ||
+      artifact.cropQuality?.manual
+  );
+}
+
+function doesClientArtifactEnterAiContext(artifact = {}) {
+  if (artifact.hidden) {
+    return false;
+  }
+  return ["caption", "formula", "code", "figure-text"].includes(artifact.type) &&
+    Boolean(String(artifact.text || artifact.label || "").trim());
 }
 
 function renderPaperPreservingViewport() {
@@ -3058,6 +3220,11 @@ function renderParagraphs(paper) {
     fragment.append(renderSegmentationDebugPanel(state.segmentationDebug));
   }
 
+  const visualQa = getPaperVisualQa(paper);
+  if (visualQa?.summary?.totalArtifacts) {
+    fragment.append(renderVisualQaPanel(visualQa));
+  }
+
   for (const paragraph of paragraphs) {
     for (const pageNumber of getParagraphPageNumbers(paragraph)) {
       if (shownPageNumbers.has(pageNumber)) {
@@ -3102,6 +3269,270 @@ function getParagraphPageNumbers(paragraph) {
     pages.push(end);
   }
   return pages;
+}
+
+function renderVisualQaPanel(result) {
+  const summary = result.summary || {};
+  const panel = document.createElement("section");
+  panel.className = `export-qa-panel visual-qa-panel ${result.status || "ok"}`;
+
+  const header = document.createElement("div");
+  header.className = "export-qa-header";
+
+  const titleWrap = document.createElement("div");
+  const title = document.createElement("h3");
+  title.textContent = "视觉 QA";
+  const meta = document.createElement("p");
+  meta.textContent = formatVisualQaPanelMeta(result);
+  titleWrap.append(title, meta);
+
+  const badge = document.createElement("span");
+  badge.className = "export-qa-badge";
+  badge.textContent = summary.issueArtifacts ? `待处理 ${summary.issueArtifacts}` : "正常";
+  header.append(titleWrap, badge);
+  panel.append(header);
+
+  const summaryRow = document.createElement("div");
+  summaryRow.className = "export-qa-summary visual-qa-summary";
+  for (const item of getVisualQaSummaryItems(summary)) {
+    const chip = document.createElement("span");
+    chip.textContent = `${item.label} ${item.value}`;
+    summaryRow.append(chip);
+  }
+  panel.append(summaryRow);
+
+  const categories = Array.isArray(result.categories) && result.categories.length
+    ? result.categories
+    : getVisualQaCategories(summary);
+  const filters = document.createElement("div");
+  filters.className = "visual-qa-filters";
+  const activeFilter = getActiveVisualQaFilter(result);
+  for (const category of categories) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = category.type === activeFilter ? "is-active" : "";
+    button.textContent = `${category.label} ${category.count || 0}`;
+    button.title = category.suggestion || `筛选${category.label}`;
+    button.addEventListener("click", () => {
+      state.visualQaFilter = category.type;
+      renderPaperPreservingViewport();
+    });
+    filters.append(button);
+  }
+  panel.append(filters);
+
+  const items = getVisualQaFilteredItems(result, activeFilter);
+  if (!items.length) {
+    const empty = document.createElement("p");
+    empty.className = "export-qa-empty";
+    empty.textContent = activeFilter === "issues"
+      ? "目前没有需要优先处理的视觉材料。"
+      : "这个筛选下暂时没有视觉材料。";
+    panel.append(empty);
+    return panel;
+  }
+
+  const list = document.createElement("div");
+  list.className = "visual-qa-list";
+  for (const item of items.slice(0, 14)) {
+    list.append(renderVisualQaItem(item));
+  }
+  panel.append(list);
+
+  if (items.length > 14) {
+    const more = document.createElement("p");
+    more.className = "export-qa-more";
+    more.textContent = `还有 ${items.length - 14} 个视觉材料未展开，可切换筛选后继续处理。`;
+    panel.append(more);
+  }
+
+  return panel;
+}
+
+function renderVisualQaItem(item) {
+  const artifact = getArtifactById(item.id);
+  const row = document.createElement("div");
+  row.className = `export-qa-issue visual-qa-item ${item.status || "ok"}`;
+
+  const marker = document.createElement("span");
+  marker.className = "export-qa-marker";
+  marker.textContent = item.issueTypes?.length
+    ? item.issueTypes.map(getVisualQaTypeLabel).join("/")
+    : "正常";
+
+  const body = document.createElement("div");
+  body.className = "export-qa-issue-body visual-qa-item-body";
+  const title = document.createElement("strong");
+  title.textContent = formatVisualQaItemTitle(item);
+  const context = document.createElement("p");
+  context.textContent = formatVisualQaItemContext(item);
+  body.append(title, context);
+
+  if (item.textPreview) {
+    const preview = document.createElement("p");
+    preview.className = "visual-qa-preview";
+    preview.textContent = item.textPreview;
+    body.append(preview);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "visual-qa-actions";
+  if (artifact) {
+    const viewButton = document.createElement("button");
+    viewButton.type = "button";
+    viewButton.className = "secondary-button export-qa-locate";
+    viewButton.textContent = hasArtifactCrop(artifact) ? "查看" : "卡片";
+    viewButton.addEventListener("click", () => {
+      if (hasArtifactCrop(artifact)) {
+        openArtifactViewer(artifact);
+      } else {
+        focusArtifactCard(artifact.id);
+      }
+    });
+    actions.append(viewButton);
+
+    if (hasArtifactCrop(artifact)) {
+      const locateButton = document.createElement("button");
+      locateButton.type = "button";
+      locateButton.className = "secondary-button export-qa-locate";
+      locateButton.textContent = "定位";
+      locateButton.addEventListener("click", () => openArtifactViewer(artifact, { focusLocator: true }));
+
+      const cropButton = document.createElement("button");
+      cropButton.type = "button";
+      cropButton.className = "secondary-button export-qa-locate";
+      cropButton.textContent = "裁剪";
+      cropButton.disabled = state.artifactEditBusyId === artifact.id;
+      cropButton.addEventListener("click", () => openArtifactCropEditor(artifact));
+      actions.append(locateButton, cropButton);
+    }
+  }
+
+  row.append(marker, body);
+  if (actions.childElementCount) {
+    row.append(actions);
+  }
+  return row;
+}
+
+function getActiveVisualQaFilter(result) {
+  const categories = Array.isArray(result.categories) && result.categories.length
+    ? result.categories
+    : getVisualQaCategories(result.summary || {});
+  const available = new Set(categories.map((category) => category.type));
+  const preferred = state.visualQaFilter || "issues";
+  if (available.has(preferred)) {
+    return preferred;
+  }
+  return available.has("issues") ? "issues" : "all";
+}
+
+function getVisualQaFilteredItems(result, filter) {
+  const items = Array.isArray(result.items) ? result.items : [];
+  if (filter === "all") {
+    return items;
+  }
+  if (filter === "issues") {
+    return items.filter((item) => Array.isArray(item.issueTypes) && item.issueTypes.length);
+  }
+  if (filter === "manual") {
+    return items.filter((item) => item.manual || item.infoTypes?.includes("manual"));
+  }
+  if (filter === "hidden") {
+    return items.filter((item) => item.hidden || item.infoTypes?.includes("hidden"));
+  }
+  if (filter === "ai-context") {
+    return items.filter((item) => item.entersAiContext || item.infoTypes?.includes("ai-context"));
+  }
+  if (filter === "figure-text") {
+    return items.filter((item) => item.type === "figure-text" || item.visualType === "figure-text");
+  }
+  return items.filter((item) => item.issueTypes?.includes(filter));
+}
+
+function formatVisualQaPanelMeta(result) {
+  const summary = result.summary || {};
+  return [
+    `${summary.totalArtifacts || 0} 个视觉材料`,
+    `${summary.visibleArtifacts || 0} 个可见`,
+    `${summary.aiContextArtifacts || 0} 个进入 AI 上下文`,
+    summary.figureText ? `图中文字 ${summary.figureText}` : "",
+  ].filter(Boolean).join(" · ");
+}
+
+function getVisualQaSummaryItems(summary = {}) {
+  return [
+    { label: "图片/表格", value: Number(summary.figures || 0) + Number(summary.tables || 0) },
+    { label: "公式", value: summary.formulas || 0 },
+    { label: "代码", value: summary.codeBlocks || 0 },
+    { label: "缺裁剪", value: summary.missingCrops || 0 },
+    { label: "低置信", value: summary.lowConfidence || 0 },
+    { label: "过大", value: summary.oversized || 0 },
+    { label: "类型冲突", value: summary.typeConflicts || 0 },
+  ];
+}
+
+function formatVisualQaItemTitle(item) {
+  return [
+    item.displayLabel || item.label || getArtifactLabel(item.type, item.visualType),
+    getArtifactLabel(item.type, item.visualType),
+  ].filter(Boolean).join(" · ");
+}
+
+function formatVisualQaItemContext(item) {
+  const parts = [];
+  if (item.pageNumber) {
+    parts.push(`第 ${item.pageNumber} 页`);
+  }
+  if (item.hasCrop && item.crop) {
+    parts.push(`裁剪 ${formatCropNumber(item.crop.width)}×${formatCropNumber(item.crop.height)}`);
+  } else {
+    parts.push("缺少可用裁剪");
+  }
+  if (item.cropQuality?.confidence) {
+    parts.push(`置信 ${formatVisualQaConfidence(item.cropQuality.confidence)}`);
+  }
+  if (item.cropQuality?.oversized) {
+    parts.push("区域偏大");
+  }
+  if (item.manual) {
+    parts.push("人工修正");
+  }
+  if (item.hidden) {
+    parts.push("隐藏");
+  }
+  parts.push(item.entersAiContext ? "进入 AI 上下文" : "不进 AI 上下文");
+  return parts.join(" · ");
+}
+
+function getVisualQaTypeLabel(type) {
+  const labels = {
+    "missing-crop": "缺裁剪",
+    "missing-asset": "页图缺失",
+    "low-confidence": "低置信",
+    oversized: "过大",
+    "type-conflict": "类型冲突",
+    "figure-text": "图中文字",
+    manual: "人工",
+    hidden: "隐藏",
+    "ai-context": "上下文",
+  };
+  return labels[type] || type || "提示";
+}
+
+function formatVisualQaConfidence(confidence) {
+  const labels = {
+    high: "高",
+    medium: "中",
+    low: "低",
+    manual: "人工",
+    unknown: "未知",
+  };
+  return labels[confidence] || confidence;
+}
+
+function getArtifactById(artifactId) {
+  return (state.paper?.pageArtifacts || []).find((artifact) => artifact.id === artifactId) || null;
 }
 
 function renderExportQaPanel(result) {
@@ -5038,6 +5469,9 @@ function getArtifactLabel(type, visualType = "") {
   }
   if (type === "caption" && visualType === "figure") {
     return "图片";
+  }
+  if (type === "figure-text") {
+    return "图中文字";
   }
 
   return labels[type] || "页面材料";

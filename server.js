@@ -115,6 +115,7 @@ import {
 } from "./lib/visual-artifacts.js";
 import {
   applyManualArtifactOverrides,
+  buildVisualArtifactQaSummary,
   buildVisualRebuildStats,
   collectManualArtifactOverrides,
 } from "./lib/visual-rebuild-summary.js";
@@ -10403,6 +10404,7 @@ async function loadPaper(paperId) {
     await savePaper(paper);
   }
   enrichPaperParagraphLocations(paper);
+  attachPaperVisualQa(paper);
   return paper;
 }
 
@@ -10485,8 +10487,19 @@ function rebuildPaperVisualArtifacts(paper, options = {}) {
   }));
   paper.pageArtifacts = applyManualArtifactOverrides(extractVisualPageArtifacts(pages), manualArtifactOverrides);
   attachParagraphArtifactLinks(paper);
+  attachPaperVisualQa(paper);
   const stats = buildVisualRebuildStats(paper, pages, previousArtifactCount);
   return { changed: true, reason: force ? "forced" : "upgraded", stats };
+}
+
+function attachPaperVisualQa(paper) {
+  paper.visualQa = buildVisualArtifactQaSummary(paper, {
+    artifactAssetExists: (artifact) => {
+      const assetPath = getAssetPathFromPublicPath(artifact.imagePath);
+      return Boolean(assetPath && existsSync(assetPath));
+    },
+  });
+  return paper.visualQa;
 }
 
 function formatVisualRebuildMessage(stats = {}) {
@@ -10530,6 +10543,7 @@ function inferStoredPageSize(paper, page) {
 }
 
 async function savePaper(paper) {
+  attachPaperVisualQa(paper);
   paper.updatedAt = new Date().toISOString();
   await writeJsonFileAtomic(getPaperPath(paper.id), paper);
 }

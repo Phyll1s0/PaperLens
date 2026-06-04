@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   applyManualArtifactOverrides,
+  buildVisualArtifactQaSummary,
   buildVisualRebuildStats,
   collectManualArtifactOverrides,
   isVisiblePaperArtifact,
@@ -212,3 +213,128 @@ assert.deepEqual(
     },
   ],
 );
+
+{
+  const qa = buildVisualArtifactQaSummary({
+    id: "paper_visual_qa",
+    pageArtifacts: [
+      {
+        id: "fig-ok",
+        type: "caption",
+        visualType: "figure",
+        label: "Figure 1",
+        text: "Figure 1: Forecast overview.",
+        pageNumber: 1,
+        imagePath: "/assets/fixture/page-001.png",
+        crop: { x: 10, y: 20, width: 200, height: 120, pageWidth: 612, pageHeight: 792, pixelRefined: true },
+        cropQuality: { confidence: "high", oversized: false, areaRatio: 0.05 },
+      },
+      {
+        id: "formula-missing",
+        type: "formula",
+        visualType: "formula",
+        text: "y = f(x)",
+        pageNumber: 2,
+      },
+      {
+        id: "table-low",
+        type: "caption",
+        visualType: "table",
+        label: "Table 1",
+        text: "Table 1: Ablation.",
+        pageNumber: 3,
+        imagePath: "/assets/fixture/page-003.png",
+        crop: { x: 0, y: 12, width: 590, height: 610, pageWidth: 612, pageHeight: 792 },
+        cropQuality: { confidence: "low", oversized: true, widthRatio: 0.96, heightRatio: 0.77 },
+      },
+      {
+        id: "type-conflict",
+        type: "caption",
+        visualType: "figure",
+        label: "Table 2",
+        text: "Table 2: This is mislabeled as a figure.",
+        pageNumber: 4,
+        imagePath: "/assets/fixture/page-004.png",
+        crop: { x: 20, y: 30, width: 220, height: 120, pageWidth: 612, pageHeight: 792 },
+        cropQuality: { confidence: "high", oversized: false },
+      },
+      {
+        id: "manual-hidden",
+        type: "code",
+        visualType: "code",
+        text: "print('hidden')",
+        pageNumber: 5,
+        hidden: true,
+        manualCropEditedAt: "2026-06-04T09:00:00.000Z",
+        imagePath: "/assets/fixture/page-005.png",
+        crop: { x: 20, y: 30, width: 220, height: 120, pageWidth: 612, pageHeight: 792, manuallyEdited: true },
+        cropQuality: { confidence: "manual", manual: true },
+      },
+    ],
+  }, {
+    artifactAssetExists: (artifact) => artifact.id !== "table-low",
+  });
+
+  assert.equal(qa.version, 1);
+  assert.equal(qa.paperId, "paper_visual_qa");
+  assert.equal(qa.status, "warn");
+  assert.equal(qa.summary.totalArtifacts, 5);
+  assert.equal(qa.summary.visibleArtifacts, 4);
+  assert.equal(qa.summary.hiddenArtifacts, 1);
+  assert.equal(qa.summary.aiContextArtifacts, 4);
+  assert.equal(qa.summary.manualArtifacts, 1);
+  assert.equal(qa.summary.missingCrops, 1);
+  assert.equal(qa.summary.missingAssets, 1);
+  assert.equal(qa.summary.lowConfidence, 1);
+  assert.equal(qa.summary.oversized, 1);
+  assert.equal(qa.summary.typeConflicts, 1);
+  assert.equal(qa.summary.issueArtifacts, 3);
+  assert.equal(qa.summary.figures, 2);
+  assert.equal(qa.summary.tables, 1);
+  assert.equal(qa.summary.formulas, 1);
+  assert.equal(qa.summary.codeBlocks, 1);
+  assert.equal(qa.categories.some((category) => category.type === "missing-crop" && category.count === 1), true);
+  assert.equal(qa.categories.some((category) => category.type === "ai-context" && category.count === 4), true);
+
+  const missing = qa.items.find((item) => item.id === "formula-missing");
+  assert.deepEqual(missing.issueTypes, ["missing-crop"]);
+  assert.equal(missing.entersAiContext, true);
+
+  const table = qa.items.find((item) => item.id === "table-low");
+  assert.deepEqual(table.issueTypes, ["missing-asset", "low-confidence", "oversized"]);
+  assert.equal(table.crop.x, 0);
+  assert.equal(table.cropQuality.widthRatio, 0.96);
+
+  const conflict = qa.items.find((item) => item.id === "type-conflict");
+  assert.deepEqual(conflict.issueTypes, ["type-conflict"]);
+
+  const hidden = qa.items.find((item) => item.id === "manual-hidden");
+  assert.equal(hidden.manual, true);
+  assert.equal(hidden.hidden, true);
+  assert.equal(hidden.entersAiContext, false);
+  assert.deepEqual(hidden.infoTypes, ["manual", "hidden"]);
+}
+
+{
+  const qa = buildVisualArtifactQaSummary({
+    id: "paper_figure_text",
+    pageArtifacts: [
+      {
+        id: "figure-text-ok",
+        type: "figure-text",
+        visualType: "figure-text",
+        text: "Diagram labels extracted from a figure.",
+        pageNumber: 2,
+        imagePath: "/assets/fixture/page-002.png",
+        crop: { x: 20, y: 30, width: 180, height: 90, pageWidth: 612, pageHeight: 792 },
+        cropQuality: { confidence: "high", oversized: false },
+      },
+    ],
+  });
+
+  assert.equal(qa.status, "ok");
+  assert.equal(qa.summary.figureText, 1);
+  assert.equal(qa.summary.typeConflicts, 0);
+  assert.equal(qa.categories.some((category) => category.type === "figure-text" && category.count === 1), true);
+  assert.deepEqual(qa.items[0].issueTypes, []);
+}

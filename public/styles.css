@@ -894,6 +894,26 @@ select:focus {
   background: #fff7f6;
 }
 
+.visual-qa-panel {
+  border-color: rgba(61, 99, 221, 0.2);
+  background: #f8fbff;
+}
+
+.visual-qa-panel.warn {
+  border-color: rgba(180, 83, 42, 0.28);
+  background: #fffaf4;
+}
+
+.visual-qa-panel .export-qa-badge {
+  background: rgba(61, 99, 221, 0.12);
+  color: #2f4f8c;
+}
+
+.visual-qa-panel.warn .export-qa-badge {
+  background: rgba(180, 83, 42, 0.12);
+  color: #7a3d20;
+}
+
 .export-qa-header,
 .export-qa-issue {
   display: flex;
@@ -1001,6 +1021,60 @@ select:focus {
   min-height: 30px;
   padding-inline: 10px;
   font-size: 12px;
+}
+
+.visual-qa-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.visual-qa-filters button {
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid rgba(100, 112, 108, 0.22);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.76);
+  color: #46534f;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.visual-qa-filters button:hover,
+.visual-qa-filters button.is-active {
+  border-color: rgba(15, 118, 110, 0.42);
+  background: rgba(15, 118, 110, 0.1);
+  color: var(--accent-strong);
+}
+
+.visual-qa-list {
+  display: grid;
+  gap: 8px;
+}
+
+.visual-qa-item.ok .export-qa-marker {
+  background: rgba(15, 118, 110, 0.1);
+  color: var(--accent-strong);
+}
+
+.visual-qa-preview {
+  max-width: 74ch;
+}
+
+.visual-qa-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.visual-qa-actions .export-qa-locate {
+  min-width: 0;
 }
 
 .segmentation-debug-panel {
@@ -2843,6 +2917,15 @@ select:focus {
   .export-qa-header,
   .export-qa-issue {
     flex-wrap: wrap;
+  }
+
+  .visual-qa-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .visual-qa-actions .export-qa-locate {
+    flex: 1 1 72px;
   }
 
   .segmentation-debug-layout {
