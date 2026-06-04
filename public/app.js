@@ -2506,12 +2506,13 @@ function renderPaper() {
   };
   const segmentLabel = segmentLabels[paper.segmentationMode] || "基础分段";
   const progress = Number(paper.readingProgress?.percent || 0);
+  const visualLabel = formatVisualArtifactSummary(getVisualArtifactSummary(paper));
   const exportLabel = paper.exportHistory?.length
     ? ` · 最近导出 ${formatExportHistoryLabel(paper.exportHistory[0])}`
     : "";
   els.paperStats.textContent = ocrRequired
     ? `${paper.pageCount || 0} 页 · 需要 OCR · 已生成 ${paper.ocr?.pageImageCount || paper.pageImages?.length || 0} 张页图`
-    : `${readingParagraphs.length} 个段落 · 讲解 ${analyzedCount}/${readingParagraphs.length} · 阅读 ${progress}% · ${segmentLabel}${hiddenParagraphCount ? ` · 隐藏 ${hiddenParagraphCount}` : ""}${exportLabel}`;
+    : `${readingParagraphs.length} 个段落 · 讲解 ${analyzedCount}/${readingParagraphs.length} · 阅读 ${progress}% · ${segmentLabel}${hiddenParagraphCount ? ` · 隐藏 ${hiddenParagraphCount}` : ""}${visualLabel ? ` · ${visualLabel}` : ""}${exportLabel}`;
   els.paperLibraryControls.classList.remove("hidden");
   els.favoriteButton.textContent = paper.favorite ? "★" : "☆";
   els.favoriteButton.setAttribute("aria-pressed", paper.favorite ? "true" : "false");
@@ -2525,6 +2526,67 @@ function renderPaper() {
     renderParagraphs(paper);
   }
   updateAutoButtons();
+}
+
+function getVisualArtifactSummary(paper) {
+  const artifacts = Array.isArray(paper?.pageArtifacts)
+    ? paper.pageArtifacts.filter((artifact) => !artifact.hidden && artifact.type !== "figure-text")
+    : [];
+  const summary = {
+    total: artifacts.length,
+    captions: 0,
+    formulas: 0,
+    codeBlocks: 0,
+    missingCrops: 0,
+    lowConfidence: 0,
+    oversized: 0,
+  };
+
+  for (const artifact of artifacts) {
+    if (artifact.type === "caption") {
+      summary.captions += 1;
+    } else if (artifact.type === "formula") {
+      summary.formulas += 1;
+    } else if (artifact.type === "code") {
+      summary.codeBlocks += 1;
+    }
+
+    if (!hasArtifactCrop(artifact)) {
+      summary.missingCrops += 1;
+    }
+    if (artifact.cropQuality?.confidence === "low") {
+      summary.lowConfidence += 1;
+    }
+    if (artifact.cropQuality?.oversized) {
+      summary.oversized += 1;
+    }
+  }
+
+  return summary;
+}
+
+function formatVisualArtifactSummary(summary = {}) {
+  const total = Number(summary.total || 0);
+  if (!total) {
+    return "";
+  }
+
+  const parts = [`图表 ${total}`];
+  const typed = [
+    summary.captions ? `图/表 ${summary.captions}` : "",
+    summary.formulas ? `公式 ${summary.formulas}` : "",
+    summary.codeBlocks ? `代码 ${summary.codeBlocks}` : "",
+  ].filter(Boolean);
+  if (typed.length) {
+    parts.push(typed.join("/"));
+  }
+
+  const issues = Number(summary.missingCrops || 0) + Number(summary.lowConfidence || 0) + Number(summary.oversized || 0);
+  if (issues) {
+    parts.push(`裁剪待查 ${issues}`);
+  }
+
+  return parts.join(" · ");
 }
 
 function renderPaperPreservingViewport() {
