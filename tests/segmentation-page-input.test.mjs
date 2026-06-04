@@ -138,6 +138,47 @@ const twoColumnPage = {
 
 {
   const page = {
+    pageNumber: 4,
+    width: 600,
+    height: 800,
+    blocks: [
+      {
+        text: [
+          "The left paragraph describes the coarse tokenization step used by the forecasting model.",
+          "It remains in the left column and should be reconstructed as one candidate block.",
+          "The right paragraph explains decoder calibration and uncertainty handling for prediction.",
+          "It remains in the right column and should not be concatenated after the left line.",
+        ].join(" "),
+        x: 48,
+        y: 100,
+        width: 512,
+        height: 88,
+        lineCount: 4,
+        lines: [
+          { text: "The left paragraph describes the coarse tokenization step used by the forecasting model.", x: 54, y: 100, width: 220, height: 14 },
+          { text: "It remains in the left column and should be reconstructed as one candidate block.", x: 54, y: 118, width: 220, height: 14 },
+          { text: "The right paragraph explains decoder calibration and uncertainty handling for prediction.", x: 330, y: 100, width: 220, height: 14 },
+          { text: "It remains in the right column and should not be concatenated after the left line.", x: 330, y: 118, width: 220, height: 14 },
+        ],
+      },
+    ],
+  };
+  const blocks = getReadablePageBlocks(page);
+  assert.equal(blocks.length, 2);
+  assert.equal(blocks[0].rebuiltFromLineCluster, true);
+  assert.match(blocks[0].text, /left paragraph/);
+  assert.doesNotMatch(blocks[0].text, /right paragraph/);
+  assert.match(blocks[1].text, /right paragraph/);
+
+  const input = buildSegmentationPageText(page);
+  assert.ok(input.includes("cluster=1"));
+  assert.ok(input.includes("cluster=2"));
+  assert.ok(input.includes("x=0.09"));
+  assert.ok(input.indexOf("left paragraph") < input.indexOf("right paragraph"));
+}
+
+{
+  const page = {
     pageNumber: 1,
     width: 600,
     height: 800,
