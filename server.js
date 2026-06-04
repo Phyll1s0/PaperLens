@@ -106,6 +106,13 @@ import {
   inferHeuristicStructureSectionsFromPages,
 } from "./lib/segmentation-structure.js";
 import {
+  SEGMENTATION_RETRY_STRATEGIES,
+  canReusePaperMemory,
+  canReuseSegmentationStructureMap,
+  formatSegmentationRetryStrategyLabel,
+  normalizeSegmentationRetryStrategy,
+} from "./lib/segmentation-retry-strategy.js";
+import {
   buildCropQuality,
   buildManualVisualCropUpdate,
   normalizeVisualCrop as normalizeCrop,
@@ -750,6 +757,7 @@ async function handleSegmentPaper(req, res, paperId) {
   }
   const settings = await secureSettingsForJob(payload.settings || {});
   const force = Boolean(payload.force);
+  const strategy = normalizeSegmentationRetryStrategy(payload.strategy || payload.segmentationStrategy);
   const useLocalFirstSegmentation = shouldUseLocalFirstSegmentation(settings);
   if (!useLocalFirstSegmentation) {
     enforcePageResourceLimit({
@@ -776,21 +784,33 @@ async function handleSegmentPaper(req, res, paperId) {
   }
 
   if (useLocalFirstSegmentation) {
-    const segmented = segmentPaperLocally(paper, "claude-agent-local-first");
+    const segmented = strategy === SEGMENTATION_RETRY_STRATEGIES.STRUCTURE_ONLY
+      ? refreshPaperStructureOnly(
+        paper,
+        {
+          ...buildHeuristicPaperStructureMap(paper, pages),
+          fallbackReason: "claude-agent-local-first-structure-only",
+        },
+        { strategy },
+      )
+      : segmentPaperLocally(paper, "claude-agent-local-first");
     await savePaper(segmented);
+    const message = strategy === SEGMENTATION_RETRY_STRATEGIES.STRUCTURE_ONLY
+      ? "Claude Agent 通道较慢，已使用本地视觉刷新结构地图；已有段落和讲解保持不变。"
+      : "Claude Agent 通道较慢，已使用本地视觉分段；可以直接开始翻译讲解。";
     return json(res, {
       job: null,
       paper: segmented,
       settings: serializeClientSettings(settings),
-      message: "Claude Agent 通道较慢，已使用本地视觉分段；可以直接开始翻译讲解。",
+      message,
     });
   }
 
-  const job = createSegmentationJob({ paper, settings });
+  const job = createSegmentationJob({ paper, settings, strategy });
   paper.segmentationJob = buildPaperSegmentationJobStatus(job, {
     status: "queued",
     phase: "queued",
-    message: "AI 分段任务已加入本机队列。",
+    message: `${formatSegmentationRetryStrategyLabel(strategy)}任务已加入本机队列。`,
   });
   paper.updatedAt = new Date().toISOString();
   await savePaper(paper);
@@ -803,7 +823,7 @@ async function handleSegmentPaper(req, res, paperId) {
     job: serializeJob(job),
     paper,
     settings: serializeClientSettings(settings),
-    message: "AI 分段任务已加入本机队列。",
+    message: `${formatSegmentationRetryStrategyLabel(strategy)}任务已加入本机队列。`,
   });
 }
 
@@ -2245,6 +2265,9 @@ function normalizeLoadedSegmentationJob(job) {
   }));
   const completed = normalizedItems.filter((item) => item.status === "done").length;
   const failed = normalizedItems.filter((item) => item.status === "error").length;
+  const segmentation = normalizeSegmentationJobPayload(job.segmentation, {
+    strategy: job.strategy,
+  });
   return {
     id: String(job.id),
     type: "segmentation",
@@ -2264,12 +2287,29 @@ function normalizeLoadedSegmentationJob(job) {
     currentBatchSize: 0,
     phase: String(job.phase || ""),
     message: String(job.message || ""),
-    segmentation: job.segmentation || null,
+    segmentation,
     error: String(job.error || ""),
     createdAt: job.createdAt || new Date().toISOString(),
     startedAt: job.startedAt || "",
     completedAt: job.completedAt || "",
     updatedAt: job.updatedAt || new Date().toISOString(),
+  };
+}
+
+function normalizeSegmentationJobPayload(segmentation, fallback = {}) {
+  const data = segmentation && typeof segmentation === "object" && !Array.isArray(segmentation)
+    ? segmentation
+    : {};
+  const strategy = normalizeSegmentationRetryStrategy(data.strategy || fallback.strategy);
+  return {
+    ...data,
+    strategy,
+    strategyLabel: formatSegmentationRetryStrategyLabel(strategy),
+    pageCount: Number(data.pageCount || 0),
+    chunks: Number(data.chunks || 0),
+    mode: data.mode || "ai",
+    canReuseStructureMap: Boolean(data.canReuseStructureMap),
+    canReusePaperMemory: Boolean(data.canReusePaperMemory),
   };
 }
 
@@ -2370,9 +2410,29 @@ function createAnalysisJob({
   };
 }
 
-function createSegmentationJob({ paper, settings }) {
+function createSegmentationJob({ paper, settings, strategy = SEGMENTATION_RETRY_STRATEGIES.FULL }) {
   const now = new Date().toISOString();
+  const retryStrategy = normalizeSegmentationRetryStrategy(strategy);
   const chunks = chunkPagesForSegmentation(paper.extractionPages || [], getSegmentationChunkOptions(settings));
+  const items = retryStrategy === SEGMENTATION_RETRY_STRATEGIES.STRUCTURE_ONLY
+    ? [{
+        paragraphId: "structure_map",
+        pageRange: getPageRangeLabel(paper.extractionPages || []),
+        status: "queued",
+        attempts: 0,
+        error: "",
+        startedAt: "",
+        completedAt: "",
+      }]
+    : chunks.map((chunk, index) => ({
+        paragraphId: `chunk_${index + 1}`,
+        pageRange: getPageRangeLabel(chunk),
+        status: "queued",
+        attempts: 0,
+        error: "",
+        startedAt: "",
+        completedAt: "",
+      }));
   return {
     id: `seg_${Date.now()}_${randomUUID().slice(0, 8)}`,
     type: "segmentation",
@@ -2384,27 +2444,22 @@ function createSegmentationJob({ paper, settings }) {
     cacheHits: 0,
     adaptiveBatchSize: null,
     settings,
-    items: chunks.map((chunk, index) => ({
-      paragraphId: `chunk_${index + 1}`,
-      pageRange: getPageRangeLabel(chunk),
-      status: "queued",
-      attempts: 0,
-      error: "",
-      startedAt: "",
-      completedAt: "",
-    })),
-    total: chunks.length,
+    items,
+    total: items.length,
     completed: 0,
     failed: 0,
     currentParagraphId: "",
     currentBatchSize: 0,
     phase: "queued",
-    message: "等待 AI 分段处理。",
-    segmentation: {
+    message: `等待${formatSegmentationRetryStrategyLabel(retryStrategy)}处理。`,
+    segmentation: normalizeSegmentationJobPayload({
       pageCount: getPaperPageCount(paper),
       chunks: chunks.length,
       mode: "ai",
-    },
+      strategy: retryStrategy,
+      canReuseStructureMap: canReuseSegmentationStructureMap(paper.structureMap),
+      canReusePaperMemory: canReusePaperMemory(paper.paperMemory),
+    }),
     error: "",
     createdAt: now,
     startedAt: "",
@@ -2524,7 +2579,7 @@ function serializeJob(job) {
   if (job.type === "segmentation") {
     payload.phase = job.phase || "";
     payload.message = job.message || "";
-    payload.segmentation = job.segmentation || null;
+    payload.segmentation = normalizeSegmentationJobPayload(job.segmentation);
   }
 
   return payload;
@@ -2565,7 +2620,7 @@ function serializeJobSummary(job) {
   if (job.type === "segmentation") {
     payload.phase = job.phase || "";
     payload.message = job.message || "";
-    payload.segmentation = job.segmentation || null;
+    payload.segmentation = normalizeSegmentationJobPayload(job.segmentation);
   }
 
   return payload;
@@ -2775,11 +2830,12 @@ async function runAnalysisJob(job, signal) {
 
 async function runSegmentationJob(job, signal) {
   const now = new Date().toISOString();
+  const strategy = normalizeSegmentationRetryStrategy(job.segmentation?.strategy);
   job.status = "running";
   job.startedAt ||= now;
   job.updatedAt = now;
-  job.phase = "structure";
-  job.message = "AI 正在扫描全文结构。";
+  job.phase = strategy === SEGMENTATION_RETRY_STRATEGIES.REUSE_MEMORY ? "segment" : "structure";
+  job.message = getSegmentationJobStartMessage(strategy);
   await updatePaperSegmentationJobStatus(job.paperId, job, {
     status: "running",
     phase: job.phase,
@@ -2795,6 +2851,7 @@ async function runSegmentationJob(job, signal) {
     }
 
     const segmented = await segmentPaperWithAi(paper, resolveJobSettings(job.settings), {
+      strategy,
       signal,
       onProgress: async (event) => {
         await updateSegmentationJobProgress(job, event);
@@ -2816,7 +2873,7 @@ async function runSegmentationJob(job, signal) {
     recalculateJobProgress(job);
     job.status = "done";
     job.phase = "done";
-    job.message = `AI 分段完成：${getReadingParagraphs(segmented).length} 个段落。`;
+    job.message = formatSegmentationJobDoneMessage(segmented, strategy);
     job.currentParagraphId = "";
     job.currentBatchSize = 0;
     job.error = "";
@@ -2871,9 +2928,25 @@ async function updateSegmentationJobProgress(job, event = {}) {
   if (event.phase === "structure-start") {
     job.phase = "structure";
     job.message = "AI 正在扫描全文结构。";
+  } else if (event.phase === "structure-reused") {
+    job.phase = "segment";
+    job.message = "已复用结构地图，跳过全文结构扫描。";
   } else if (event.phase === "structure-done") {
     job.phase = "segment";
-    job.message = "全文结构扫描完成，正在进入页块分段。";
+    job.message = event.reusedStructureMap
+      ? "结构地图已复用，正在进入页块分段。"
+      : "全文结构扫描完成，正在进入页块分段。";
+  } else if (event.phase === "structure-only-done") {
+    const item = job.items[0];
+    if (item && item.status !== "done") {
+      item.status = "done";
+      item.completedAt = now;
+      item.error = "";
+    }
+    job.currentParagraphId = "";
+    job.currentBatchSize = 0;
+    job.phase = "validation";
+    job.message = `结构地图已刷新：${Number(event.sectionCount || 0)} 个章节计划。`;
   } else if (event.phase === "memory-start") {
     job.phase = "memory";
     job.message = "精读预读：AI 正在通读全文并整理 Paper Memory。";
@@ -2886,6 +2959,9 @@ async function updateSegmentationJobProgress(job, event = {}) {
   } else if (event.phase === "memory-done") {
     job.phase = "segment";
     job.message = "Paper Memory 已生成，正在进入页块分段。";
+  } else if (event.phase === "memory-reused") {
+    job.phase = "segment";
+    job.message = "已复用 Paper Memory，直接进入页块分段。";
   } else if (event.phase === "chunk-start") {
     const item = job.items[event.chunkIndex];
     if (item) {
@@ -2944,12 +3020,33 @@ function buildPaperSegmentationJobStatus(job, patch = {}) {
     total: Number(job.total || 0),
     completed: Number(job.completed || 0),
     failed: Number(job.failed || 0),
+    strategy: normalizeSegmentationRetryStrategy(job.segmentation?.strategy),
+    strategyLabel: formatSegmentationRetryStrategyLabel(job.segmentation?.strategy),
     error: patch.error || job.error || "",
     queuedAt: job.createdAt || "",
     startedAt: job.startedAt || "",
     completedAt: patch.completedAt || job.completedAt || "",
     updatedAt: now,
   };
+}
+
+function getSegmentationJobStartMessage(strategy) {
+  const normalized = normalizeSegmentationRetryStrategy(strategy);
+  if (normalized === SEGMENTATION_RETRY_STRATEGIES.REUSE_MEMORY) {
+    return "正在准备复用结构地图和 Paper Memory 重切段。";
+  }
+  if (normalized === SEGMENTATION_RETRY_STRATEGIES.STRUCTURE_ONLY) {
+    return "AI 正在刷新全文结构地图。";
+  }
+  return "AI 正在扫描全文结构。";
+}
+
+function formatSegmentationJobDoneMessage(segmented, strategy) {
+  const normalized = normalizeSegmentationRetryStrategy(strategy);
+  if (normalized === SEGMENTATION_RETRY_STRATEGIES.STRUCTURE_ONLY) {
+    return `结构地图已刷新：${getSegmentationPlan(segmented.structureMap).length} 个章节计划。`;
+  }
+  return `AI 分段完成：${getReadingParagraphs(segmented).length} 个段落。`;
 }
 
 function mergePaperMetadataAfterSegmentation(previousPaper, nextPaper) {
@@ -7926,22 +8023,103 @@ function segmentPaperLocally(paper, reason = "local-layout") {
   return segmented;
 }
 
+function refreshPaperStructureOnly(paper, structureMap, options = {}) {
+  const now = new Date().toISOString();
+  const paragraphs = Array.isArray(paper.paragraphs)
+    ? paper.paragraphs.map((paragraph) => ({ ...paragraph }))
+    : [];
+  const sections = inferSectionsFromSegmentationPlan(paragraphs, structureMap);
+  enrichSectionsWithContext(sections, paragraphs, []);
+  const previousStages = paper.segmentationStages && typeof paper.segmentationStages === "object" && !Array.isArray(paper.segmentationStages)
+    ? paper.segmentationStages
+    : {};
+  const paperMemory = canReusePaperMemory(paper.paperMemory) ? paper.paperMemory : null;
+  const segmented = {
+    ...paper,
+    status: paper.status || (paragraphs.length ? "ready" : "uploaded"),
+    segmentationMode: paper.segmentationMode || "ai",
+    structureMap,
+    segmentationPlan: getSegmentationPlan(structureMap),
+    segmentationStages: {
+      ...previousStages,
+      version: 1,
+      plan: {
+        source: "structure-map",
+        strategy: normalizeSegmentationRetryStrategy(options.strategy),
+        version: structureMap.segmentationPlanVersion || SEGMENTATION_PLAN_VERSION,
+        sections: getSegmentationPlan(structureMap).length,
+        refreshedAt: now,
+      },
+      structureRefresh: {
+        strategy: normalizeSegmentationRetryStrategy(options.strategy),
+        source: structureMap.fallbackReason ? "heuristic-fallback" : "ai",
+        pageRange: getPageRangeLabel(paper.extractionPages || []),
+        sections: getSegmentationPlan(structureMap).length,
+        updatedAt: now,
+      },
+    },
+    sections,
+    paragraphs,
+    contextProfile: buildPaperContextProfile(paragraphs, sections, [], structureMap, paperMemory),
+    segmentationJob: {
+      ...(paper.segmentationJob && typeof paper.segmentationJob === "object" ? paper.segmentationJob : {}),
+      status: "done",
+      phase: "structure-only",
+      message: `结构地图已刷新：${getSegmentationPlan(structureMap).length} 个章节计划。`,
+      strategy: normalizeSegmentationRetryStrategy(options.strategy),
+      strategyLabel: formatSegmentationRetryStrategyLabel(options.strategy),
+      updatedAt: now,
+    },
+    updatedAt: now,
+  };
+
+  attachParagraphArtifactLinks(segmented);
+  return segmented;
+}
+
 async function segmentPaperWithAi(paper, settings, options = {}) {
   const pages = paper.extractionPages || [];
-  await options.onProgress?.({ phase: "structure-start" });
-  const structureMap = await buildPaperStructureMapWithAi(paper, pages, settings, { signal: options.signal });
+  const strategy = normalizeSegmentationRetryStrategy(options.strategy);
+  const reuseStructureMap = strategy === SEGMENTATION_RETRY_STRATEGIES.REUSE_MEMORY &&
+    canReuseSegmentationStructureMap(paper.structureMap);
+  let structureMap;
+  if (reuseStructureMap) {
+    structureMap = paper.structureMap;
+    await options.onProgress?.({ phase: "structure-reused" });
+  } else {
+    await options.onProgress?.({ phase: "structure-start" });
+    structureMap = await buildPaperStructureMapWithAi(paper, pages, settings, { signal: options.signal });
+  }
   const chunkOptions = getSegmentationChunkOptions(settings);
   const chunks = chunkPagesForSegmentation(pages, chunkOptions);
+  if (strategy === SEGMENTATION_RETRY_STRATEGIES.STRUCTURE_ONLY) {
+    await options.onProgress?.({
+      phase: "structure-only-done",
+      sectionCount: getSegmentationPlan(structureMap).length,
+      totalChunks: chunks.length,
+    });
+    return refreshPaperStructureOnly(paper, structureMap, { strategy });
+  }
+
   await options.onProgress?.({
     phase: "structure-done",
+    reusedStructureMap,
     totalChunks: chunks.length,
   });
-  const paperMemory = shouldUsePaperMemoryForSegmentation(settings)
-    ? await buildPaperMemoryWithAi(paper, pages, structureMap, settings, {
-      signal: options.signal,
-      onProgress: options.onProgress,
-    })
-    : null;
+  let paperMemory = null;
+  let reusedPaperMemory = false;
+  if (shouldUsePaperMemoryForSegmentation(settings)) {
+    if (strategy === SEGMENTATION_RETRY_STRATEGIES.REUSE_MEMORY && canReusePaperMemory(paper.paperMemory)) {
+      paperMemory = paper.paperMemory;
+      reusedPaperMemory = true;
+      await options.onProgress?.({ phase: "memory-reused" });
+    } else {
+      paperMemory = await buildPaperMemoryWithAi(paper, pages, structureMap, settings, {
+        signal: options.signal,
+        onProgress: options.onProgress,
+      });
+    }
+  }
   const items = [];
   const chunkSummaries = [];
   const fallbackChunks = [];
@@ -8030,18 +8208,21 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
     segmentationStages: {
       version: 1,
       plan: {
-        source: "structure-map",
+        source: reuseStructureMap ? "reused-structure-map" : "structure-map",
+        strategy,
         version: structureMap.segmentationPlanVersion || SEGMENTATION_PLAN_VERSION,
         sections: getSegmentationPlan(structureMap).length,
       },
       paperMemory: {
         source: paperMemory?.source || "",
+        reused: reusedPaperMemory,
         keyTerms: Array.isArray(paperMemory?.keyTerms) ? paperMemory.keyTerms.length : 0,
         formulas: Array.isArray(paperMemory?.importantFormulas) ? paperMemory.importantFormulas.length : 0,
         visuals: Array.isArray(paperMemory?.importantVisuals) ? paperMemory.importantVisuals.length : 0,
         resources: Array.isArray(paperMemory?.resources) ? paperMemory.resources.length : 0,
       },
       localSegmentation: {
+        strategy,
         chunks: chunks.length,
         items: items.length,
         fallbackChunks: fallbackChunks.length,

@@ -47,6 +47,7 @@ const state = {
     status: "",
     phase: "",
     message: "",
+    strategy: "",
     completed: 0,
     failed: 0,
     total: 0,
@@ -1010,14 +1011,25 @@ async function segmentPaperWithAi(options = {}) {
     return false;
   }
 
-  setStatus("正在创建 AI 分段任务");
+  const strategy = normalizeClientSegmentationRetryStrategy(options.strategy);
+  const strategyLabel = options.strategy
+    ? formatClientSegmentationRetryStrategyLabel(strategy)
+    : "AI 分段";
+  setStatus(`正在创建${strategyLabel}任务`);
   updateAutoButtons();
 
   try {
+    const payload = {
+      settings: getSettings(),
+      strategy,
+    };
+    if (options.force) {
+      payload.force = true;
+    }
     const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}/segment`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ settings: getSettings() }),
+      body: JSON.stringify(payload),
     }, "创建 AI 分段任务");
     const result = await readResponse(response);
     applySecuredSettings(result.settings);
@@ -1852,6 +1864,93 @@ function formatSegmentationDebugStatus(result) {
   ].join(" · ");
 }
 
+function normalizeClientSegmentationRetryStrategy(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, "-");
+  if (["reuse", "reuse-memory", "reuse-paper-memory", "memory", "chunks", "chunks-only", "segment-only"].includes(key)) {
+    return "reuse-memory";
+  }
+  if (["structure", "structure-only", "map", "map-only", "plan", "plan-only"].includes(key)) {
+    return "structure-only";
+  }
+  return "full";
+}
+
+function formatClientSegmentationRetryStrategyLabel(value) {
+  const strategy = normalizeClientSegmentationRetryStrategy(value);
+  if (strategy === "reuse-memory") {
+    return "复用记忆重切段";
+  }
+  if (strategy === "structure-only") {
+    return "只刷新结构地图";
+  }
+  return "完整重跑";
+}
+
+function hasReusableClientStructureMap(paper) {
+  return Array.isArray(paper?.structureMap?.segmentationPlan) &&
+    paper.structureMap.segmentationPlan.some((section) => section?.title && Number.isFinite(Number(section.startPage)));
+}
+
+function hasReusableClientPaperMemory(paper) {
+  const memory = paper?.paperMemory;
+  if (!memory || typeof memory !== "object") {
+    return false;
+  }
+  if (String(memory.summary || memory.mainThread || "").trim()) {
+    return true;
+  }
+  return [
+    memory.contributions,
+    memory.keyTerms,
+    memory.importantFormulas,
+    memory.importantVisuals,
+    memory.resources,
+    memory.nonReadingGuidance,
+    memory.segmentationGuidance,
+  ].some((items) => Array.isArray(items) && items.length > 0);
+}
+
+function chooseSegmentationRetryStrategy() {
+  const hasStructure = hasReusableClientStructureMap(state.paper);
+  const hasMemory = hasReusableClientPaperMemory(state.paper);
+  const defaultChoice = hasStructure || hasMemory ? "2" : "1";
+  const value = window.prompt([
+    "选择这次重跑方式：",
+    "1 完整重跑：重新扫结构、预读 Paper Memory、切段，并重新生成全部讲解。",
+    "2 复用记忆重切段：保留已有结构/Paper Memory，直接重切段，再重新生成全部讲解。",
+    "3 只刷新结构地图：不改已有段落，不启动讲解。",
+  ].join("\n"), defaultChoice);
+  if (value === null) {
+    return null;
+  }
+
+  const normalized = normalizeClientSegmentationRetryStrategy(value);
+  if (normalized === "reuse-memory" || ["2", "reuse", "memory"].includes(String(value).trim().toLowerCase())) {
+    return {
+      strategy: "reuse-memory",
+      runAnalysis: true,
+      statusLabel: hasStructure || hasMemory
+        ? "已复用结构/Paper Memory 重分段，并加入后端分析队列"
+        : "已补齐结构/Paper Memory 重分段，并加入后端分析队列",
+    };
+  }
+  if (["3", "structure", "map", "plan"].includes(String(value).trim().toLowerCase()) || normalized === "structure-only") {
+    return {
+      strategy: "structure-only",
+      runAnalysis: false,
+      statusLabel: "结构地图已刷新；已有段落和讲解保持不变",
+    };
+  }
+  return {
+    strategy: normalized,
+    runAnalysis: true,
+    statusLabel: "已重新分段并加入后端分析队列",
+  };
+}
+
 async function rerunFullPipeline() {
   if (!state.paper || state.autoAnalyze.running || state.pipelineBusy) {
     return;
@@ -1866,19 +1965,32 @@ async function rerunFullPipeline() {
     return;
   }
 
+  const retryStrategy = chooseSegmentationRetryStrategy();
+  if (!retryStrategy) {
+    return;
+  }
+
   state.pipelineBusy = true;
   updateAutoButtons();
 
   try {
-    const segmented = await segmentPaperWithAi();
+    const segmented = await segmentPaperWithAi({
+      strategy: retryStrategy.strategy,
+      force: true,
+    });
     if (!segmented) {
       setStatus("重新分段失败，未启动重新生成。", true);
       return;
     }
 
+    if (!retryStrategy.runAnalysis) {
+      setStatus(retryStrategy.statusLabel);
+      return;
+    }
+
     await createAnalysisJob({
       rerunAll: true,
-      statusLabel: "已重新分段并加入后端分析队列",
+      statusLabel: retryStrategy.statusLabel,
     });
   } finally {
     state.pipelineBusy = false;
@@ -1969,6 +2081,7 @@ function applySegmentationJob(job) {
   state.segmentationJob.status = job.status || "";
   state.segmentationJob.phase = job.phase || "";
   state.segmentationJob.message = job.message || "";
+  state.segmentationJob.strategy = normalizeClientSegmentationRetryStrategy(job.segmentation?.strategy || job.strategy);
   state.segmentationJob.completed = Number(job.completed || 0);
   state.segmentationJob.failed = Number(job.failed || 0);
   state.segmentationJob.total = Number(job.total || 0);
@@ -1993,6 +2106,7 @@ function resetSegmentationJobState() {
     status: "",
     phase: "",
     message: "",
+    strategy: "",
     completed: 0,
     failed: 0,
     total: 0,
@@ -2055,7 +2169,13 @@ async function pollSegmentationJob(options = {}) {
     if (!state.segmentationJob.running) {
       loadRecentPapers();
       if (job.status === "done") {
-        setStatus(`AI 分段完成：${getReadingParagraphs(state.paper).length} 个段落`);
+        const strategy = normalizeClientSegmentationRetryStrategy(job.segmentation?.strategy || job.strategy);
+        if (strategy === "structure-only") {
+          const sectionCount = Array.isArray(state.paper?.segmentationPlan) ? state.paper.segmentationPlan.length : 0;
+          setStatus(`结构地图已刷新：${sectionCount} 个章节计划`);
+        } else {
+          setStatus(`AI 分段完成：${getReadingParagraphs(state.paper).length} 个段落`);
+        }
       } else if (job.status === "canceled") {
         setStatus("AI 分段已停止。", true);
       } else {
@@ -2115,8 +2235,11 @@ function updateSegmentationStatus() {
 
   const elapsed = Math.max(0, Math.round((Date.now() - state.segmentationJob.startedAt) / 1000));
   const progress = `${state.segmentationJob.completed + state.segmentationJob.failed}/${state.segmentationJob.total}`;
+  const strategyLabel = state.segmentationJob.strategy
+    ? `${formatClientSegmentationRetryStrategyLabel(state.segmentationJob.strategy)} · `
+    : "";
   const stopLabel = state.segmentationJob.stopRequested ? " · 正在停止" : "";
-  setStatus(`AI 分段队列 ${progress} · 已用 ${elapsed}s · ${state.segmentationJob.message || "处理中"}${stopLabel}`, state.segmentationJob.failed > 0);
+  setStatus(`AI 分段队列 ${progress} · ${strategyLabel}已用 ${elapsed}s · ${state.segmentationJob.message || "处理中"}${stopLabel}`, state.segmentationJob.failed > 0);
 }
 
 function clientSleep(ms) {
