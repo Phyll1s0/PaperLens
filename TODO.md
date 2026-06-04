@@ -2,92 +2,66 @@
 
 Updated: 2026-06-04
 
-## Current Problems
+## Current Completion
 
-- [ ] 测试覆盖仍需扩展：已有 Provider/Kimi/导出/Job/PDF/富文本/分段噪声/分段验证/模型诊断/视觉重建摘要/真实 PDF 视觉 fixture 测试，后续还缺上传 API 端到端和带 Poppler 的 CI 视觉回归。
-- [ ] 视觉结构仍不够可控：复杂双栏、多图组合、跨页图、公式/代码混排时，自动裁剪仍可能过大、误分类，后续还需要更智能的自动识别。
-- [ ] 精读分段入口仍需继续增强：已加入 Paper Memory 预读，但复杂双栏论文里，PDF block 排序、章节地图、References、表格主体、流程图文字、跨页自然段仍可能被误收或误合并；混合 block 还需要更精细的按行/按列重建。
-- [ ] 跨页定位体验仍需升级：段落跨页、图表跨页和相关图表跳转需要更明确的页码锚点与整页定位反馈。
+PaperLens 现在已经是一个可本机使用的论文精读工具：上传 PDF、抽取文本/页图、AI 分段、翻译讲解、追问、视觉材料查看、Markdown/Word 导出、长任务队列、失败补跑、Provider 诊断和基础开源运行链路都已经打通。
 
-## Next
+分段完成度：约 72%。
 
-1. [ ] 精读分段入口继续增强：基于 Paper Memory 继续改善复杂双栏论文里的 PDF block 排序、章节地图、References、表格主体、流程图文字和跨页自然段。
-2. [ ] 跨页定位体验升级：段落跨页、图表跨页和相关图表跳转需要更明确的页码锚点与整页定位反馈。
+- 已完成：AI 预读 Paper Memory、章节地图、本地 layout fallback、双栏 block 排序、跨页段落合并、作者/会议/页眉/链接/References/图注/表格主体/流程图文字过滤、分段调试面板、段落 sourceBox 和页图定位。
+- 主要短板：复杂双栏里的阅读顺序仍可能错；同一 PDF block 内多列/多段混排还不够精细；跨页自然段、公式夹正文、图表附近正文仍可能误合并或误拆；AI 分段失败时 fallback 的语义质量还不够稳定。
+- 当前判断：对文字为主、版式正常的论文已经可用；对 CV/系统/硬件论文里图表密集、公式密集、双栏很碎的论文，还需要继续打磨。
 
-## Later
+图片/表格/代码识别完成度：约 65%。
 
-- [ ] OCR 质量升级：自动检测 PDF 语言、页倾斜/低清晰度、OCR 后文本密度，并允许用户选择 OCR 语言后重跑。
-- [ ] SQLite 持久化迁移：把论文、段落、Job、导出历史迁移到 SQLite，提供迁移脚本和回滚方案。
-- [ ] 应用端打包：评估 Electron/Tauri/一键启动包，让非开发者下载后能直接运行。
-- [ ] 部署模式升级：整理本地、Docker、内网分享、公网部署的差异和安全默认值。
-- [ ] 视觉结构模型化：在启发式和像素裁剪之外，探索版面检测模型或可插拔视觉分析 Provider。
+- 已完成：生成整页图、识别 visualRegions、caption anchor 裁剪、像素级非白区域收紧、crop SVG 展示、放大查看、下载、隐藏/恢复、人工改类型、人工裁剪编辑器、导出引用、低置信/过大裁剪提示、真实 PDF fixture 回归。
+- 主要短板：多图组合、跨页图、图和图注距离较远、表格主体很大、流程图文字密集时，裁剪可能过大或类型误判；自动识别还不是“模型级版面理解”。
+- 当前判断：图表作为辅助阅读材料已经可用；要做到接近专用版面检测工具，还需要引入更强的视觉结构模型或更细的候选区域合并/拆分策略。
 
-## Done
+公式识别与渲染完成度：约 55%。
 
-- [x] 服务状态脚本修复：`npm run service:status` 会通过 health + 端口监听识别真实 PaperLens PID，自动修复 stale PID 文件；补上 `npm run service:restart`，启动/重启后回显真正监听 3000 的服务进程。
-- [x] 精读流程图文字过滤：新增共享 `segmentation-visual-noise` 判定，分段输入、分段调试和质量巡检统一识别多行短标签/流程图文字；这类 `visual-text` 会直接移出正文队列，避免和下一段合并后进入翻译讲解。
-- [x] 段落页图定位框：`paragraph.location.pageAnchors` 会带起始 `sourceBox` 和页面尺寸；点击段落页码时，整页预览会用绿色框标出该段起始位置，跨页段落仍保留起/续/止页锚点。
-- [x] 跨页段落定位摘要：新增 `lib/paragraph-location.js`，后端载入旧论文时自动补 `paragraph.location`；前端段落 header 显示“跨 N 页”和相关图表页码，页码按钮区分起点/续页/终点，单页段落也可一键跳到页图预览。
-- [x] 精读分段输入块准备：抽出 `lib/segmentation-page-input.js`，AI 分段和本地 layout 兜底共用同一套可测的 PDF block 过滤/排序；双栏页面按阅读顺序输入，作者/会议噪声、图注、表格主体、独立链接和视觉块不再直接送入正文分段窗口，混合作者块中的正文仍会救回。
-- [x] Paper Memory 调试闭环：`/api/papers/:id/segmentation-debug` 会返回精读预读抓到的摘要、主线、术语、公式、图表、代码/数据链接和非正文提示；前端分段调试面板可直接查看这些证据，资源链接可点击，便于判断分段错在预读还是切段。
-- [x] 精读 Paper Memory 预读：精读 AI 分段前先按原始 PDF blocks 预读整篇论文，合成 `paperMemory`，保留关键公式、图表、代码、资源链接和非正文提示；后续分段和精读讲解会引用这份记忆，快速模式不增加额外 AI 预读。
-- [x] 真实 PDF 视觉 fixture 回归：抽出 `lib/visual-artifacts.js`，让上传/重建/裁剪 SVG 使用同一条可测链路；新增 fixture 覆盖页面图生成、视觉块识别、低置信公式摘要、像素收紧图表和 crop SVG 输出。
-- [x] 视觉重建摘要回归测试：抽出 `lib/visual-rebuild-summary.js`，覆盖低置信/过大裁剪摘要、隐藏图表统计、人工裁剪保留和“只改裁剪框”重建不丢失。
-- [x] 视觉裁剪编辑器：图表/公式/代码块新增“裁剪”入口；放大查看器可直接进入编辑器，支持在整页图上拖动/框选/四角缩放和 x/y/w/h 精调，保存后后端更新 crop SVG、标记 manual crop，并在视觉重建时保留人工裁剪。
-- [x] 长任务预算保护：新增任务级 `Task Budget USD`，分析前显示预计 token、耗时、费用和预算状态；后端创建分析任务/补跑失败项时强制拦截超预算请求，并把预算估算写入 Job 轮询和历史。
-- [x] 章节地图入口升级：新增 `lib/segmentation-structure.js`，本地 layout fallback 会从 PDF heading 识别多章节结构；过滤标题、作者、图注、坐标轴、年份参考文献等伪 heading，并让本地段落按实际 heading 顺序生成 sections。
-- [x] 模型诊断报告回归测试：抽出 `lib/model-diagnostics.js`，覆盖 Kimi Code Direct、Claude 本机配置、保存 Key 引用错配、代理/URL 脱敏、预算和 Docker 建议，确保诊断包不泄露完整 API Key。
-- [x] 分段调试视图二期：调试报告保留页图信息；前端支持点击 PDF block 在页图上框选定位，对比 PDF block 与当前段落，并下载完整调试 JSON。
-- [x] 视觉重建回归集：抽出 `lib/visual-crop-quality.js`，固化裁剪归一化、低置信/过大裁剪、像素精修置信度、`Figure 1.` / `Table 1.`、公式/代码/表格误分类样例。
-- [x] 混合 block 重建二期：Poppler 和 Swift PDF 提取会保存 block 内 line 坐标；混合作者/机构/元数据 block 优先按 line 重建多个正文片段，并把精确 bbox 传给段落来源和调试面板。
-- [x] 真实 PDF 分段 fixture 扩展：新增 M2XFP/Chronos/Kronos 最小 JSON fixture 和回归测试，覆盖复杂双栏、混合作者块、OpenReview/代码链接、running header、图表 caption、模型配置表、章节 heading 和跨页续写线索。
-- [x] 混合 PDF block 正文救回一期：当作者/机构/元数据 block 内夹着摘要或正文尾句时，先救回可读正文片段，再交给本地分段和 AI 分段窗口，避免整块误删正文。
-- [x] 分段调试视图一期：新增 `/api/papers/:id/segmentation-debug` 和前端“分段调试”面板，展示 PDF block 页码/坐标、清洗后文本、保留/丢弃理由、heading 候选、段落来源和 fallback 元信息。
-- [x] 分段入口清洗一期：PDF block 进入精读前会剥离嵌入正文的 arXiv stamp/会议元数据，过滤首页标题、作者多邮箱块和版权/ACM 元数据；论文标题改从原始首页 block 推断；页面明确标出 layout 本地兜底。
-- [x] 精读分段样例集一期：抽出 `lib/segmentation-validation.js`，让服务和测试共用分段验证/噪声巡检；覆盖 Chronos 跨页续段、Kronos 章节边界、M2XFP 表格主体、caption、References 和重复页眉噪声。
-- [x] 分段噪声回归基础：抽出 References/参考文献条目/页码页眉判断到 `lib/segmentation-repair.js`，覆盖 arXiv/URL 引用、References heading 和 running header，避免它们误入正文精读。
-- [x] 图表/公式展示修复：图表卡片和放大预览改为直接使用后端裁剪 SVG，避免整页图 CSS 位移导致白图/错位；caption 识别兼容 `Figure 1.` / `Table 1.`；公式 artifact 渲染增加数学 Unicode 字母和常见下标词归一。
-- [x] 视觉质量摘要：论文顶部统计显示图表/公式/代码裁剪数量，并在存在缺裁剪、低置信或过大裁剪时提示“裁剪待查”，便于判断是否需要重建图表。
-- [x] Job Queue 恢复回归测试：抽出 `lib/job-recovery.js`，让服务启动恢复和测试共用任务状态规则；覆盖 running/canceling/queued/done/error/canceled、运行中 item 清理、外部活跃 worker 跳过和中断任务重新入队。
-- [x] 最小 PDF fixture 回归测试：抽出 `lib/pdf-extraction.js`，让上传/OCR 重提取和测试共用 PDF 提取逻辑；新增最小 PDF fixture，覆盖 Poppler bbox XML 解析、实体转义、区块坐标，并在本机 Poppler 可用时跑真实 PDF 提取。
-- [x] Word 导出回归测试：抽出 `lib/export-docx.js`，让 `.docx` 下载 API 和测试共用导出逻辑；覆盖 docx zip 结构、document XML、媒体关系、图片文件、隐藏图表过滤和 XML 转义。
-- [x] Markdown 导出回归测试：抽出 `lib/export-markdown.js`，让 Markdown 下载 API 和测试共用导出逻辑；覆盖章节、页码、术语去重、尚未生成段落、隐藏图表过滤和裁剪图片链接。
-- [x] 导出 QA 回归测试：抽出 `lib/export-qa.js`，让 API 和测试共用导出检查逻辑；覆盖隐藏图表引用、缺失图表引用、缺失裁剪、缺失图片、低置信裁剪和 LaTeX 风险。
-- [x] Markdown 表格与公式展示升级：问答/讲解中的 Markdown 表格会渲染为真实表格，并兼容模型把表格行压成一行的情况；公式 artifact 展示层增加 LaTeX 化归一，优先用 display math 呈现。
-- [x] Markdown 阅读块统一：原文、翻译、讲解、追问问答、视觉材料说明统一走块级 Markdown 渲染，支持标题、段落、列表、引用、分隔线、代码围栏和公式块；局部刷新会保留当前视口，避免提问后跳回顶部。
-- [x] 视觉材料人工校正：图片/表格/公式/代码 artifact 支持前端改类型、修正文本文字、隐藏/恢复；隐藏项会退出 AI 上下文、导出和段落图表引用，并在视觉重建时尽量保留人工修正。
-- [x] 文档同步：README、`.env.example` 和 setup 提示已更新到 Kimi Code Direct、真实论文跑通结果、碎片 LaTeX 修复、Docker/Claude CLI 关系和代理策略。
-- [x] 公式 artifact 识别收紧：过滤图表坐标轴标签、超参数表格行和极短无意义公式碎片，并合并同一裁剪区域的公式片段。
-- [x] 分段碎片与慢速退化修复：短续行合并放宽、PDF 图表/LaTeX 提取垃圾过滤，Kimi Code Direct 精读 batch 改为更稳的 4 段并避免 adaptiveBatchSize 永久退化到 1。
-- [x] Provider mock 回归测试：抽出 OpenAI-compatible endpoint/payload/response/error 纯函数，覆盖 DeepSeek payload、额度/限流/认证错误和返回解析。
-- [x] Kimi Direct 协议回归测试：抽出 Anthropic payload/header/response 纯函数并加入 `npm test`，避免 provider 改动破坏调用格式。
-- [x] 自动化测试基础入口：新增 `npm test`、`scripts/test.mjs` 和首个碎片 LaTeX 回归测试，后续测试统一接入 `tests/*.test.mjs`。
-- [x] Kimi Code Direct 通道：页面 Kimi Code Key 默认直连 `https://api.kimi.com/coding/v1/messages`，不依赖本机 `claude` CLI；Claude CLI 只保留为本机配置/可选后备。
-- [x] 整篇论文真实跑通：TimesFM 论文使用 Kimi Code Direct 精读完成 `125/125` 段，失败 `0`，导出 QA 为 `ok`。
-- [x] 碎片 LaTeX 渲染修复：展示前自动合并被换行拆碎的公式 token，例如 `y 1:L := \{ y 1, ⋯, y L \}` 会归一化为可渲染的 `$y_{1:L}:=\{y_{1},⋯,y_{L}\}$`。
-- [x] Claude/Kimi 脱敏诊断包：新增 `/api/model/diagnostics` 和前端“诊断包”按钮，可复制 Provider、Key 摘要、Claude CLI、代理、预算、Docker/本机环境和建议，不返回明文 API Key。
-- [x] 导出 QA 检查：新增 `/api/papers/:id/export-qa`，前端提供“导出检查”按钮和结果面板，覆盖未完成段落、坏图表引用、裁剪/资源缺失、低置信图和 LaTeX 风险。
-- [x] 长任务资源保护：新增 `PAPERLENS_MAX_ANALYSIS_JOB_PARAGRAPHS`、`PAPERLENS_MAX_ANALYSIS_JOB_CHARS`、`PAPERLENS_MAX_AI_SEGMENTATION_PAGES`、`PAPERLENS_MAX_OCR_JOB_PAGES`、`PAPERLENS_MAX_VISUAL_REBUILD_*`；health 和前端状态显示当前上限。
-- [x] JSON 持久化加固：论文、Job、加密 Secrets 走原子写入；论文/Job 保存后生成最近备份，读取损坏时自动从最新有效备份恢复；health 暴露 persistence 状态。
-- [x] 分段编辑闭环：段落卡片支持隐藏/恢复、合并下段、用 `||` 拆分、改章节；后端保存人工覆盖，重建章节上下文和图表引用，只清空变动段落的旧分析。
-- [x] Provider 代理传输升级：OpenAI-compatible 请求不再依赖普通 `fetch` 的代理能力，后端可通过 HTTP CONNECT 或 SOCKS5 tunnel 发起模型请求，诊断页显示传输模式和代理来源。
-- [x] Provider 教程入口：把 Claude Code、Kimi、DeepSeek、代理和 Docker 环境差异收进模型面板教程，并给出检测与修复建议。
-- [x] 部署安全基础层：可用 `PAPERLENS_ACCESS_TOKEN` 开启登录保护，API/导出/assets 需要 Cookie，health 显示公网风险，`data/secrets.json` 可加密保存。
-- [x] 内置 OCR Job：扫描版 PDF 可在页面启动本机 OCR，后台队列调用 OCRmyPDF/Tesseract，完成后自动重新提取文本、段落和视觉结构。
-- [x] 服务运行状态收敛：health schema v2 暴露后端版本、启动信息、源码/静态文件更新时间和 Job Queue 快照，页面会在旧进程/旧前端时显示修复命令。
-- [x] 旧论文维护入口：支持批量重建视觉结构/图表裁剪，不必重新上传 PDF。
-- [x] 速度与质量仪表盘：显示预计耗时、批次大小、并发、缓存命中、失败重试策略，并允许用户按“快速/精读”切换。
-- [x] AI 分段质量巡检：分段后自动标记作者、链接、页眉页脚、图注、参考文献等噪声段落，避免直接进入讲解队列。
-- [x] AI 分段升级：全文章节计划、局部分段、合并校验三阶段，支持跨页段落合并和上下文窗口。
-- [x] PDF 视觉结构升级：生成 `visualRegions`，从几何裁剪升级到像素级非白区域检测，减少整块截图过大和图注/图片文字误归段落。
-- [x] PDF 视觉资产交互升级：图片、公式、代码块裁剪支持定位整页、放大查看、下载和更清晰的相关段落入口。
-- [x] LaTeX/公式渲染修复：兼容常见 `$...$`、`\(...\)`、`\[...\]`、残缺公式和解释文本中的 Markdown/LaTeX 混排。
-- [x] 长任务断线恢复提示：`fail to fetch`、刷新、网络短断时明确提示后端任务仍在继续，并自动同步活跃 Job。
-- [x] 开源易用性：首次配置教程、一键启动脚本、Docker Compose 模板完善。
-- [x] 论文库能力：标签、收藏、全文搜索、阅读进度和导出历史。
-- [x] 速度优化：缓存已完成段落、失败段落小批次、Provider 分流策略。
-- [x] 导出格式升级：支持 `.docx`，保留章节、段落、图片和术语。
-- [x] 导出升级：Markdown 笔记嵌入图表/公式/代码裁剪预览。
-- [x] Markdown 导出原文、翻译、讲解、术语和相关图表引用。
-- [x] 补跑失败/未完成段落，保留已成功结果。
-- [x] 完整重跑：重新 AI 分段并重新生成全部段落。
+- 已完成：公式 artifact 基础识别、碎片 LaTeX 合并、常见 Unicode 数学符号归一、展示层公式块渲染、导出 QA 的 LaTeX 风险提示、低置信公式过滤。
+- 主要短板：PDF 原生公式通常不是标准 LaTeX，复杂多行公式、编号公式、矩阵/分段函数、公式夹自然语言时仍容易识别不准；单独提取出的公式有时只是视觉文本，不是真正可复用的 LaTeX。
+- 当前判断：解释文本里的 LaTeX 渲染基本可控；从 PDF 自动恢复高质量 LaTeX 仍是明显短板，需要 OCR/公式识别模型或更专门的公式重建链路。
+
+## P0 Next
+
+1. [ ] 分段真实案例复盘入口：在分段调试页增加“问题类型汇总”，按作者噪声、图注、表格、流程图、References、跨页、短碎片、sourceBox 缺失分类统计，帮助快速定位一篇论文为什么分段差。
+2. [ ] 跨页自然段二次修复：基于 `sourceBox`、页码连续性、句尾状态、章节地图和 Paper Memory，对 AI 分段结果再做一次跨页/跨栏合并校验。
+3. [ ] PDF block 按行重建升级：对同一 block 内多列、多段、公式夹正文的情况，优先按 line 坐标拆成候选阅读片段，再进入噪声过滤和 AI 分段。
+4. [ ] 视觉结构 QA 面板升级：把每个图/表/公式/代码的裁剪质量、类型置信度、是否人工修正、是否进入 AI 上下文集中展示，方便一次性修图。
+
+## P1 Next
+
+1. [ ] 公式识别升级一期：区分“公式视觉块”“公式编号”“正文里的数学表达式”，减少坐标轴、表格数值、孤立变量被当成公式。
+2. [ ] 图表候选拆分：对一个大裁剪里包含多个子图或多个表格的情况，尝试按非白区域和 caption 位置拆成多个候选。
+3. [ ] 段落-视觉材料关联升级：段落引用 Figure/Table/Equation 时，优先关联同编号 artifact；没有编号时再用页码和距离兜底。
+4. [ ] 失败分段重跑策略：AI 分段失败后允许只重跑结构地图、只重跑局部分段、或保留 Paper Memory 直接重跑切段。
+
+## P2 Later
+
+1. [ ] 上传 API 端到端测试：覆盖上传 PDF、抽取、分段、生成视觉材料、创建分析任务的完整后端链路。
+2. [ ] 带 Poppler 的 CI 视觉回归：在 CI 中安装 `pdftotext`/`pdftoppm`，跑真实 PDF 页面渲染和裁剪回归。
+3. [ ] OCR 质量升级：自动检测 PDF 语言、页倾斜/低清晰度、OCR 后文本密度，并允许用户选择 OCR 语言后重跑。
+4. [ ] SQLite 持久化迁移：把论文、段落、Job、导出历史迁移到 SQLite，提供迁移脚本和回滚方案。
+5. [ ] 应用端打包：评估 Electron/Tauri/一键启动包，让非开发者下载后能直接运行。
+6. [ ] 部署模式升级：整理本地、Docker、内网分享、公网部署的差异和安全默认值。
+7. [ ] 视觉结构模型化：在启发式和像素裁剪之外，探索版面检测模型或可插拔视觉分析 Provider。
+
+## Acceptance Targets
+
+- 分段：普通双栏论文正文段落错误率降到用户可手动少量修正；复杂论文至少能在调试页明确看出错误来源。
+- 图片/表格：自动裁剪默认可读，低置信项有明确提示，人工裁剪后重建不会丢失。
+- 公式：解释区 LaTeX 稳定渲染；PDF 提取公式至少不把表格数值/坐标轴大量误识别为公式；复杂公式允许标记为低置信而不是强行错误渲染。
+- 稳定性：长任务抗刷新、失败可补跑、服务状态可诊断，用户不需要猜后端是否还活着。
+
+## Recent Done
+
+- [x] 精读流程图文字过滤：共享 `segmentation-visual-noise`，分段输入、调试报告和质量巡检统一识别图中文字，并把 `visual-text` 移出正文队列。
+- [x] 段落页图定位框：段落页码锚点带 `sourceBox` 和页面尺寸，点击后在整页预览里用绿色框标出起始位置。
+- [x] 跨页段落定位摘要：段落 header 显示跨页信息、相关图表页码和起/续/止锚点。
+- [x] 精读分段输入块准备：AI 分段和 layout fallback 共用可测的 PDF block 过滤/排序输入。
+- [x] Paper Memory 预读和调试闭环：精读前先读全文结构，保留摘要、主线、术语、公式、图表、代码/数据链接和非正文提示。
+- [x] 视觉裁剪编辑器：图表/公式/代码块支持人工裁剪、保存和重建保留。
+- [x] 真实 PDF 视觉 fixture 和分段 fixture 回归：覆盖 M2XFP、Chronos、Kronos 等复杂样例。
+- [x] 长任务 Job Queue、预算保护、失败补跑、导出 QA、Markdown/Word 导出、Provider 诊断和服务状态收敛。
