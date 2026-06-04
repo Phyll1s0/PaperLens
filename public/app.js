@@ -5961,44 +5961,199 @@ async function editParagraph(paragraphId, payload) {
 function getRelatedArtifactsForParagraph(paper, paragraph) {
   const artifacts = (paper?.pageArtifacts || []).filter((artifact) => !artifact.hidden);
   const ids = new Set(paragraph.relatedArtifactIds || []);
+  const references = extractParagraphArtifactReferences(paragraph.sourceText || "");
 
-  for (const artifact of artifacts) {
-    if (artifact.type === "caption" && paragraphMentionsArtifact(paragraph.sourceText, artifact)) {
-      ids.add(artifact.id);
+  if (references.length) {
+    const referenceKeys = new Set(references.map((reference) => reference.key));
+    for (const artifact of artifacts) {
+      const parsed = parseArtifactLabel(artifact.label || "") || parseFormulaArtifactTextReference(artifact);
+      if (parsed && referenceKeys.has(parsed.key)) {
+        ids.add(artifact.id);
+      }
+    }
+  } else {
+    const fallback = findClientFallbackArtifact(paragraph, artifacts);
+    if (fallback) {
+      ids.add(fallback.id);
     }
   }
 
   return artifacts.filter((artifact) => ids.has(artifact.id));
 }
 
-function paragraphMentionsArtifact(text, artifact) {
-  const parsed = parseArtifactLabel(artifact.label);
-  if (!parsed) {
-    return false;
+function extractParagraphArtifactReferences(text) {
+  const clean = String(text || "");
+  const references = [];
+  const seen = new Set();
+  const pattern = /\b(fig(?:ure)?s?\.?|figs?\.?|tables?|tabs?\.?|eq(?:uation)?s?\.?|eqs?\.?)\s*[:.]?\s*\(?\s*(\d+)\s*\)?(?:\s*\(([a-z])\)|([a-z])\b)?/gi;
+  let match;
+  while ((match = pattern.exec(clean))) {
+    const kind = normalizeReferenceKind(match[1]);
+    const baseNumber = normalizeReferenceNumber(match[2]);
+    if (!kind || !baseNumber) {
+      continue;
+    }
+    const suffix = normalizeReferenceSuffix(match[3] || match[4] || "");
+    const number = `${baseNumber}${suffix}`;
+    const key = `${kind}:${number}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    references.push({ kind, number, baseNumber, suffix, key });
+  }
+  return references;
+}
+
+function findClientFallbackArtifact(paragraph, artifacts) {
+  const cueKind = getClientUnnumberedReferenceCueKind(paragraph.sourceText || "");
+  const pageStart = Number(paragraph.pageNumber || 0);
+  const pageEnd = Math.max(pageStart, Number(paragraph.pageEndNumber || paragraph.pageNumber || 0));
+  if (!cueKind || !pageStart) {
+    return null;
   }
 
-  const number = escapeRegExp(parsed.number);
-  const pattern = parsed.kind === "table"
-    ? `\\b(?:table|tab\\.?)\\s*${number}(?:\\s*\\([a-z]\\))?\\b`
-    : `\\b(?:figure|fig\\.?)\\s*${number}(?:\\s*\\([a-z]\\))?\\b`;
+  return artifacts
+    .filter((artifact) => !artifact.splitCandidate && getClientArtifactKind(artifact) === cueKind)
+    .map((artifact) => ({
+      artifact,
+      score: scoreClientFallbackArtifact(paragraph, artifact, pageStart, pageEnd),
+    }))
+    .filter((item) => Number.isFinite(item.score))
+    .sort((a, b) => a.score - b.score)[0]?.artifact || null;
+}
 
-  return new RegExp(pattern, "i").test(String(text || ""));
+function getClientUnnumberedReferenceCueKind(text) {
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  if (/\b(?:equation|eq\.|formula|objective|loss function)\b/i.test(clean)) {
+    return "equation";
+  }
+  if (/\b(?:table|tabular)\b/i.test(clean)) {
+    return "table";
+  }
+  if (/\b(?:figure|fig\.|diagram|chart|plot|visualization|illustration)\b/i.test(clean) ||
+    /\b(?:shown|illustrated|depicted|visualized)\s+(?:above|below|here)\b/i.test(clean) ||
+    /\b(?:above|below)\s+(?:shows|illustrates|depicts)\b/i.test(clean)) {
+    return "figure";
+  }
+  return "";
+}
+
+function scoreClientFallbackArtifact(paragraph, artifact, pageStart, pageEnd) {
+  const artifactPage = Number(artifact.pageNumber || 0);
+  if (!artifactPage) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const pageDistance = artifactPage < pageStart
+    ? pageStart - artifactPage
+    : artifactPage > pageEnd ? artifactPage - pageEnd : 0;
+  if (pageDistance > 1) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const paragraphBox = normalizeClientArtifactBox(paragraph.sourceBox);
+  const artifactBox = normalizeClientArtifactBox(artifact.crop) || normalizeClientArtifactBox(artifact);
+  const verticalDistance = paragraphBox && artifactBox && artifactPage >= pageStart && artifactPage <= pageEnd
+    ? getClientBoxVerticalDistance(paragraphBox, artifactBox)
+    : 420;
+  return pageDistance * 1000 + verticalDistance + (artifact.label ? 20 : 0);
+}
+
+function parseFormulaArtifactTextReference(artifact) {
+  if (artifact.type !== "formula") {
+    return null;
+  }
+  const match = String(artifact.text || "").replace(/\s+/g, " ").trim().match(/(?:^|\s)\((\d+[a-z]?)\)\s*$/i);
+  if (!match) {
+    return null;
+  }
+  const number = normalizeReferenceNumber(match[1]);
+  return number ? {
+    kind: "equation",
+    number,
+    key: `equation:${number}`,
+  } : null;
+}
+
+function getClientArtifactKind(artifact = {}) {
+  const parsed = parseArtifactLabel(artifact.label || "");
+  if (parsed?.kind) {
+    return parsed.kind;
+  }
+  if (artifact.type === "formula") {
+    return "equation";
+  }
+  if (artifact.type === "caption") {
+    return artifact.visualType === "table" ? "table" : "figure";
+  }
+  return "";
 }
 
 function parseArtifactLabel(label) {
-  const match = String(label || "").match(/^(figure|table)\s+(\d+[a-z]?)/i);
+  const match = String(label || "").replace(/\s+/g, " ").trim()
+    .match(/^(fig(?:ure)?|fig\.?|table|tab\.?|equation|eq\.?)s?\s*[:.]?\s*\(?\s*(\d+)\s*\)?(?:\s*\(([a-z])\)|([a-z])\b)?/i);
   if (!match) {
     return null;
   }
 
+  const kind = normalizeReferenceKind(match[1]);
+  const baseNumber = normalizeReferenceNumber(match[2]);
+  if (!kind || !baseNumber) {
+    return null;
+  }
+  const suffix = normalizeReferenceSuffix(match[3] || match[4] || "");
+  const number = `${baseNumber}${suffix}`;
   return {
-    kind: match[1].toLowerCase() === "table" ? "table" : "figure",
-    number: match[2],
+    kind,
+    number,
+    key: `${kind}:${number}`,
   };
 }
 
-function escapeRegExp(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function normalizeReferenceKind(prefix) {
+  const clean = String(prefix || "").toLowerCase().replace(/\./g, "");
+  if (clean.startsWith("tab")) {
+    return "table";
+  }
+  if (clean.startsWith("eq")) {
+    return "equation";
+  }
+  if (clean.startsWith("fig")) {
+    return "figure";
+  }
+  return "";
+}
+
+function normalizeReferenceNumber(value) {
+  return String(value || "").trim().toLowerCase().replace(/[^0-9a-z]/g, "");
+}
+
+function normalizeReferenceSuffix(value) {
+  const clean = String(value || "").trim().toLowerCase();
+  return /^[a-z]$/.test(clean) ? clean : "";
+}
+
+function normalizeClientArtifactBox(box = {}) {
+  const x = Number(box.x);
+  const y = Number(box.y);
+  const width = Number(box.width);
+  const height = Number(box.height);
+  if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+    return null;
+  }
+  return { x, y, width, height };
+}
+
+function getClientBoxVerticalDistance(a, b) {
+  const aBottom = a.y + a.height;
+  const bBottom = b.y + b.height;
+  if (aBottom < b.y) {
+    return b.y - aBottom;
+  }
+  if (bBottom < a.y) {
+    return a.y - bBottom;
+  }
+  return Math.abs((a.y + a.height / 2) - (b.y + b.height / 2)) * 0.2;
 }
 
 function renderRelatedArtifacts(artifacts) {

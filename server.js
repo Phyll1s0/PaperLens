@@ -40,6 +40,10 @@ import {
   normalizePaperMemory,
 } from "./lib/paper-memory.js";
 import {
+  attachParagraphArtifactLinks,
+  resolveParagraphRelatedArtifacts,
+} from "./lib/paragraph-artifact-links.js";
+import {
   enrichPaperParagraphLocations,
 } from "./lib/paragraph-location.js";
 import {
@@ -4469,10 +4473,7 @@ function buildFastNearbyContext(paper, paragraph) {
 }
 
 function buildFastReferenceContext(paper, paragraph) {
-  const relatedIds = new Set(Array.isArray(paragraph.relatedArtifactIds) ? paragraph.relatedArtifactIds : []);
-  const artifacts = getVisiblePaperArtifacts(paper);
-  const related = artifacts
-    .filter((artifact) => relatedIds.has(artifact.id) || (artifact.label && paragraphCanReferenceArtifact(paragraph, artifact)))
+  const related = resolveParagraphRelatedArtifacts(paper, paragraph)
     .slice(0, 2);
   if (!related.length) {
     return "";
@@ -4626,18 +4627,7 @@ function formatContextParagraph(paragraph, label) {
 }
 
 function buildRelatedArtifactContext(paper, paragraph) {
-  const relatedIds = new Set(Array.isArray(paragraph.relatedArtifactIds) ? paragraph.relatedArtifactIds : []);
-  const artifacts = getVisiblePaperArtifacts(paper);
-  const directMatches = artifacts.filter((artifact) => relatedIds.has(artifact.id));
-  const inferredMatches = artifacts.filter((artifact) => {
-    if (!artifact.label || relatedIds.has(artifact.id)) {
-      return false;
-    }
-
-    return paragraphCanReferenceArtifact(paragraph, artifact);
-  });
-  const selected = [...directMatches, ...inferredMatches]
-    .filter((artifact, index, all) => all.findIndex((item) => item.id === artifact.id) === index)
+  const selected = resolveParagraphRelatedArtifacts(paper, paragraph)
     .slice(0, 4);
 
   if (!selected.length) {
@@ -8943,73 +8933,6 @@ function inferSectionsFromSegmentationPlan(paragraphs, structureMap = null) {
   }
 
   return sections.length ? sections : inferSections(paragraphs);
-}
-
-function attachParagraphArtifactLinks(paper) {
-  const artifacts = Array.isArray(paper.pageArtifacts)
-    ? paper.pageArtifacts.filter((artifact) => isVisiblePaperArtifact(artifact) && artifact.type === "caption" && artifact.label)
-    : [];
-
-  if (!Array.isArray(paper.paragraphs)) {
-    return paper;
-  }
-
-  for (const paragraph of paper.paragraphs) {
-    if (!artifacts.length || !isReadingParagraphForPaper(paper, paragraph)) {
-      paragraph.relatedArtifactIds = [];
-      continue;
-    }
-
-    const matched = artifacts
-      .filter((artifact) => paragraphCanReferenceArtifact(paragraph, artifact))
-      .map((artifact) => artifact.id);
-
-    paragraph.relatedArtifactIds = [...new Set(matched)];
-  }
-
-  return paper;
-}
-
-function paragraphCanReferenceArtifact(paragraph, artifact) {
-  const text = String(paragraph.sourceText || "");
-  if (!text) {
-    return false;
-  }
-
-  const pageStart = Number(paragraph.pageNumber || 0);
-  const pageEnd = Number(paragraph.pageEndNumber || pageStart);
-  const artifactPage = Number(artifact.pageNumber || 0);
-  if (artifactPage && (artifactPage < pageStart - 1 || artifactPage > pageEnd + 1)) {
-    return false;
-  }
-
-  const label = parseArtifactLabel(artifact.label);
-  if (!label) {
-    return false;
-  }
-
-  const number = escapeRegExp(label.number);
-  const pattern = label.kind === "table"
-    ? `\\b(?:table|tab\\.?)\\s*${number}(?:\\s*\\([a-z]\\))?\\b`
-    : `\\b(?:figure|fig\\.?)\\s*${number}(?:\\s*\\([a-z]\\))?\\b`;
-
-  return new RegExp(pattern, "i").test(text);
-}
-
-function parseArtifactLabel(label) {
-  const match = String(label || "").match(/^(figure|table)\s+(\d+[a-z]?)/i);
-  if (!match) {
-    return null;
-  }
-
-  return {
-    kind: match[1].toLowerCase() === "table" ? "table" : "figure",
-    number: match[2],
-  };
-}
-
-function escapeRegExp(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function isLikelyHeading(line) {
