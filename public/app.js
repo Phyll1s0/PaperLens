@@ -1084,7 +1084,7 @@ function renderRecentPapers(papers) {
     const exportLabel = paper.latestExport ? ` · ${paper.latestExport.format}` : "";
     const matchLabel = paper.matchedParagraphCount ? ` · 命中 ${paper.matchedParagraphCount}` : "";
     const ocrLabel = paper.ocr?.needed ? " · 需要 OCR" : "";
-    meta.textContent = `${paper.pageCount} 页 · ${paper.paragraphCount} 段 · ${progress}%${ocrLabel}${exportLabel}${matchLabel}`;
+    meta.textContent = `${paper.pageCount} 页 · ${paper.paragraphCount} 段 · 阅读 ${progress}%${ocrLabel}${exportLabel}${matchLabel}`;
 
     button.append(title, meta);
     if (paper.tags?.length) {
@@ -2511,7 +2511,7 @@ function renderPaper() {
     : "";
   els.paperStats.textContent = ocrRequired
     ? `${paper.pageCount || 0} 页 · 需要 OCR · 已生成 ${paper.ocr?.pageImageCount || paper.pageImages?.length || 0} 张页图`
-    : `${readingParagraphs.length} 个段落 · 已讲解 ${analyzedCount} · ${progress}% · ${segmentLabel}${hiddenParagraphCount ? ` · 隐藏 ${hiddenParagraphCount}` : ""}${exportLabel}`;
+    : `${readingParagraphs.length} 个段落 · 讲解 ${analyzedCount}/${readingParagraphs.length} · 阅读 ${progress}% · ${segmentLabel}${hiddenParagraphCount ? ` · 隐藏 ${hiddenParagraphCount}` : ""}${exportLabel}`;
   els.paperLibraryControls.classList.remove("hidden");
   els.favoriteButton.textContent = paper.favorite ? "★" : "☆";
   els.favoriteButton.setAttribute("aria-pressed", paper.favorite ? "true" : "false");
