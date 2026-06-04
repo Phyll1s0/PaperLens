@@ -2499,12 +2499,7 @@ function renderPaper() {
   const hiddenParagraphCount = getHiddenParagraphCount(paper);
   const ocrRequired = isOcrRequiredPaper(paper);
   const analyzedCount = readingParagraphs.filter((paragraph) => !needsAnalysis(paragraph)).length;
-  const segmentLabels = {
-    ai: "AI 分段",
-    layout: "版面分段",
-    heuristic: "基础分段",
-  };
-  const segmentLabel = segmentLabels[paper.segmentationMode] || "基础分段";
+  const segmentLabel = getSegmentationDisplayLabel(paper);
   const progress = Number(paper.readingProgress?.percent || 0);
   const visualLabel = formatVisualArtifactSummary(getVisualArtifactSummary(paper));
   const exportLabel = paper.exportHistory?.length
@@ -2526,6 +2521,29 @@ function renderPaper() {
     renderParagraphs(paper);
   }
   updateAutoButtons();
+}
+
+function getSegmentationDisplayLabel(paper) {
+  const segmentLabels = {
+    ai: "AI 分段",
+    layout: "版面分段",
+    heuristic: "基础分段",
+  };
+  const baseLabel = segmentLabels[paper?.segmentationMode] || "基础分段";
+  const fallback = paper?.segmentationStages?.fallback || null;
+  if (!fallback) {
+    return baseLabel;
+  }
+
+  if (paper?.segmentationMode === "ai" && Array.isArray(fallback.chunks) && fallback.chunks.length) {
+    return `${baseLabel} · 部分本地兜底`;
+  }
+
+  if (paper?.segmentationMode === "layout" && (fallback.strategy || fallback.reason)) {
+    return `${baseLabel} · 本地兜底`;
+  }
+
+  return baseLabel;
 }
 
 function getVisualArtifactSummary(paper) {

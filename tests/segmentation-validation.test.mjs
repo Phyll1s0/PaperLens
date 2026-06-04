@@ -118,3 +118,21 @@ const structureMap = {
   );
   assert.equal(audit.action, "");
 }
+
+{
+  const result = validateAndRepairSegmentedParagraphs([
+    paragraph(
+      "p1",
+      "We implement a lightweight hardware unit and integrate it into the accelerarXiv:2601.19213v2 [cs.AR] 28 Jan 2026 ator. Evaluation results demonstrate that the method narrows the accuracy gap.",
+      1,
+    ),
+  ], {
+    segmentationPlan: [
+      { id: "sec_abstract", title: "Abstract", role: "abstract", startPage: 1, endPage: 1 },
+    ],
+  });
+
+  assert.equal(result.paragraphs.length, 1);
+  assert.match(result.paragraphs[0].sourceText, /into the accelerator\. Evaluation/);
+  assert.doesNotMatch(result.paragraphs[0].sourceText, /arXiv/i);
+}

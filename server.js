@@ -52,6 +52,7 @@ import {
 } from "./lib/pdf-extraction.js";
 import {
   isLikelyBibliographyEntryText,
+  isLikelyFrontMatterTitleText,
   isLikelyPageNumberOrRunningHeaderText,
   isLikelyPublicationMetadataText,
   isLikelyPdfExtractionGarbageText,
@@ -4717,7 +4718,7 @@ function buildPaperRecord({ id, filename, pdfPath, extraction }) {
   const pages = enhancePagesWithVisualStructure(extraction.pages);
   const paragraphs = splitIntoParagraphs(pages);
   const sections = inferSections(paragraphs);
-  const title = inferTitle(paragraphs, filename);
+  const title = inferTitleFromPages(pages, paragraphs, filename);
   const pageImages = pages
     .filter((page) => page.imagePath)
     .map((page) => ({
@@ -5027,7 +5028,7 @@ function splitIntoParagraphs(pages) {
 
     for (const block of blocks) {
       const raw = typeof block === "string" ? block : block.text;
-      const clean = normalizeParagraph(raw);
+      const clean = normalizeReadableBlockText(raw);
       if (!clean || (clean.length < 20 && !isLikelyHeading(clean)) || isLikelyNonReadingParagraphText(clean, {
         pageNumber: page.pageNumber,
       }) || isLikelyNonReadingParagraphText(raw, {
@@ -5214,11 +5215,12 @@ function parseModelBoolean(value) {
 function getReadablePageBlocks(page) {
   if (Array.isArray(page.blocks) && page.blocks.length) {
     const blocks = page.blocks
-      .filter((block) => block?.text && !isLikelyNonReadingBlock(block, page))
       .map((block) => ({
         ...block,
-        text: normalizeParagraph(block.text),
+        rawText: String(block?.text || ""),
+        text: normalizeReadableBlockText(block?.text || ""),
       }))
+      .filter((block) => block.text && !isLikelyNonReadingBlock(block, page))
       .filter((block) => block.text);
 
     if (blocks.length) {
@@ -5230,7 +5232,7 @@ function getReadablePageBlocks(page) {
 }
 
 function isLikelyNonReadingBlock(block, page = null) {
-  const rawText = String(block.text || "").replace(/\s+/g, " ").trim();
+  const rawText = String(block.rawText || block.text || "").replace(/\s+/g, " ").trim();
   if (isLikelyPdfExtractionGarbageText(block.text || rawText)) {
     return true;
   }
@@ -5243,12 +5245,20 @@ function isLikelyNonReadingBlock(block, page = null) {
     return true;
   }
 
-  const text = normalizeParagraph(rawText);
+  const text = normalizeReadableBlockText(rawText);
   if (!text) {
     return true;
   }
 
-  if (isLikelyNonReadingParagraphText(text, block)) {
+  const context = {
+    ...block,
+    pageNumber: page?.pageNumber || block.pageNumber || 0,
+  };
+  if (isLikelyFrontMatterTitleText(text, context)) {
+    return true;
+  }
+
+  if (isLikelyNonReadingParagraphText(text, context) || isLikelyNonReadingParagraphText(rawText, context)) {
     return true;
   }
 
@@ -5378,7 +5388,7 @@ function isLikelyCaptionText(text) {
 function isLikelyAuthorOrAffiliationText(text, context = {}) {
   const pageNumber = Number(context.pageNumber || 0);
   const emails = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
-  if (emails.length >= 2 && text.length < 520) {
+  if (emails.length >= 2 && (text.length < 520 || pageNumber <= 2 && text.length < 1400)) {
     return true;
   }
 
@@ -6889,6 +6899,10 @@ function normalizeParagraph(text) {
     .trim();
 }
 
+function normalizeReadableBlockText(text) {
+  return normalizeParagraph(stripPublicationMetadataFragments(text));
+}
+
 function inferSections(paragraphs) {
   const sections = [{
     id: "section_0",
@@ -7034,6 +7048,20 @@ function inferTitle(paragraphs, filename) {
     .find((text) => text.length >= 20 && text.length <= 180);
 
   return firstLongText || filename.replace(/\.pdf$/i, "");
+}
+
+function inferTitleFromPages(pages, paragraphs, filename) {
+  const firstPage = (pages || []).find((page) => Number(page?.pageNumber || 0) === 1) || pages?.[0];
+  const blocks = Array.isArray(firstPage?.blocks) ? firstPage.blocks : [];
+  const titleBlock = blocks
+    .map((block) => ({
+      ...block,
+      text: normalizeReadableBlockText(block?.text || ""),
+      pageNumber: firstPage?.pageNumber || 1,
+    }))
+    .find((block) => isLikelyFrontMatterTitleText(block.text, block));
+
+  return titleBlock?.text || inferTitle(paragraphs, filename);
 }
 
 async function buildPaperStructureMapWithAi(paper, pages, settings, options = {}) {
@@ -7542,7 +7570,7 @@ function segmentPaperLocally(paper, reason = "local-layout") {
   enrichSectionsWithContext(sections, paragraphs, []);
   const segmented = {
     ...paper,
-    title: inferTitle(paragraphs, paper.filename),
+    title: inferTitleFromPages(pages, paragraphs, paper.filename),
     status: "ready",
     segmentationMode: pages.some((page) => Array.isArray(page.blocks) && page.blocks.length) ? "layout" : "heuristic",
     structureMap,

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   isLikelyBibliographyEntryText,
+  isLikelyFrontMatterTitleText,
   isLikelyPageNumberOrRunningHeaderText,
   isLikelyPublicationMetadataText,
   isLikelyPdfExtractionGarbageText,
@@ -36,7 +37,33 @@ assert.equal(
   "The design introduces minimal metadata val[3:0] Top-1 Decode Unit",
 );
 assert.equal(
+  stripPublicationMetadataFragments("we implement a lightweight hardware unit and integrate it into the accelerarXiv:2601.19213v2 [cs.AR] 28 Jan 2026 ator."),
+  "we implement a lightweight hardware unit and integrate it into the accelerator.",
+);
+assert.equal(
+  stripPublicationMetadataFragments("reshaping the methodologies of representation learning and downstream arXiv:2508.02739v1 [q-fin.ST] 2 Aug 2025 task adaptation."),
+  "reshaping the methodologies of representation learning and downstream task adaptation.",
+);
+assert.equal(
   isLikelyPublicationMetadataText("Existing low-bit formats often suffer from substantial accuracy degradation."),
+  false,
+);
+
+assert.equal(
+  isLikelyFrontMatterTitleText("M2XFP: A Metadata-Augmented Microscaling Data Format for Efficient Low-bit Quantization", {
+    pageNumber: 1,
+    y: 65,
+    lineCount: 2,
+  }),
+  true,
+);
+assert.equal(isLikelyFrontMatterTitleText("Abstract", { pageNumber: 1, y: 406, lineCount: 1 }), false);
+assert.equal(
+  isLikelyFrontMatterTitleText("M2XFP consistently outperforms MXFP4 across all model scales.", {
+    pageNumber: 11,
+    y: 70,
+    lineCount: 1,
+  }),
   false,
 );
 
