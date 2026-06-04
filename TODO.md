@@ -25,6 +25,7 @@ Updated: 2026-06-04
 ## Done
 
 - [x] 服务状态脚本修复：`npm run service:status` 会通过 health + 端口监听识别真实 PaperLens PID，自动修复 stale PID 文件；补上 `npm run service:restart`，启动/重启后回显真正监听 3000 的服务进程。
+- [x] 段落页图定位框：`paragraph.location.pageAnchors` 会带起始 `sourceBox` 和页面尺寸；点击段落页码时，整页预览会用绿色框标出该段起始位置，跨页段落仍保留起/续/止页锚点。
 - [x] 跨页段落定位摘要：新增 `lib/paragraph-location.js`，后端载入旧论文时自动补 `paragraph.location`；前端段落 header 显示“跨 N 页”和相关图表页码，页码按钮区分起点/续页/终点，单页段落也可一键跳到页图预览。
 - [x] 精读分段输入块准备：抽出 `lib/segmentation-page-input.js`，AI 分段和本地 layout 兜底共用同一套可测的 PDF block 过滤/排序；双栏页面按阅读顺序输入，作者/会议噪声、图注、表格主体、独立链接和视觉块不再直接送入正文分段窗口，混合作者块中的正文仍会救回。
 - [x] Paper Memory 调试闭环：`/api/papers/:id/segmentation-debug` 会返回精读预读抓到的摘要、主线、术语、公式、图表、代码/数据链接和非正文提示；前端分段调试面板可直接查看这些证据，资源链接可点击，便于判断分段错在预读还是切段。

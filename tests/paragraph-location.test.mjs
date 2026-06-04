@@ -6,6 +6,10 @@ import {
 
 const paper = {
   id: "paper_location_fixture",
+  extractionPages: [
+    { pageNumber: 2, width: 612, height: 792 },
+    { pageNumber: 3, width: 612, height: 792 },
+  ],
   pageImages: [
     { pageNumber: 2, imagePath: "/assets/page-002.png" },
     { pageNumber: 3, imagePath: "/assets/page-003.png" },
@@ -53,6 +57,9 @@ const paper = {
   assert.equal(location.pageAnchors[0].label, "起 p.2");
   assert.equal(location.pageAnchors[0].hasPageImage, true);
   assert.equal(location.pageAnchors[0].hasSourceBox, true);
+  assert.deepEqual(location.pageAnchors[0].sourceBox, { x: 10, y: 20, width: 100, height: 50, pageWidth: null, pageHeight: null });
+  assert.equal(location.pageAnchors[0].pageWidth, 612);
+  assert.equal(location.pageAnchors[0].pageHeight, 792);
   assert.equal(location.pageAnchors[1].role, "middle");
   assert.equal(location.pageAnchors[2].label, "止 p.4");
   assert.deepEqual(location.relatedArtifactPages, [2, 3]);

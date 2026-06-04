@@ -1431,6 +1431,12 @@ select:focus {
   font-weight: 760;
 }
 
+.page-preview-map {
+  position: relative;
+  width: fit-content;
+  max-width: 100%;
+}
+
 .page-preview img {
   display: block;
   width: min(100%, 920px);
@@ -1440,6 +1446,17 @@ select:focus {
   border: 1px solid var(--line);
   border-radius: 6px;
   background: #fff;
+}
+
+.page-preview-marker {
+  position: absolute;
+  min-width: 10px;
+  min-height: 10px;
+  border: 2px solid #0f766e;
+  border-radius: 4px;
+  background: rgba(15, 118, 110, 0.1);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.94), 0 0 0 5px rgba(15, 118, 110, 0.16);
+  pointer-events: none;
 }
 
 .page-artifacts {

@@ -3951,7 +3951,14 @@ function renderPagePreview(pageImage, artifacts = []) {
     image.height = pageImage.imageHeight;
   }
 
-  wrapper.append(header, image);
+  const imageMap = document.createElement("div");
+  imageMap.className = "page-preview-map";
+  const bounds = getPagePreviewBounds(pageImage);
+  imageMap.dataset.pageWidth = String(bounds.width || "");
+  imageMap.dataset.pageHeight = String(bounds.height || "");
+  imageMap.append(image);
+
+  wrapper.append(header, imageMap);
 
   if (artifacts.length) {
     const artifactList = document.createElement("div");
@@ -3969,16 +3976,78 @@ function getPagePreviewId(pageNumber) {
   return `page-preview-${pageNumber}`;
 }
 
-function focusPagePreview(pageNumber) {
+function focusPagePreview(pageNumber, options = {}) {
   const target = document.querySelector(`#${CSS.escape(getPagePreviewId(pageNumber))}`);
   if (!target) {
     setStatus(`当前阅读列表里还没有第 ${pageNumber} 页预览。`);
     return;
   }
 
+  renderPagePreviewFocusMarker(target, options);
   target.scrollIntoView({ behavior: "smooth", block: "start" });
   target.classList.add("is-focused");
   window.setTimeout(() => target.classList.remove("is-focused"), 1200);
+}
+
+function renderPagePreviewFocusMarker(target, options = {}) {
+  document.querySelectorAll(".page-preview-marker").forEach((marker) => marker.remove());
+  const sourceBox = normalizePreviewSourceBox(options.sourceBox);
+  if (!sourceBox) {
+    return;
+  }
+
+  const map = target.querySelector(".page-preview-map");
+  if (!map) {
+    return;
+  }
+
+  const bounds = {
+    width: Number(options.pageWidth || sourceBox.pageWidth || map.dataset.pageWidth || 0),
+    height: Number(options.pageHeight || sourceBox.pageHeight || map.dataset.pageHeight || 0),
+  };
+  if (!bounds.width || !bounds.height) {
+    return;
+  }
+
+  const marker = document.createElement("span");
+  marker.className = "page-preview-marker";
+  marker.title = "段落起始位置";
+  marker.style.left = `${clampPercent(sourceBox.x / bounds.width * 100)}%`;
+  marker.style.top = `${clampPercent(sourceBox.y / bounds.height * 100)}%`;
+  marker.style.width = `${clampPercent(sourceBox.width / bounds.width * 100)}%`;
+  marker.style.height = `${clampPercent(sourceBox.height / bounds.height * 100)}%`;
+  map.append(marker);
+}
+
+function normalizePreviewSourceBox(box) {
+  const x = Number(box?.x);
+  const y = Number(box?.y);
+  const width = Number(box?.width);
+  const height = Number(box?.height);
+  if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+    return null;
+  }
+  return {
+    x,
+    y,
+    width,
+    height,
+    pageWidth: Number(box?.pageWidth || 0) || null,
+    pageHeight: Number(box?.pageHeight || 0) || null,
+  };
+}
+
+function getPagePreviewBounds(pageImage) {
+  const extractionPage = (state.paper?.extractionPages || [])
+    .find((page) => Number(page.pageNumber || 0) === Number(pageImage.pageNumber || 0));
+  const artifact = (state.paper?.pageArtifacts || [])
+    .find((item) => Number(item.pageNumber || 0) === Number(pageImage.pageNumber || 0) &&
+      (item.pageWidth || item.crop?.pageWidth) &&
+      (item.pageHeight || item.crop?.pageHeight));
+  return {
+    width: Number(extractionPage?.width || artifact?.pageWidth || artifact?.crop?.pageWidth || pageImage.imageWidth || 0),
+    height: Number(extractionPage?.height || artifact?.pageHeight || artifact?.crop?.pageHeight || pageImage.imageHeight || 0),
+  };
 }
 
 function renderPageArtifact(artifact) {
@@ -4943,7 +5012,7 @@ function renderParagraphPageLinks(paragraph, location = null) {
       anchor.hasSourceBox ? "该页含段落起始坐标" : "",
       anchor.hasPageImage ? "" : "当前页可能没有页图预览",
     ].filter(Boolean).join(" · ");
-    button.addEventListener("click", () => focusPagePreview(anchor.pageNumber));
+    button.addEventListener("click", () => focusPagePreview(anchor.pageNumber, anchor));
     wrap.append(button);
   }
   if (resolved.pageAnchors.length > anchors.length) {
@@ -4966,6 +5035,7 @@ function buildParagraphLocationView(paper, paragraph, relatedArtifacts = []) {
   const pageImageNumbers = new Set((paper?.pageImages || [])
     .map((image) => normalizeOptionalPositivePageNumber(image.pageNumber))
     .filter(Boolean));
+  const serverAnchors = Array.isArray(serverLocation?.pageAnchors) ? serverLocation.pageAnchors : [];
   const relatedArtifactPages = [...new Set([
     ...(serverLocation?.relatedArtifactPages || []),
     ...(relatedArtifacts || []).map((artifact) => normalizeOptionalPositivePageNumber(artifact.pageNumber)),
@@ -4980,16 +5050,50 @@ function buildParagraphLocationView(paper, paragraph, relatedArtifacts = []) {
     isCrossPage: pages.length > 1,
     relatedArtifactPages,
     pageAnchors: pages.map((pageNumber, index) => ({
-      pageNumber,
-      role: pages.length === 1
-        ? "single"
-        : index === 0
-          ? "start"
-          : index === pages.length - 1 ? "end" : "middle",
-      label: formatParagraphPageAnchorLabel(pageNumber, index, pages.length),
-      hasPageImage: pageImageNumbers.has(pageNumber),
-      hasSourceBox: index === 0 && Boolean(paragraph?.sourceBox),
+      ...buildParagraphPageAnchorView({
+        pageNumber,
+        index,
+        total: pages.length,
+        paper,
+        paragraph,
+        serverAnchor: serverAnchors.find((anchor) => Number(anchor.pageNumber || 0) === pageNumber),
+        pageImageNumbers,
+      }),
     })),
+  };
+}
+
+function buildParagraphPageAnchorView({ pageNumber, index, total, paper, paragraph, serverAnchor, pageImageNumbers }) {
+  const sourceBox = normalizePreviewSourceBox(serverAnchor?.sourceBox || (index === 0 ? paragraph?.sourceBox : null));
+  const bounds = getParagraphAnchorBounds(paper, pageNumber, sourceBox, serverAnchor);
+  return {
+    pageNumber,
+    role: total === 1
+      ? "single"
+      : index === 0
+        ? "start"
+        : index === total - 1 ? "end" : "middle",
+    label: formatParagraphPageAnchorLabel(pageNumber, index, total),
+    hasPageImage: Boolean(serverAnchor?.hasPageImage) || pageImageNumbers.has(pageNumber),
+    hasSourceBox: Boolean(sourceBox),
+    sourceBox,
+    pageWidth: bounds.width,
+    pageHeight: bounds.height,
+  };
+}
+
+function getParagraphAnchorBounds(paper, pageNumber, sourceBox = null, serverAnchor = null) {
+  const extractionPage = (paper?.extractionPages || [])
+    .find((page) => Number(page.pageNumber || 0) === Number(pageNumber || 0));
+  const artifact = (paper?.pageArtifacts || [])
+    .find((item) => Number(item.pageNumber || 0) === Number(pageNumber || 0) &&
+      (item.pageWidth || item.crop?.pageWidth) &&
+      (item.pageHeight || item.crop?.pageHeight));
+  const pageImage = (paper?.pageImages || [])
+    .find((image) => Number(image.pageNumber || 0) === Number(pageNumber || 0));
+  return {
+    width: Number(serverAnchor?.pageWidth || extractionPage?.width || artifact?.pageWidth || artifact?.crop?.pageWidth || sourceBox?.pageWidth || pageImage?.imageWidth || 0) || null,
+    height: Number(serverAnchor?.pageHeight || extractionPage?.height || artifact?.pageHeight || artifact?.crop?.pageHeight || sourceBox?.pageHeight || pageImage?.imageHeight || 0) || null,
   };
 }
 
