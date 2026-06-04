@@ -3290,6 +3290,7 @@ function renderSegmentationDebugPanel(result) {
   layout.append(renderSegmentationDebugPages(result));
   const side = document.createElement("div");
   side.className = "segmentation-debug-side";
+  side.append(renderSegmentationDebugMemory(result));
   side.append(renderSegmentationDebugEvidence(result));
   side.append(renderSegmentationDebugParagraphs(result));
   layout.append(side);
@@ -3346,7 +3347,159 @@ function getSegmentationDebugSummaryItems(summary) {
     { label: "噪声段", value: summary.paragraphsWithNoise || 0 },
     { label: "有坐标", value: summary.paragraphsWithSourceBox || 0 },
     { label: "章节", value: summary.sections || 0 },
+    { label: "Memory", value: summary.paperMemoryAvailable ? "有" : "无" },
   ];
+}
+
+function renderSegmentationDebugMemory(result) {
+  const wrap = document.createElement("div");
+  wrap.className = "segmentation-debug-section segmentation-debug-memory";
+  const heading = document.createElement("h4");
+  heading.textContent = "Paper Memory";
+  wrap.append(heading);
+
+  const memory = result?.paperMemory || {};
+  if (!memory.available) {
+    const empty = document.createElement("p");
+    empty.className = "export-qa-empty";
+    empty.textContent = "当前报告没有 Paper Memory。精读模式重新 AI 分段后，会先通读全文并在这里显示预读结果。";
+    wrap.append(empty);
+    return wrap;
+  }
+
+  const meta = document.createElement("div");
+  meta.className = "segmentation-debug-memory-meta";
+  const metaItems = [
+    memory.source ? `来源 ${memory.source}` : "",
+    memory.counts?.keyTerms ? `术语 ${memory.counts.keyTerms}` : "",
+    memory.counts?.formulas ? `公式 ${memory.counts.formulas}` : "",
+    memory.counts?.visuals ? `图表 ${memory.counts.visuals}` : "",
+    memory.counts?.resources ? `链接 ${memory.counts.resources}` : "",
+  ].filter(Boolean);
+  for (const item of metaItems) {
+    const chip = document.createElement("span");
+    chip.textContent = item;
+    meta.append(chip);
+  }
+  wrap.append(meta);
+
+  if (memory.summary || memory.mainThread) {
+    const overview = document.createElement("div");
+    overview.className = "segmentation-debug-memory-card";
+    if (memory.summary) {
+      overview.append(renderSegmentationDebugMemoryLine("摘要", memory.summary));
+    }
+    if (memory.mainThread) {
+      overview.append(renderSegmentationDebugMemoryLine("主线", memory.mainThread));
+    }
+    wrap.append(overview);
+  }
+
+  if ((memory.keyTerms || []).length) {
+    const terms = document.createElement("div");
+    terms.className = "segmentation-debug-memory-tags";
+    for (const term of memory.keyTerms.slice(0, 16)) {
+      const tag = document.createElement("span");
+      tag.textContent = term;
+      terms.append(tag);
+    }
+    wrap.append(terms);
+  }
+
+  const importantItems = [
+    ...formatSegmentationDebugMemoryItems("资源", memory.resources, formatSegmentationDebugMemoryResource),
+    ...formatSegmentationDebugMemoryItems("公式", memory.formulas, formatSegmentationDebugMemoryFormula),
+    ...formatSegmentationDebugMemoryItems("图表/代码", memory.visuals, formatSegmentationDebugMemoryVisual),
+    ...formatSegmentationDebugMemoryItems("分段提示", memory.segmentationGuidance, (item) => String(item || "")),
+    ...formatSegmentationDebugMemoryItems("非正文提示", memory.nonReadingGuidance, (item) => String(item || "")),
+  ];
+  if (importantItems.length) {
+    const list = document.createElement("div");
+    list.className = "segmentation-debug-memory-list";
+    for (const item of importantItems.slice(0, 12)) {
+      list.append(renderSegmentationDebugMemoryItem(item));
+    }
+    wrap.append(list);
+  }
+
+  return wrap;
+}
+
+function renderSegmentationDebugMemoryLine(label, text) {
+  const row = document.createElement("p");
+  const strong = document.createElement("strong");
+  strong.textContent = `${label}：`;
+  const span = document.createElement("span");
+  span.textContent = text;
+  row.append(strong, span);
+  return row;
+}
+
+function formatSegmentationDebugMemoryItems(label, items, formatter) {
+  return (Array.isArray(items) ? items : [])
+    .map((item) => formatter(item))
+    .filter(Boolean)
+    .map((value) => typeof value === "object"
+      ? { label, text: value.text || "", url: value.url || "" }
+      : { label, text: String(value || ""), url: "" });
+}
+
+function formatSegmentationDebugMemoryResource(item) {
+  if (!item) {
+    return "";
+  }
+  const parts = [
+    item.type || "url",
+    item.pageNumber ? `p.${item.pageNumber}` : "",
+    item.label || item.url || "",
+    item.whyImportant || "",
+  ].filter(Boolean);
+  return { text: parts.join(" · "), url: item.url || "" };
+}
+
+function formatSegmentationDebugMemoryFormula(item) {
+  if (!item) {
+    return "";
+  }
+  return [
+    item.label || "公式",
+    item.pageNumber ? `p.${item.pageNumber}` : "",
+    item.text || "",
+    item.purpose || "",
+  ].filter(Boolean).join(" · ");
+}
+
+function formatSegmentationDebugMemoryVisual(item) {
+  if (!item) {
+    return "";
+  }
+  return [
+    item.label || item.type || "视觉材料",
+    item.pageNumber ? `p.${item.pageNumber}` : "",
+    item.description || "",
+  ].filter(Boolean).join(" · ");
+}
+
+function renderSegmentationDebugMemoryItem(item) {
+  const row = document.createElement("div");
+  row.className = "segmentation-debug-memory-item";
+  const marker = document.createElement("span");
+  marker.textContent = item.label;
+  const text = document.createElement("p");
+  text.textContent = item.text;
+  const body = document.createElement("div");
+  body.className = "segmentation-debug-memory-item-body";
+  body.append(text);
+  if (item.url) {
+    const link = document.createElement("a");
+    link.href = item.url;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    link.textContent = item.url;
+    body.append(link);
+  }
+  row.append(marker, body);
+  return row;
 }
 
 function renderSegmentationDebugPages(result) {

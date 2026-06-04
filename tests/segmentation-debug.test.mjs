@@ -12,6 +12,45 @@ const paper = {
   segmentationStages: {
     plan: { source: "heuristic-structure" },
     fallback: { strategy: "layout", reason: "agent timeout", chunks: [{ pageRange: "1-2" }] },
+    paperMemory: { source: "ai+heuristic", keyTerms: 3, formulas: 1, visuals: 1, resources: 1 },
+  },
+  paperMemory: {
+    version: 1,
+    source: "ai+heuristic",
+    paperTitle: "Debug Fixture",
+    summary: "A forecasting paper used to test the segmentation pre-read memory.",
+    mainThread: "Use a pre-read memory before splitting PDF blocks into reading paragraphs.",
+    contributions: ["Adds memory-aware segmentation diagnostics."],
+    keyTerms: ["Paper Memory", "forecasting", "segmentation"],
+    importantFormulas: [
+      {
+        label: "Loss",
+        pageNumber: 2,
+        text: "L = -sum log p(y_t | y_<t)",
+        purpose: "Training objective that should remain visible to the explainer.",
+      },
+    ],
+    importantVisuals: [
+      {
+        label: "Figure 1",
+        pageNumber: 1,
+        type: "figure",
+        description: "Architecture overview.",
+      },
+    ],
+    resources: [
+      {
+        type: "code",
+        url: "https://github.com/example/project",
+        pageNumber: 1,
+        label: "project code",
+        whyImportant: "Implementation link.",
+      },
+    ],
+    nonReadingGuidance: ["Author block on page 1 is front matter."],
+    segmentationGuidance: ["Keep the abstract as one paragraph."],
+    chunkSummaries: ["Pages 1-2 introduce the method."],
+    updatedAt: "2026-06-04T00:00:00.000Z",
   },
   sections: [{ id: "s1", title: "Introduction", order: 0 }],
   pageImages: [
@@ -109,8 +148,19 @@ assert.equal(report.summary.pages, 2);
 assert.equal(report.summary.extractionBlocks, 7);
 assert.equal(report.summary.droppedBlocks, 3);
 assert.equal(report.summary.paragraphsWithNoise, 1);
+assert.equal(report.summary.paperMemoryAvailable, true);
+assert.equal(report.summary.paperMemoryResources, 1);
+assert.equal(report.summary.paperMemoryFormulas, 1);
 assert.equal(report.segmentation.mode, "layout");
 assert.equal(report.segmentation.fallbackReason, "agent timeout");
+assert.equal(report.segmentation.paperMemorySource, "ai+heuristic");
+assert.equal(report.paperMemory.available, true);
+assert.equal(report.paperMemory.source, "ai+heuristic");
+assert.ok(report.paperMemory.summary.includes("forecasting paper"));
+assert.ok(report.paperMemory.keyTerms.includes("Paper Memory"));
+assert.equal(report.paperMemory.resources[0].url, "https://github.com/example/project");
+assert.equal(report.paperMemory.formulas[0].pageNumber, 2);
+assert.ok(report.paperMemory.nonReadingGuidance[0].includes("Author block"));
 
 const pageOne = report.pages[0];
 assert.equal(pageOne.imagePath, "/assets/debug_fixture/page-001.png");
