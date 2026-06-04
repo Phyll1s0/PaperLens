@@ -9,6 +9,9 @@ import {
 
 assert.equal(isLikelyCaptionBlockText("Figure 2. FP4 quantization: A comparison of FP16 and E8M0 scaling factors."), true);
 assert.equal(isLikelyCaptionBlockText("Table 1. The features of DNN accelerators across different scaling factors."), true);
+assert.equal(isLikelyCaptionBlockText("Figure 1. Overview of the proposed visual encoder and text decoder."), true);
+assert.equal(isLikelyCaptionBlockText("Fig. 1: End-to-end workflow for PaperLens visual reconstruction."), true);
+assert.equal(isLikelyCaptionBlockText("Table 1: Quantitative comparison across baselines and ablations."), true);
 assert.equal(isLikelyCaptionBlockText("Figure 2 shows the quantization process in detail."), false);
 
 assert.equal(
@@ -61,10 +64,26 @@ assert.equal(
 
 assert.equal(
   isLikelyCodeBlockText(
+    "Algorithm 1 Visual region rebuild Input: page blocks B and rendered page image I Output: crops C 1: C←∅ 2: for b∈B do 3: if caption(b) then 4: C←C∪refine(b,I) 5: end if 6: return C",
+    { lineCount: 8 },
+  ),
+  true,
+);
+
+assert.equal(
+  isLikelyCodeBlockText(
     "function tokenize(values) {\n  const ids = values.map(scale);\n  return ids;\n}",
     { lineCount: 4 },
   ),
   true,
+);
+
+assert.equal(
+  isLikelyCodeBlockText(
+    "Pseudo-code is only used to summarize the high-level pipeline. The actual implementation follows the repository configuration and runs as a persistent local service.",
+    { lineCount: 3 },
+  ),
+  false,
 );
 
 assert.equal(
@@ -97,6 +116,16 @@ assert.equal(
   false,
 );
 
+assert.equal(
+  isLikelyFormulaBlockText("Accuracy 91.2 92.4 93.1 Latency 18.7 15.3 12.9 Params 7B 13B 34B", { lineCount: 4 }),
+  false,
+);
+
+assert.equal(
+  isLikelyFormulaBlockText("xt = Codebook(OHLCVA), bt = [bc t,bf t], p(bt|b<t)=p(bc t|b<t)p(bf t|b<t,bc t)", { lineCount: 3 }),
+  true,
+);
+
 assert.equal(isUsefulFormulaArtifactText("Xt = i=1"), false);
 assert.equal(isUsefulFormulaArtifactText("C+H t=C+1 |ˆ"), false);
 assert.equal(isUsefulFormulaArtifactText("WQL = 1 WQLαj. j=1"), true);
@@ -112,6 +141,14 @@ assert.equal(
 
 assert.equal(
   isLikelyTableBodyBlockText("Granularity Format Granularity Format", { lineCount: 2 }),
+  true,
+);
+
+assert.equal(
+  isLikelyTableBodyBlockText(
+    "Model Dataset MAE RMSE MASE Chronos ETTh1 0.412 0.438 0.782 Kronos ETTh1 0.376 0.401 0.713",
+    { lineCount: 5 },
+  ),
   true,
 );
 
