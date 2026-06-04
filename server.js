@@ -51,8 +51,12 @@ import {
   extractPdfText,
 } from "./lib/pdf-extraction.js";
 import {
+  isLikelyBibliographyEntryText,
+  isLikelyPageNumberOrRunningHeaderText,
   isLikelyPublicationMetadataText,
   isLikelyPdfExtractionGarbageText,
+  isLikelyReferencesHeadingBlock,
+  isReferencesSectionTitleText,
   shouldMergeSegmentedText,
   startsLikeTextContinuation,
   stripPublicationMetadataFragments,
@@ -5404,12 +5408,7 @@ function isLikelyStandaloneLinkText(text) {
 }
 
 function isLikelyBibliographyEntry(text) {
-  return /^\[\d+\]\s+/.test(text) ||
-    /(?:^|https?:\/\/\S+\s+)\[\d+\]\s+[A-Z]/.test(text) ||
-    /^\d{4}\.\s+[A-Z]/.test(text) && /\b(?:arXiv|Proceedings|Conference|Journal|Transactions|doi:|https?:\/\/)/i.test(text) ||
-    /\barXiv:\d{4}\.\d{4,5}\b/i.test(text) && /\[\d+\]|\b(?:Proceedings|Conference|Journal|Transactions|preprint)\b/i.test(text) ||
-    /^\d+\.\s+[A-Z][A-Za-z-]+,\s+[A-Z]/.test(text) ||
-    /\b(?:In Proceedings of|Journal of|Conference on|Transactions on|arXiv preprint)\b/i.test(text) && text.length < 420;
+  return isLikelyBibliographyEntryText(text);
 }
 
 function isLikelyDiagramOnlyText(text, context = {}) {
@@ -5421,7 +5420,7 @@ function isLikelyDiagramOnlyText(text, context = {}) {
 }
 
 function isReferencesSectionTitle(title) {
-  return /^(references|bibliography|参考文献)$/i.test(normalizeSectionTitleHint(title || ""));
+  return isReferencesSectionTitleText(title);
 }
 
 function extractPageArtifacts(pages) {
@@ -7511,14 +7510,7 @@ function inferReferencesStartPageFromPages(pages, firstPage, lastPage) {
 }
 
 function isReferencesHeadingBlock(block) {
-  const clean = normalizeSectionTitleHint(block?.text || "");
-  if (!isReferencesSectionTitle(clean)) {
-    return false;
-  }
-
-  const lineCount = Number(block?.lineCount || 1);
-  const width = Number(block?.width || 0);
-  return lineCount <= 2 && (!width || width < 180);
+  return isLikelyReferencesHeadingBlock(block);
 }
 
 function shouldUseLocalFirstSegmentation(settings = {}) {
@@ -8674,14 +8666,7 @@ function isRepeatedHeaderFooterText(text, repeatedTextIndex = new Map()) {
 }
 
 function isLikelyPageNumberOrRunningHeader(text) {
-  const clean = normalizeParagraph(text);
-  if (!clean || clean.length > 120) {
-    return false;
-  }
-
-  return /^(?:\d+\s*\/\s*)?\d+$/.test(clean) ||
-    /^page\s+\d+(?:\s+of\s+\d+)?$/i.test(clean) ||
-    /^(?:preprint|draft|submitted|accepted|published|proceedings|conference|workshop)\b/i.test(clean) && !/[.!?。！？]/.test(clean);
+  return isLikelyPageNumberOrRunningHeaderText(text);
 }
 
 function isLikelyArtifactOnlyLinkText(text) {

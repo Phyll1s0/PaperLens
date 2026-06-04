@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import {
+  isLikelyBibliographyEntryText,
+  isLikelyPageNumberOrRunningHeaderText,
   isLikelyPublicationMetadataText,
   isLikelyPdfExtractionGarbageText,
+  isLikelyReferencesHeadingBlock,
+  isReferencesSectionTitleText,
   shouldMergeSegmentedText,
   startsLikeTextContinuation,
   stripPublicationMetadataFragments,
@@ -35,6 +39,37 @@ assert.equal(
   isLikelyPublicationMetadataText("Existing low-bit formats often suffer from substantial accuracy degradation."),
   false,
 );
+
+assert.equal(
+  isLikelyBibliographyEntryText("[1] Ebtesam Almazrouei, Hamza Alobeidli, Abdulaziz Alshamsi, Alessandro Cappelli, Ruxandra Cojocaru, and Daniel Hesslow. The Falcon Series of Open Language Models. arXiv:2311.16867."),
+  true,
+);
+assert.equal(
+  isLikelyBibliographyEntryText("https://arxiv.org/abs/2110.14168 [9] Jack Cook, Junxian Guo, and others. Compression for language models."),
+  true,
+);
+assert.equal(
+  isLikelyBibliographyEntryText("2023. GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers. arXiv:2210.17323 [cs.LG]."),
+  true,
+);
+assert.equal(
+  isLikelyBibliographyEntryText("We compare quantization methods [9] and report perplexity in Table 2."),
+  false,
+);
+
+assert.equal(isReferencesSectionTitleText("References"), true);
+assert.equal(isReferencesSectionTitleText("1 References"), true);
+assert.equal(isReferencesSectionTitleText("1. References"), true);
+assert.equal(isReferencesSectionTitleText("Bibliography:"), true);
+assert.equal(isReferencesSectionTitleText("References are discussed in Section 2."), false);
+assert.equal(isLikelyReferencesHeadingBlock({ text: "References", lineCount: 1, width: 64 }), true);
+assert.equal(isLikelyReferencesHeadingBlock({ text: "References", lineCount: 3, width: 64 }), false);
+assert.equal(isLikelyReferencesHeadingBlock({ text: "References are discussed in Section 2.", lineCount: 1, width: 260 }), false);
+
+assert.equal(isLikelyPageNumberOrRunningHeaderText("Page 2 of 17"), true);
+assert.equal(isLikelyPageNumberOrRunningHeaderText("12"), true);
+assert.equal(isLikelyPageNumberOrRunningHeaderText("Preprint version"), true);
+assert.equal(isLikelyPageNumberOrRunningHeaderText("The preprint version improves several baselines."), false);
 
 assert.equal(startsLikeTextContinuation("for forecasting, the field has yet to converge"), true);
 assert.equal(startsLikeTextContinuation("(GPT4TS) are only compared based on MASE."), true);
