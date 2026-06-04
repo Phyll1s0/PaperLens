@@ -95,6 +95,7 @@ body.auth-locked .app-shell {
 .app-shell {
   display: grid;
   grid-template-columns: 340px minmax(0, 1fr);
+  min-width: 0;
   min-height: 100vh;
 }
 
@@ -763,7 +764,9 @@ select:focus {
 }
 
 .reader {
+  width: 100%;
   min-width: 0;
+  max-width: 100%;
   padding: 26px;
 }
 
@@ -771,10 +774,10 @@ select:focus {
   position: sticky;
   top: 0;
   z-index: 5;
-  display: flex;
-  gap: 16px;
-  align-items: center;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) minmax(360px, 640px);
+  gap: 14px 18px;
+  align-items: start;
   padding: 16px 0 20px;
   background: rgba(245, 246, 243, 0.94);
   backdrop-filter: blur(10px);
@@ -782,47 +785,65 @@ select:focus {
 
 .reader-toolbar > div:first-child {
   min-width: 0;
-  flex: 1 1 280px;
 }
 
 .reader-toolbar h2 {
+  max-width: 100%;
   font-size: 24px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .paper-library-controls {
-  display: grid;
-  grid-template-columns: 38px minmax(180px, 1fr) repeat(3, auto);
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
   margin-top: 10px;
   max-width: 900px;
 }
 
+.paper-library-controls .icon-button {
+  flex: 0 0 38px;
+}
+
+.paper-library-controls input {
+  flex: 1 1 220px;
+  min-width: min(100%, 180px);
+}
+
 .paper-library-controls .secondary-button {
+  flex: 0 0 auto;
+  min-width: max-content;
   white-space: nowrap;
 }
 
 .toolbar-actions {
   display: grid;
   gap: 10px;
-  flex: 0 1 640px;
-  width: min(640px, 64vw);
-  min-width: 360px;
+  min-width: 0;
+  justify-items: end;
+}
+
+.toolbar-actions input[type="search"] {
+  width: min(100%, 520px);
+  justify-self: stretch;
 }
 
 .toolbar-buttons {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(auto-fit, minmax(112px, max-content));
   gap: 8px;
   justify-content: flex-end;
 }
 
 .toolbar-buttons .secondary-button {
-  flex: 0 0 auto;
   min-width: 0;
   padding-inline: 11px;
   font-size: 13px;
-  line-height: 1;
+  line-height: 1.15;
   white-space: nowrap;
 }
 
@@ -1058,6 +1079,8 @@ select:focus {
   position: sticky;
   top: 86px;
   z-index: 2;
+  min-width: 0;
+  max-width: 100%;
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1070,6 +1093,8 @@ select:focus {
 
 .page-preview {
   display: grid;
+  min-width: 0;
+  max-width: 100%;
   gap: 8px;
   padding: 12px;
   border: 1px solid var(--line);
@@ -1377,6 +1402,8 @@ select:focus {
 }
 
 .paragraph-card {
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
@@ -1392,7 +1419,7 @@ select:focus {
 .paragraph-header {
   display: flex;
   gap: 12px;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   padding: 14px 16px;
   border-bottom: 1px solid var(--line);
@@ -1400,7 +1427,8 @@ select:focus {
 
 .paragraph-meta {
   display: flex;
-  min-width: 0;
+  flex: 1 1 180px;
+  min-width: min(100%, 160px);
   gap: 8px;
   align-items: center;
   flex-wrap: wrap;
@@ -1448,7 +1476,8 @@ select:focus {
 
 .paragraph-actions {
   display: flex;
-  flex: 0 0 auto;
+  flex: 1 1 360px;
+  min-width: 0;
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
@@ -1457,12 +1486,15 @@ select:focus {
 
 .paragraph-edit-actions {
   display: flex;
+  flex: 1 1 260px;
+  min-width: 0;
   flex-wrap: wrap;
   gap: 6px;
   justify-content: flex-end;
 }
 
 .paragraph-edit-button {
+  min-height: 30px;
   padding: 6px 8px;
   border: 1px solid #d8e0dc;
   border-radius: 6px;
@@ -1474,6 +1506,15 @@ select:focus {
   line-height: 1;
   white-space: nowrap;
   cursor: pointer;
+}
+
+.paragraph-actions > .secondary-button {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding-inline: 10px;
+  font-size: 12px;
+  line-height: 1.15;
+  white-space: nowrap;
 }
 
 .paragraph-edit-button:hover:not(:disabled) {
@@ -1545,11 +1586,15 @@ select:focus {
 
 .paragraph-content {
   display: grid;
+  min-width: 0;
+  max-width: 100%;
   gap: 14px;
   padding: 16px;
 }
 
 .source-text {
+  min-width: 0;
+  max-width: 100%;
   color: #24312e;
   font-size: 14px;
   line-height: 1.74;
@@ -1617,6 +1662,8 @@ select:focus {
 .analysis-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  min-width: 0;
+  max-width: 100%;
   gap: 12px;
 }
 
@@ -1717,6 +1764,8 @@ select:focus {
 }
 
 .markdown-table-wrap {
+  width: 100%;
+  min-width: 0;
   max-width: 100%;
   margin: 0 0 0.9em;
   overflow-x: auto;
@@ -1905,11 +1954,15 @@ select:focus {
 
 .term-row {
   display: flex;
+  min-width: 0;
+  max-width: 100%;
   flex-wrap: wrap;
   gap: 6px;
 }
 
 .term-chip {
+  max-width: 100%;
+  overflow-wrap: anywhere;
   padding: 4px 8px;
   border-radius: 999px;
   background: rgba(180, 83, 42, 0.12);
@@ -1975,6 +2028,20 @@ select:focus {
   color: var(--danger);
 }
 
+@media (max-width: 1180px) {
+  .reader-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .toolbar-actions {
+    justify-items: stretch;
+  }
+
+  .toolbar-buttons {
+    justify-content: start;
+  }
+}
+
 @media (max-width: 920px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -1993,7 +2060,6 @@ select:focus {
 
   .reader-toolbar {
     position: relative;
-    flex-direction: column;
     align-items: stretch;
   }
 
@@ -2003,11 +2069,19 @@ select:focus {
   }
 
   .paper-library-controls {
-    grid-template-columns: 38px minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .paper-library-controls .icon-button {
+    flex: 0 0 38px;
+  }
+
+  .paper-library-controls input {
+    flex: 1 1 calc(100% - 46px);
   }
 
   .paper-library-controls .secondary-button {
-    grid-column: 1 / -1;
+    flex: 1 1 142px;
     width: 100%;
   }
 
