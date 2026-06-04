@@ -5,14 +5,13 @@ Updated: 2026-06-04
 ## Current Problems
 
 - [ ] 测试覆盖仍需扩展：已有 Provider/Kimi/导出/Job/PDF/富文本/分段噪声/分段验证/模型诊断样例测试，但缺少视觉重建摘要和真实 PDF fixture 回归测试。
-- [ ] 视觉结构仍不够可控：复杂双栏、多图组合、跨页图、公式/代码混排时，自动裁剪仍可能过大、误分类，用户还不能手动修正。
+- [ ] 视觉结构仍不够可控：复杂双栏、多图组合、跨页图、公式/代码混排时，自动裁剪仍可能过大、误分类，后续还需要更智能的自动识别。
 - [ ] 精读分段入口仍需继续增强：复杂双栏论文里，PDF block 排序、章节地图、References、表格主体、流程图文字、跨页自然段仍可能被误收或误合并；混合 block 还需要更精细的按行/按列重建。
 - [ ] 跨页定位体验仍需升级：段落跨页、图表跨页和相关图表跳转需要更明确的页码锚点与整页定位反馈。
 
 ## Next
 
-1. [ ] 视觉裁剪编辑器：允许用户点击页面图像后手动框选/调整图片、公式、代码块，并重建相关段落引用。
-2. [ ] 服务状态脚本修复：让 `npm run service:status` 识别当前 3000 端口上的 PaperLens 进程，避免 PID 文件不一致时误报 not running。
+1. [ ] 服务状态脚本修复：让 `npm run service:status` 识别当前 3000 端口上的 PaperLens 进程，避免 PID 文件不一致时误报 not running。
 
 ## Later
 
@@ -24,6 +23,7 @@ Updated: 2026-06-04
 
 ## Done
 
+- [x] 视觉裁剪编辑器：图表/公式/代码块新增“裁剪”入口；放大查看器可直接进入编辑器，支持在整页图上拖动/框选/四角缩放和 x/y/w/h 精调，保存后后端更新 crop SVG、标记 manual crop，并在视觉重建时保留人工裁剪。
 - [x] 长任务预算保护：新增任务级 `Task Budget USD`，分析前显示预计 token、耗时、费用和预算状态；后端创建分析任务/补跑失败项时强制拦截超预算请求，并把预算估算写入 Job 轮询和历史。
 - [x] 章节地图入口升级：新增 `lib/segmentation-structure.js`，本地 layout fallback 会从 PDF heading 识别多章节结构；过滤标题、作者、图注、坐标轴、年份参考文献等伪 heading，并让本地段落按实际 heading 顺序生成 sections。
 - [x] 模型诊断报告回归测试：抽出 `lib/model-diagnostics.js`，覆盖 Kimi Code Direct、Claude 本机配置、保存 Key 引用错配、代理/URL 脱敏、预算和 Docker 建议，确保诊断包不泄露完整 API Key。

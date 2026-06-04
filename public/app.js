@@ -3924,6 +3924,13 @@ function renderArtifactActions(artifact) {
 
   actions.append(typeSelect, textButton, visibilityButton);
 
+  const cropButton = document.createElement("button");
+  cropButton.type = "button";
+  cropButton.textContent = "裁剪";
+  cropButton.title = "手动调整裁剪区域";
+  cropButton.disabled = state.artifactEditBusyId === artifact.id;
+  cropButton.addEventListener("click", () => openArtifactCropEditor(artifact));
+
   const viewButton = document.createElement("button");
   viewButton.type = "button";
   viewButton.textContent = "查看";
@@ -3943,7 +3950,7 @@ function renderArtifactActions(artifact) {
   downloadLink.title = "下载裁剪图";
 
   if (hasArtifactCrop(artifact)) {
-    actions.append(viewButton, locateButton, downloadLink);
+    actions.append(cropButton, viewButton, locateButton, downloadLink);
   }
   return actions;
 }
@@ -4114,12 +4121,18 @@ function openArtifactViewer(artifact, options = {}) {
   downloadLink.download = getArtifactDownloadName(artifact);
   downloadLink.textContent = "下载裁剪";
 
+  const cropButton = document.createElement("button");
+  cropButton.type = "button";
+  cropButton.textContent = "编辑裁剪";
+  cropButton.disabled = state.artifactEditBusyId === artifact.id;
+  cropButton.addEventListener("click", () => openArtifactCropEditor(artifact));
+
   const closeButton = document.createElement("button");
   closeButton.type = "button";
   closeButton.textContent = "关闭";
   closeButton.addEventListener("click", closeArtifactViewer);
 
-  actions.append(downloadLink, pageLink, closeButton);
+  actions.append(cropButton, downloadLink, pageLink, closeButton);
   header.append(title, actions);
 
   const viewerBody = document.createElement("div");
@@ -4192,6 +4205,289 @@ function renderArtifactLocator(artifact, options = {}) {
   return locator;
 }
 
+function openArtifactCropEditor(artifact) {
+  if (!hasArtifactCrop(artifact)) {
+    focusArtifactCard(artifact?.id);
+    return;
+  }
+
+  closeArtifactViewer();
+  closeArtifactCropEditor();
+
+  let draft = normalizeClientCrop(artifact.crop);
+  const overlay = document.createElement("div");
+  overlay.className = "artifact-crop-editor";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) {
+      closeArtifactCropEditor();
+    }
+  });
+
+  const panel = document.createElement("section");
+  panel.className = "artifact-crop-editor-panel";
+
+  const header = document.createElement("div");
+  header.className = "artifact-crop-editor-header";
+
+  const title = document.createElement("div");
+  title.className = "artifact-viewer-title";
+  title.textContent = artifact.label
+    ? `${artifact.label} · 编辑裁剪`
+    : `${getArtifactLabel(artifact.type, artifact.visualType)} · 编辑裁剪`;
+
+  const actions = document.createElement("div");
+  actions.className = "artifact-viewer-actions";
+
+  const saveButton = document.createElement("button");
+  saveButton.type = "button";
+  saveButton.textContent = "保存";
+  saveButton.addEventListener("click", () => saveArtifactCropEdit(artifact.id, draft));
+
+  const cancelButton = document.createElement("button");
+  cancelButton.type = "button";
+  cancelButton.textContent = "取消";
+  cancelButton.addEventListener("click", closeArtifactCropEditor);
+
+  actions.append(saveButton, cancelButton);
+  header.append(title, actions);
+
+  const body = document.createElement("div");
+  body.className = "artifact-crop-editor-body";
+
+  const map = document.createElement("div");
+  map.className = "artifact-crop-editor-map";
+
+  const pageImage = document.createElement("img");
+  pageImage.src = artifact.imagePath;
+  pageImage.alt = artifact.pageNumber ? `第 ${artifact.pageNumber} 页裁剪编辑` : "裁剪编辑";
+  pageImage.draggable = false;
+
+  const selection = document.createElement("div");
+  selection.className = "artifact-crop-selection";
+  for (const handle of ["nw", "ne", "sw", "se"]) {
+    const handleEl = document.createElement("span");
+    handleEl.className = `artifact-crop-handle artifact-crop-handle-${handle}`;
+    handleEl.dataset.cropHandle = handle;
+    selection.append(handleEl);
+  }
+
+  map.append(pageImage, selection);
+
+  const controls = document.createElement("div");
+  controls.className = "artifact-crop-editor-controls";
+
+  const positionText = document.createElement("div");
+  positionText.className = "artifact-crop-editor-position";
+
+  const inputMap = new Map();
+  for (const field of [
+    { key: "x", label: "X" },
+    { key: "y", label: "Y" },
+    { key: "width", label: "W" },
+    { key: "height", label: "H" },
+  ]) {
+    const labelEl = document.createElement("label");
+    labelEl.className = "artifact-crop-editor-field";
+    const span = document.createElement("span");
+    span.textContent = field.label;
+    const input = document.createElement("input");
+    input.type = "number";
+    input.step = "1";
+    input.min = "0";
+    input.addEventListener("input", () => {
+      draft = normalizeClientCrop({
+        ...draft,
+        [field.key]: Number(input.value),
+      });
+      syncCropEditor();
+    });
+    inputMap.set(field.key, input);
+    labelEl.append(span, input);
+    controls.append(labelEl);
+  }
+
+  const resetButton = document.createElement("button");
+  resetButton.type = "button";
+  resetButton.textContent = "重置";
+  resetButton.addEventListener("click", () => {
+    draft = normalizeClientCrop(artifact.crop);
+    syncCropEditor();
+  });
+
+  controls.append(positionText, resetButton);
+  body.append(map, controls);
+  panel.append(header, body);
+  overlay.append(panel);
+  document.body.append(overlay);
+
+  map.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+
+    event.preventDefault();
+    const handle = event.target?.dataset?.cropHandle || "";
+    const point = getCropEditorPoint(map, draft, event);
+    const start = { ...draft };
+    const startEdges = getClientCropEdges(start);
+    const onMove = (moveEvent) => {
+      const current = getCropEditorPoint(map, draft, moveEvent);
+      if (handle) {
+        draft = resizeClientCropFromHandle(startEdges, handle, current, draft);
+      } else if (event.target === selection || selection.contains(event.target)) {
+        draft = normalizeClientCrop({
+          ...start,
+          x: current.x - (point.x - start.x),
+          y: current.y - (point.y - start.y),
+        });
+      } else {
+        draft = normalizeClientCropFromEdges({
+          left: point.x,
+          top: point.y,
+          right: current.x,
+          bottom: current.y,
+          pageWidth: draft.pageWidth,
+          pageHeight: draft.pageHeight,
+        });
+      }
+      syncCropEditor();
+    };
+    const onUp = () => {
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+    };
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp, { once: true });
+  });
+
+  const onKeydown = (event) => {
+    if (event.key === "Escape") {
+      closeArtifactCropEditor();
+    }
+  };
+  overlay._onKeydown = onKeydown;
+  document.addEventListener("keydown", onKeydown);
+  syncCropEditor();
+
+  function syncCropEditor() {
+    selection.style.left = `${clampPercent(draft.x / draft.pageWidth * 100)}%`;
+    selection.style.top = `${clampPercent(draft.y / draft.pageHeight * 100)}%`;
+    selection.style.width = `${clampPercent(draft.width / draft.pageWidth * 100)}%`;
+    selection.style.height = `${clampPercent(draft.height / draft.pageHeight * 100)}%`;
+    positionText.textContent = `${formatCropNumber(draft.width)} × ${formatCropNumber(draft.height)} · ${formatCropNumber(draft.pageWidth)} × ${formatCropNumber(draft.pageHeight)}`;
+    for (const [key, input] of inputMap.entries()) {
+      if (document.activeElement !== input) {
+        input.value = String(formatCropNumber(draft[key]));
+      }
+    }
+  }
+}
+
+async function saveArtifactCropEdit(artifactId, crop) {
+  closeArtifactCropEditor();
+  await editArtifact(artifactId, {
+    action: "set-crop",
+    crop: {
+      x: crop.x,
+      y: crop.y,
+      width: crop.width,
+      height: crop.height,
+      pageWidth: crop.pageWidth,
+      pageHeight: crop.pageHeight,
+    },
+  });
+}
+
+function closeArtifactCropEditor() {
+  const overlay = document.querySelector(".artifact-crop-editor");
+  if (!overlay) {
+    return;
+  }
+
+  if (overlay._onKeydown) {
+    document.removeEventListener("keydown", overlay._onKeydown);
+  }
+  overlay.remove();
+}
+
+function normalizeClientCrop(crop = {}) {
+  const pageWidth = Math.max(1, Number(crop.pageWidth || 1));
+  const pageHeight = Math.max(1, Number(crop.pageHeight || 1));
+  const x = clampNumber(Number(crop.x || 0), 0, Math.max(0, pageWidth - 1));
+  const y = clampNumber(Number(crop.y || 0), 0, Math.max(0, pageHeight - 1));
+  const right = clampNumber(Number(crop.x || 0) + Math.max(1, Number(crop.width || 1)), x + 1, pageWidth);
+  const bottom = clampNumber(Number(crop.y || 0) + Math.max(1, Number(crop.height || 1)), y + 1, pageHeight);
+  return {
+    x,
+    y,
+    width: right - x,
+    height: bottom - y,
+    pageWidth,
+    pageHeight,
+  };
+}
+
+function normalizeClientCropFromEdges(edges = {}) {
+  const pageWidth = Math.max(1, Number(edges.pageWidth || 1));
+  const pageHeight = Math.max(1, Number(edges.pageHeight || 1));
+  const left = clampNumber(Math.min(Number(edges.left || 0), Number(edges.right || 0)), 0, pageWidth);
+  const right = clampNumber(Math.max(Number(edges.left || 0), Number(edges.right || 0)), left + 1, pageWidth);
+  const top = clampNumber(Math.min(Number(edges.top || 0), Number(edges.bottom || 0)), 0, pageHeight);
+  const bottom = clampNumber(Math.max(Number(edges.top || 0), Number(edges.bottom || 0)), top + 1, pageHeight);
+  return {
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top,
+    pageWidth,
+    pageHeight,
+  };
+}
+
+function getClientCropEdges(crop) {
+  return {
+    left: crop.x,
+    top: crop.y,
+    right: crop.x + crop.width,
+    bottom: crop.y + crop.height,
+    pageWidth: crop.pageWidth,
+    pageHeight: crop.pageHeight,
+  };
+}
+
+function resizeClientCropFromHandle(startEdges, handle, point, crop) {
+  const edges = { ...startEdges };
+  if (handle.includes("w")) {
+    edges.left = point.x;
+  }
+  if (handle.includes("e")) {
+    edges.right = point.x;
+  }
+  if (handle.includes("n")) {
+    edges.top = point.y;
+  }
+  if (handle.includes("s")) {
+    edges.bottom = point.y;
+  }
+  edges.pageWidth = crop.pageWidth;
+  edges.pageHeight = crop.pageHeight;
+  return normalizeClientCropFromEdges(edges);
+}
+
+function getCropEditorPoint(map, crop, event) {
+  const rect = map.getBoundingClientRect();
+  return {
+    x: clampNumber((event.clientX - rect.left) / Math.max(1, rect.width) * crop.pageWidth, 0, crop.pageWidth),
+    y: clampNumber((event.clientY - rect.top) / Math.max(1, rect.height) * crop.pageHeight, 0, crop.pageHeight),
+  };
+}
+
+function formatCropNumber(value) {
+  return Math.round(Number(value || 0) * 10) / 10;
+}
+
 function closeArtifactViewer() {
   const overlay = document.querySelector(".artifact-viewer");
   if (!overlay) {
@@ -4225,7 +4521,16 @@ function getArtifactCropUrl(artifact, options = {}) {
   }
 
   const url = `/api/papers/${encodeURIComponent(state.paper.id)}/artifacts/${encodeURIComponent(artifact.id)}/crop.svg`;
-  return options.download ? `${url}?download=1` : url;
+  const params = new URLSearchParams();
+  if (options.download) {
+    params.set("download", "1");
+  }
+  const version = artifact.manualCropEditedAt || artifact.manualEditedAt || artifact.cropVersion || "";
+  if (version) {
+    params.set("v", String(version));
+  }
+  const suffix = params.toString();
+  return suffix ? `${url}?${suffix}` : url;
 }
 
 function getArtifactDownloadName(artifact) {

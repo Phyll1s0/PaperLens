@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  buildManualVisualCropUpdate,
   buildCropQuality,
   getCropConfidence,
   isOversizedVisualCrop,
@@ -11,6 +12,11 @@ const page = { pageWidth: 612, pageHeight: 792 };
 assert.deepEqual(
   normalizeVisualCrop({ x: -12, y: -4, width: 720, height: 900, ...page }),
   { x: 0, y: 0, width: 612, height: 792, pageWidth: 612, pageHeight: 792 },
+);
+
+assert.deepEqual(
+  normalizeVisualCrop({ x: 612, y: 792, width: 20, height: 20, ...page }),
+  { x: 611, y: 791, width: 1, height: 1, pageWidth: 612, pageHeight: 792 },
 );
 
 assert.deepEqual(
@@ -65,3 +71,36 @@ assert.equal(isOversizedVisualCrop(0.19, 0.5, 0.32, "code"), false);
 assert.equal(isOversizedVisualCrop(0.21, 0.5, 0.32, "code"), true);
 assert.equal(getCropConfidence(0.004, 0.018, 0.018, "figure", false), "low");
 assert.equal(getCropConfidence(0.004, 0.018, 0.018, "figure", true), "high");
+
+assert.deepEqual(
+  buildManualVisualCropUpdate(
+    { type: "caption", visualType: "figure", crop: { pageWidth: 612, pageHeight: 792 } },
+    { x: -10, y: 20, width: 700, height: 90 },
+  ),
+  {
+    crop: {
+      x: 0,
+      y: 20,
+      width: 612,
+      height: 90,
+      pageWidth: 612,
+      pageHeight: 792,
+      pixelRefined: false,
+      manuallyEdited: true,
+    },
+    cropQuality: {
+      version: 1,
+      areaRatio: 0.114,
+      widthRatio: 1,
+      heightRatio: 0.114,
+      oversized: false,
+      confidence: "manual",
+      manual: true,
+    },
+  },
+);
+
+assert.deepEqual(
+  buildManualVisualCropUpdate({ crop: { pageWidth: 612, pageHeight: 792 } }, { x: 1, y: 2, width: 0, height: 8 }),
+  { error: "invalid-crop" },
+);

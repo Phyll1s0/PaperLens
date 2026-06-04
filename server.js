@@ -88,6 +88,7 @@ import {
 } from "./lib/segmentation-structure.js";
 import {
   buildCropQuality,
+  buildManualVisualCropUpdate,
   normalizeVisualCrop as normalizeCrop,
 } from "./lib/visual-crop-quality.js";
 
@@ -837,6 +838,8 @@ function applyPaperArtifactEdit(paper, artifactId, payload = {}) {
     visualType: artifact.visualType || "",
     label: artifact.label || "",
     text: artifact.text || "",
+    crop: artifact.crop || null,
+    cropQuality: artifact.cropQuality || null,
     hidden: Boolean(artifact.hidden),
   };
   let message = "视觉材料已更新。";
@@ -871,6 +874,18 @@ function applyPaperArtifactEdit(paper, artifactId, payload = {}) {
   } else if (action === "set-label") {
     artifact.label = normalizeManualArtifactLabel(payload.label);
     message = "视觉材料标签已更新。";
+  } else if (action === "set-crop") {
+    const next = buildManualVisualCropUpdate(artifact, payload.crop || payload);
+    if (next.error) {
+      throw badRequest("裁剪区域无效：请确认 x/y/宽/高是正数，并且页面尺寸可用。");
+    }
+    artifact.crop = next.crop;
+    artifact.cropQuality = next.cropQuality;
+    artifact.cropVersion = ARTIFACT_CROP_VERSION;
+    artifact.pageWidth = next.crop.pageWidth;
+    artifact.pageHeight = next.crop.pageHeight;
+    artifact.manualCropEditedAt = now;
+    message = "裁剪区域已更新。";
   } else {
     throw badRequest("不支持的视觉材料编辑操作。");
   }
@@ -10296,6 +10311,10 @@ function collectManualArtifactOverrides(artifacts = []) {
       visualType: artifact.visualType || "",
       label: artifact.label || "",
       text: artifact.text || "",
+      crop: artifact.crop || null,
+      cropQuality: artifact.cropQuality || null,
+      cropVersion: artifact.cropVersion || null,
+      manualCropEditedAt: artifact.manualCropEditedAt || "",
       hidden: Boolean(artifact.hidden),
       manualEditedAt: artifact.manualEditedAt || "",
       manualArtifactOverride: artifact.manualArtifactOverride || null,
@@ -10322,6 +10341,10 @@ function applyManualArtifactOverrides(artifacts = [], overrides = new Map()) {
       visualType: override.visualType || artifact.visualType,
       label: override.label,
       text: override.text || artifact.text,
+      crop: override.crop || artifact.crop,
+      cropQuality: override.cropQuality || artifact.cropQuality,
+      cropVersion: override.cropVersion || artifact.cropVersion,
+      manualCropEditedAt: override.manualCropEditedAt || artifact.manualCropEditedAt || "",
       hidden: override.hidden,
       manualEditedAt: override.manualEditedAt || artifact.manualEditedAt || "",
       manualArtifactOverride: override.manualArtifactOverride || artifact.manualArtifactOverride || null,
