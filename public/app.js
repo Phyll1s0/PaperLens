@@ -1875,6 +1875,9 @@ function normalizeClientSegmentationRetryStrategy(value) {
   if (["structure", "structure-only", "map", "map-only", "plan", "plan-only"].includes(key)) {
     return "structure-only";
   }
+  if (["failed", "failed-chunks", "retry-failed", "retry-failed-chunks"].includes(key)) {
+    return "failed-chunks";
+  }
   return "full";
 }
 
@@ -1885,6 +1888,9 @@ function formatClientSegmentationRetryStrategyLabel(value) {
   }
   if (strategy === "structure-only") {
     return "只刷新结构地图";
+  }
+  if (strategy === "failed-chunks") {
+    return "补跑失败分段";
   }
   return "完整重跑";
 }
@@ -2426,9 +2432,17 @@ async function loadJobHistory() {
   }
 
   try {
-    const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}/analysis-jobs`, {}, "载入任务历史");
-    const result = await readResponse(response);
-    state.jobHistory = result.jobs || [];
+    const paperId = encodeURIComponent(state.paper.id);
+    const [analysisResponse, segmentationResponse] = await Promise.all([
+      apiFetch(`/api/papers/${paperId}/analysis-jobs`, {}, "载入分析任务历史"),
+      apiFetch(`/api/papers/${paperId}/segment-jobs`, {}, "载入分段任务历史"),
+    ]);
+    const analysisResult = await readResponse(analysisResponse);
+    const segmentationResult = await readResponse(segmentationResponse);
+    state.jobHistory = [
+      ...(analysisResult.jobs || []),
+      ...(segmentationResult.jobs || []),
+    ].sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
     renderJobHistory();
   } catch {
     state.jobHistory = [];
@@ -2453,17 +2467,18 @@ function renderJobHistory() {
 
     const summary = document.createElement("span");
     summary.textContent = [
+      getJobTypeLabel(job.type),
       getJobStatusText(job.status),
       `${Number(job.completed || 0) + Number(job.failed || 0)}/${job.total || 0}`,
       `失败 ${job.failed || 0}`,
     ].join(" · ");
     item.append(summary);
 
-    if (!isActiveAnalysisJob(job) && Number(job.failed || 0) > 0) {
+    if (!isActiveRetryableJob(job) && Number(job.failed || 0) > 0 && (job.type === "analysis" || job.type === "segmentation")) {
       const retryButton = document.createElement("button");
       retryButton.type = "button";
-      retryButton.textContent = "重跑失败";
-      retryButton.disabled = state.autoAnalyze.running;
+      retryButton.textContent = job.type === "segmentation" ? "补跑失败分段" : "重跑失败";
+      retryButton.disabled = state.autoAnalyze.running || state.segmentationJob.running;
       retryButton.addEventListener("click", () => retryFailedJob(job.id));
       item.append(retryButton);
     }
@@ -2472,6 +2487,23 @@ function renderJobHistory() {
   }
 
   els.jobHistory.replaceChildren(fragment);
+}
+
+function getJobTypeLabel(type) {
+  if (type === "segmentation") {
+    return "分段";
+  }
+  if (type === "ocr") {
+    return "OCR";
+  }
+  return "讲解";
+}
+
+function isActiveRetryableJob(job) {
+  if (job?.type === "segmentation") {
+    return isActiveSegmentationJob(job);
+  }
+  return isActiveAnalysisJob(job);
 }
 
 function getJobStatusText(status) {
@@ -2494,18 +2526,22 @@ function getJobStatusText(status) {
 }
 
 async function retryFailedJob(jobId) {
-  setStatus("正在重跑失败段落");
+  setStatus("正在重跑失败项");
   try {
     const response = await apiFetch(`/api/jobs/${encodeURIComponent(jobId)}/retry-failed`, {
       method: "POST",
-    }, "重跑失败段落");
+    }, "重跑失败项");
     const result = await readResponse(response);
     if (result.job) {
-      beginAnalysisJob(result.job);
+      if (result.job.type === "segmentation") {
+        beginSegmentationJob(result.job);
+      } else {
+        beginAnalysisJob(result.job);
+      }
     }
     await refreshCurrentPaper();
     await loadJobHistory();
-    setStatus(result.message || "失败段落已重新加入队列");
+    setStatus(result.message || "失败项已重新加入队列");
   } catch (error) {
     setStatus(error.message, true);
   }

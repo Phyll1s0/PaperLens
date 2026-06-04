@@ -11,11 +11,13 @@ assert.equal(normalizeSegmentationRetryStrategy(""), SEGMENTATION_RETRY_STRATEGI
 assert.equal(normalizeSegmentationRetryStrategy("reuse_paper_memory"), SEGMENTATION_RETRY_STRATEGIES.REUSE_MEMORY);
 assert.equal(normalizeSegmentationRetryStrategy("chunks-only"), SEGMENTATION_RETRY_STRATEGIES.REUSE_MEMORY);
 assert.equal(normalizeSegmentationRetryStrategy("map"), SEGMENTATION_RETRY_STRATEGIES.STRUCTURE_ONLY);
+assert.equal(normalizeSegmentationRetryStrategy("retry-failed-chunks"), SEGMENTATION_RETRY_STRATEGIES.FAILED_CHUNKS);
 assert.equal(normalizeSegmentationRetryStrategy("unexpected"), SEGMENTATION_RETRY_STRATEGIES.FULL);
 
 assert.equal(formatSegmentationRetryStrategyLabel("full"), "完整重跑");
 assert.equal(formatSegmentationRetryStrategyLabel("reuse-memory"), "复用记忆重切段");
 assert.equal(formatSegmentationRetryStrategyLabel("structure-only"), "只刷新结构地图");
+assert.equal(formatSegmentationRetryStrategyLabel("failed-chunks"), "补跑失败分段");
 
 assert.equal(canReuseSegmentationStructureMap(null), false);
 assert.equal(canReuseSegmentationStructureMap({ segmentationPlan: [] }), false);

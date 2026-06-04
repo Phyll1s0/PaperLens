@@ -34,6 +34,11 @@ import {
   buildPaperSegmentationDebugReport,
 } from "./lib/segmentation-debug.js";
 import {
+  buildSegmentationChunkMap,
+  mergeRetriedChunkParagraphs,
+  mergeSegmentationChunkMaps,
+} from "./lib/segmentation-chunk-map.js";
+import {
   buildHeuristicPaperMemory,
   buildPaperMemoryScanInput,
   formatPaperMemoryForPrompt,
@@ -1451,8 +1456,12 @@ async function handleRetryFailedJob(res, jobId) {
     return json(res, { error: "任务还在运行，不能同时重跑失败项。" }, 409);
   }
 
+  if (job.type === "segmentation") {
+    return await handleRetryFailedSegmentationJob(res, job);
+  }
+
   if (job.type !== "analysis") {
-    return json(res, { error: "只有段落分析任务支持重跑失败项。" }, 400);
+    return json(res, { error: "只有段落分析和 AI 分段任务支持重跑失败项。" }, 400);
   }
 
   const failedItems = job.items.filter((item) => item.status === "error");
@@ -1502,6 +1511,67 @@ async function handleRetryFailedJob(res, jobId) {
   scheduleJobWorker();
 
   return json(res, { job: serializeJob(job) });
+}
+
+async function handleRetryFailedSegmentationJob(res, job) {
+  const failedItems = job.items.filter((item) => item.status === "error");
+  if (!failedItems.length) {
+    return json(res, { job: serializeJob(job), message: "没有失败分段需要补跑。" });
+  }
+
+  const targetChunkIndices = failedItems
+    .map((item, index) => normalizeSegmentationJobItemChunkIndex(item, index))
+    .filter((index) => Number.isFinite(index) && index >= 0);
+  if (!targetChunkIndices.length) {
+    return json(res, {
+      job: serializeJob(job),
+      message: "失败项不是页块分段；请使用完整重分段或只刷新结构地图。",
+    }, 400);
+  }
+
+  const paper = await loadPaper(job.paperId);
+  const pages = Array.isArray(paper.extractionPages) ? paper.extractionPages : [];
+  if (!pages.length) {
+    return json(res, { error: "这篇论文缺少原始页面文本，无法补跑失败分段。请重新上传 PDF。" }, 400);
+  }
+
+  for (const item of failedItems) {
+    item.status = "queued";
+    item.attempts = 0;
+    item.error = "";
+    item.startedAt = "";
+    item.completedAt = "";
+  }
+
+  job.status = "queued";
+  job.cancelRequested = false;
+  job.retryFailedOnly = true;
+  job.phase = "queued";
+  job.message = `失败分段已重新加入队列：${targetChunkIndices.length} 个 chunk。`;
+  job.segmentation = normalizeSegmentationJobPayload({
+    ...(job.segmentation || {}),
+    strategy: SEGMENTATION_RETRY_STRATEGIES.FAILED_CHUNKS,
+    targetChunks: [...new Set(targetChunkIndices)].sort((a, b) => a - b),
+    retryBaseJobId: job.id,
+    retryFailedAt: new Date().toISOString(),
+  });
+  job.currentParagraphId = "";
+  job.currentBatchSize = 0;
+  job.error = "";
+  job.startedAt = "";
+  job.completedAt = "";
+  job.updatedAt = new Date().toISOString();
+  recalculateJobProgress(job);
+  await updatePaperSegmentationJobStatus(job.paperId, job, {
+    status: "queued",
+    phase: job.phase,
+    message: job.message,
+    error: "",
+  }).catch(() => {});
+  await persistJobs();
+  scheduleJobWorker();
+
+  return json(res, { job: serializeJob(job), message: "失败分段已重新加入队列。" });
 }
 
 async function listPapers(searchParams = new URLSearchParams()) {
@@ -2256,6 +2326,7 @@ function normalizeLoadedSegmentationJob(job) {
     : [{ paragraphId: "__segmentation__", status: job.status, attempts: 0 }];
   const normalizedItems = items.map((item, index) => ({
     paragraphId: String(item.paragraphId || `chunk_${index + 1}`),
+    chunkIndex: normalizeSegmentationJobItemChunkIndex(item, index),
     pageRange: String(item.pageRange || ""),
     status: normalizeLoadedJobItemStatus(item.status),
     attempts: Number.isFinite(Number(item.attempts)) ? Number(item.attempts) : 0,
@@ -2275,7 +2346,7 @@ function normalizeLoadedSegmentationJob(job) {
     paperTitle: String(job.paperTitle || ""),
     status: normalizeLoadedJobStatus(job.status),
     cancelRequested: Boolean(job.cancelRequested),
-    retryFailedOnly: false,
+    retryFailedOnly: Boolean(job.retryFailedOnly),
     cacheHits: 0,
     adaptiveBatchSize: null,
     settings: job.settings || {},
@@ -2311,6 +2382,20 @@ function normalizeSegmentationJobPayload(segmentation, fallback = {}) {
     canReuseStructureMap: Boolean(data.canReuseStructureMap),
     canReusePaperMemory: Boolean(data.canReusePaperMemory),
   };
+}
+
+function normalizeSegmentationJobItemChunkIndex(item, fallbackIndex = -1) {
+  const direct = Number(item?.chunkIndex);
+  if (Number.isFinite(direct)) {
+    return Math.trunc(direct);
+  }
+
+  const match = String(item?.paragraphId || "").match(/^chunk_(\d+)$/i);
+  if (match) {
+    return Math.max(0, Number(match[1]) - 1);
+  }
+
+  return Number.isFinite(Number(fallbackIndex)) ? Math.trunc(Number(fallbackIndex)) : -1;
 }
 
 function normalizeLoadedOcrJob(job) {
@@ -2417,6 +2502,7 @@ function createSegmentationJob({ paper, settings, strategy = SEGMENTATION_RETRY_
   const items = retryStrategy === SEGMENTATION_RETRY_STRATEGIES.STRUCTURE_ONLY
     ? [{
         paragraphId: "structure_map",
+        chunkIndex: -1,
         pageRange: getPageRangeLabel(paper.extractionPages || []),
         status: "queued",
         attempts: 0,
@@ -2426,6 +2512,7 @@ function createSegmentationJob({ paper, settings, strategy = SEGMENTATION_RETRY_
       }]
     : chunks.map((chunk, index) => ({
         paragraphId: `chunk_${index + 1}`,
+        chunkIndex: index,
         pageRange: getPageRangeLabel(chunk),
         status: "queued",
         attempts: 0,
@@ -2557,6 +2644,7 @@ function serializeJob(job) {
     updatedAt: job.updatedAt,
     items: job.items.map((item) => ({
       paragraphId: item.paragraphId,
+      chunkIndex: normalizeSegmentationJobItemChunkIndex(item),
       pageRange: item.pageRange || "",
       status: item.status,
       attempts: item.attempts,
@@ -2850,13 +2938,21 @@ async function runSegmentationJob(job, signal) {
       throw new Error("这篇论文缺少原始页面文本，无法重新 AI 分段。请重新上传 PDF。");
     }
 
-    const segmented = await segmentPaperWithAi(paper, resolveJobSettings(job.settings), {
-      strategy,
-      signal,
-      onProgress: async (event) => {
-        await updateSegmentationJobProgress(job, event);
-      },
-    });
+    const segmented = strategy === SEGMENTATION_RETRY_STRATEGIES.FAILED_CHUNKS
+      ? await segmentPaperFailedChunks(paper, resolveJobSettings(job.settings), {
+        targetChunkIndices: getSegmentationRetryTargetChunkIndices(job),
+        signal,
+        onProgress: async (event) => {
+          await updateSegmentationJobProgress(job, event);
+        },
+      })
+      : await segmentPaperWithAi(paper, resolveJobSettings(job.settings), {
+        strategy,
+        signal,
+        onProgress: async (event) => {
+          await updateSegmentationJobProgress(job, event);
+        },
+      });
 
     if (signal.aborted || job.cancelRequested) {
       throw createAbortError("AI 分段任务已停止。");
@@ -3038,6 +3134,9 @@ function getSegmentationJobStartMessage(strategy) {
   if (normalized === SEGMENTATION_RETRY_STRATEGIES.STRUCTURE_ONLY) {
     return "AI 正在刷新全文结构地图。";
   }
+  if (normalized === SEGMENTATION_RETRY_STRATEGIES.FAILED_CHUNKS) {
+    return "正在补跑失败分段页块。";
+  }
   return "AI 正在扫描全文结构。";
 }
 
@@ -3046,7 +3145,28 @@ function formatSegmentationJobDoneMessage(segmented, strategy) {
   if (normalized === SEGMENTATION_RETRY_STRATEGIES.STRUCTURE_ONLY) {
     return `结构地图已刷新：${getSegmentationPlan(segmented.structureMap).length} 个章节计划。`;
   }
+  if (normalized === SEGMENTATION_RETRY_STRATEGIES.FAILED_CHUNKS) {
+    const retry = segmented.segmentationStages?.failedChunkRetry || null;
+    return `失败分段补跑完成：${retry?.targetChunks || 0} 个 chunk，当前 ${getReadingParagraphs(segmented).length} 个段落。`;
+  }
   return `AI 分段完成：${getReadingParagraphs(segmented).length} 个段落。`;
+}
+
+function getSegmentationRetryTargetChunkIndices(job) {
+  const fromPayload = Array.isArray(job.segmentation?.targetChunks)
+    ? job.segmentation.targetChunks
+      .map((item) => Number(typeof item === "object" ? item.index : item))
+      .filter((index) => Number.isFinite(index) && index >= 0)
+    : [];
+  if (fromPayload.length) {
+    return [...new Set(fromPayload.map((index) => Math.trunc(index)))].sort((a, b) => a - b);
+  }
+
+  return [...new Set((job.items || [])
+    .filter((item) => item.status === "queued" || item.status === "running" || item.status === "error")
+    .map((item, index) => normalizeSegmentationJobItemChunkIndex(item, index))
+    .filter((index) => Number.isFinite(index) && index >= 0))]
+    .sort((a, b) => a - b);
 }
 
 function mergePaperMetadataAfterSegmentation(previousPaper, nextPaper) {
@@ -8077,6 +8197,194 @@ function refreshPaperStructureOnly(paper, structureMap, options = {}) {
   return segmented;
 }
 
+async function segmentPaperFailedChunks(paper, settings, options = {}) {
+  const pages = Array.isArray(paper.extractionPages) ? paper.extractionPages : [];
+  const chunkOptions = getSegmentationChunkOptions(settings);
+  const chunks = chunkPagesForSegmentation(pages, chunkOptions);
+  const targetIndices = [...new Set((options.targetChunkIndices || [])
+    .map((index) => Number(index))
+    .filter((index) => Number.isFinite(index) && index >= 0 && index < chunks.length)
+    .map((index) => Math.trunc(index)))]
+    .sort((a, b) => a - b);
+  if (!targetIndices.length) {
+    throw new Error("没有可补跑的失败分段页块。");
+  }
+
+  const structureMap = canReuseSegmentationStructureMap(paper.structureMap)
+    ? paper.structureMap
+    : buildHeuristicPaperStructureMap(paper, pages);
+  await options.onProgress?.({
+    phase: canReuseSegmentationStructureMap(paper.structureMap) ? "structure-reused" : "structure-done",
+    reusedStructureMap: canReuseSegmentationStructureMap(paper.structureMap),
+    totalChunks: chunks.length,
+  });
+  const paperMemory = shouldUsePaperMemoryForSegmentation(settings) && canReusePaperMemory(paper.paperMemory)
+    ? paper.paperMemory
+    : null;
+  if (paperMemory) {
+    await options.onProgress?.({ phase: "memory-reused" });
+  }
+
+  const items = [];
+  const chunkSummaries = [];
+  const fallbackChunks = [];
+  for (const [retryOrder, index] of targetIndices.entries()) {
+    const chunk = chunks[index];
+    await options.onProgress?.({
+      phase: "chunk-start",
+      chunkIndex: index,
+      retryOrder,
+      retryTotal: targetIndices.length,
+      totalChunks: chunks.length,
+      pageRange: getPageRangeLabel(chunk),
+    });
+
+    const result = await segmentPageChunkResiliently(paper, chunk, settings, {
+      signal: options.signal,
+      chunkIndex: index,
+      totalChunks: chunks.length,
+      windowContext: buildSegmentationRetryWindowContext(paper, chunk),
+      structureMap,
+      paperMemory,
+      chunkOptions,
+      forceLocalFallback: false,
+    });
+    const chunkItems = result.items.map((item) => ({
+      ...item,
+      chunkIndex: index,
+    }));
+    items.push(...chunkItems);
+    chunkSummaries.push({
+      index,
+      pages: getPageRangeLabel(chunk),
+      summary: normalizeParagraph(result.chunkSummary || ""),
+      keywords: normalizeKeywordList(result.keywords).slice(0, 12),
+      fallback: Boolean(result.fallback),
+      fallbackReason: result.fallbackReason || "",
+    });
+    if (result.fallback) {
+      fallbackChunks.push({
+        index,
+        pages: getPageRangeLabel(chunk),
+        reason: truncateText(result.fallbackReason || "fallback", 180),
+      });
+    }
+
+    await options.onProgress?.({
+      phase: "chunk-done",
+      chunkIndex: index,
+      retryOrder,
+      retryTotal: targetIndices.length,
+      totalChunks: chunks.length,
+      pageRange: getPageRangeLabel(chunk),
+      itemCount: chunkItems.length,
+    });
+  }
+
+  await options.onProgress?.({ phase: "validation", totalChunks: chunks.length });
+  const retryPages = targetIndices.flatMap((index) => chunks[index]);
+  const validation = validateAndRepairSegmentedParagraphs(
+    buildParagraphsFromSegmentItems(items, structureMap),
+    structureMap,
+    { pageMetrics: buildSegmentationPageMetrics(retryPages) },
+  );
+  const retryParagraphs = validation.paragraphs;
+  if (!retryParagraphs.filter((paragraph) => isReadingParagraph(paragraph)).length) {
+    throw new Error("失败分段补跑结果为空，未改动当前段落。");
+  }
+
+  const targetRanges = targetIndices.map((index) => {
+    const bounds = getPageRangeBounds(chunks[index]);
+    return {
+      startPage: bounds.firstPage,
+      endPage: bounds.lastPage,
+    };
+  });
+  const paragraphs = mergeRetriedChunkParagraphs(
+    Array.isArray(paper.paragraphs) ? paper.paragraphs : [],
+    retryParagraphs,
+    targetRanges,
+  );
+  const sections = inferSectionsFromSegmentationPlan(paragraphs, structureMap);
+  enrichSectionsWithContext(sections, paragraphs, chunkSummaries);
+  const now = new Date().toISOString();
+  const retryChunkMap = buildSegmentationChunkMap({
+    chunks,
+    paragraphs: retryParagraphs,
+    chunkSummaries,
+    fallbackChunks,
+    targetIndices,
+    now,
+  });
+  const segmentationChunkMap = mergeSegmentationChunkMaps(paper.segmentationChunkMap, retryChunkMap, now);
+  const segmented = {
+    ...paper,
+    title: paper.title || inferTitle(paragraphs, paper.filename),
+    status: "ready",
+    segmentationMode: "ai",
+    structureMap,
+    paperMemory: paperMemory || paper.paperMemory || null,
+    segmentationPlan: structureMap.segmentationPlan || [],
+    segmentationChunkMap,
+    segmentationValidation: {
+      ...(paper.segmentationValidation || {}),
+      partialRetry: validation.summary,
+      updatedAt: now,
+    },
+    segmentationQualityAudit: {
+      ...(paper.segmentationQualityAudit || {}),
+      partialRetry: validation.summary.qualityAudit || null,
+      updatedAt: now,
+    },
+    segmentationStages: {
+      ...(paper.segmentationStages || {}),
+      version: 1,
+      failedChunkRetry: {
+        strategy: SEGMENTATION_RETRY_STRATEGIES.FAILED_CHUNKS,
+        targetChunks: targetIndices.length,
+        targetChunkIndices: targetIndices,
+        replacedPageRanges: targetRanges.map((range) => `p.${range.startPage}${range.endPage !== range.startPage ? `-${range.endPage}` : ""}`),
+        newParagraphs: retryParagraphs.length,
+        fallbackChunks: fallbackChunks.length,
+        updatedAt: now,
+      },
+    },
+    sections,
+    paragraphs,
+    contextProfile: buildPaperContextProfile(paragraphs, sections, chunkSummaries, structureMap, paperMemory || paper.paperMemory),
+    updatedAt: now,
+  };
+
+  attachParagraphArtifactLinks(segmented);
+  return segmented;
+}
+
+function buildSegmentationRetryWindowContext(paper, chunk) {
+  const bounds = getPageRangeBounds(chunk);
+  const paragraphs = Array.isArray(paper.paragraphs) ? paper.paragraphs : [];
+  const before = paragraphs
+    .filter((paragraph) => Number(paragraph.pageEndNumber || paragraph.pageNumber || 0) < bounds.firstPage)
+    .slice(-2);
+  const after = paragraphs
+    .filter((paragraph) => Number(paragraph.pageNumber || 0) > bounds.lastPage)
+    .slice(0, 2);
+  const lines = [];
+  if (before.length) {
+    lines.push("目标页块前文:");
+    for (const [index, paragraph] of before.entries()) {
+      lines.push(`B${index + 1}: ${truncateText(paragraph.sourceText || "", SEGMENTATION_ITEM_TEXT_LIMIT)}`);
+    }
+  }
+  if (after.length) {
+    lines.push("目标页块后文:");
+    for (const [index, paragraph] of after.entries()) {
+      lines.push(`A${index + 1}: ${truncateText(paragraph.sourceText || "", SEGMENTATION_ITEM_TEXT_LIMIT)}`);
+    }
+  }
+
+  return lines.length ? truncateText(lines.join("\n"), SEGMENTATION_CONTEXT_TEXT_LIMIT) : "无。";
+}
+
 async function segmentPaperWithAi(paper, settings, options = {}) {
   const pages = paper.extractionPages || [];
   const strategy = normalizeSegmentationRetryStrategy(options.strategy);
@@ -8150,6 +8458,7 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
     items.push(...chunkItems);
     updateSegmentationWindowState(windowState, chunkItems, result, chunk);
     chunkSummaries.push({
+      index,
       pages: getPageRangeLabel(chunk),
       summary: normalizeParagraph(result.chunkSummary || ""),
       keywords: normalizeKeywordList(result.keywords).slice(0, 12),
@@ -8203,6 +8512,12 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
     structureMap,
     paperMemory,
     segmentationPlan: structureMap.segmentationPlan || [],
+    segmentationChunkMap: buildSegmentationChunkMap({
+      chunks,
+      paragraphs,
+      chunkSummaries,
+      fallbackChunks,
+    }),
     segmentationValidation: validation.summary,
     segmentationQualityAudit,
     segmentationStages: {
@@ -8800,6 +9115,7 @@ function buildParagraphsFromSegmentItems(items, structureMap = null) {
       sectionId: "section_0",
       sectionTitleHint,
       plannedSectionId: plannedSection?.id || "",
+      segmentationChunkIndex: Number.isFinite(Number(item.chunkIndex)) ? Math.trunc(Number(item.chunkIndex)) : null,
       segmentationRole: normalizeSegmentationRole(item.role || plannedSection?.role || ""),
       contextKeywords: normalizeKeywordList(item.keywords).slice(0, 10),
       continuesFromPrevious: Boolean(item.continuesFromPrevious),
