@@ -8,6 +8,7 @@ paper-assets/
 .env
 .env.*
 !.env.example
+TODO.md
 *.pdf
 !tests/fixtures/
 !tests/fixtures/*.pdf
