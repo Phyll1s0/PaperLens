@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   isLikelyCodeBlockText,
   isLikelyFormulaBlockText,
+  isLikelyTableBodyBlockText,
   isUsefulFormulaArtifactText,
 } from "../lib/artifact-classifier.js";
 
@@ -95,3 +96,24 @@ assert.equal(isUsefulFormulaArtifactText("Xt = i=1"), false);
 assert.equal(isUsefulFormulaArtifactText("C+H t=C+1 |ˆ"), false);
 assert.equal(isUsefulFormulaArtifactText("WQL = 1 WQLαj. j=1"), true);
 assert.equal(isUsefulFormulaArtifactText("MASE( ˆ xi,xi) = C−S"), true);
+
+assert.equal(
+  isLikelyTableBodyBlockText(
+    "Architecture Scaling Factor Data Type Metadata OliVe [27] Tensor/Channel FP16 Tensor/Channel INT4, Flint4 Pair Outlier-victim pair",
+    { lineCount: 12 },
+  ),
+  true,
+);
+
+assert.equal(
+  isLikelyTableBodyBlockText("Granularity Format Granularity Format", { lineCount: 2 }),
+  true,
+);
+
+assert.equal(
+  isLikelyTableBodyBlockText(
+    "For fairness, all accelerators are configured with 32×32 PEs supporting 4-bit multiplications, ensuring differences arise from architectural and algorithmic design.",
+    { lineCount: 4 },
+  ),
+  false,
+);

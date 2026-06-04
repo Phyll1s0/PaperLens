@@ -16,6 +16,7 @@ import {
 import {
   isLikelyCodeBlockText,
   isLikelyFormulaBlockText,
+  isLikelyTableBodyBlockText,
   isUsefulFormulaArtifactText,
 } from "./lib/artifact-classifier.js";
 import {
@@ -5403,6 +5404,9 @@ function isLikelyStandaloneLinkText(text) {
 
 function isLikelyBibliographyEntry(text) {
   return /^\[\d+\]\s+/.test(text) ||
+    /(?:^|https?:\/\/\S+\s+)\[\d+\]\s+[A-Z]/.test(text) ||
+    /^\d{4}\.\s+[A-Z]/.test(text) && /\b(?:arXiv|Proceedings|Conference|Journal|Transactions|doi:|https?:\/\/)/i.test(text) ||
+    /\barXiv:\d{4}\.\d{4,5}\b/i.test(text) && /\[\d+\]|\b(?:Proceedings|Conference|Journal|Transactions|preprint)\b/i.test(text) ||
     /^\d+\.\s+[A-Z][A-Za-z-]+,\s+[A-Z]/.test(text) ||
     /\b(?:In Proceedings of|Journal of|Conference on|Transactions on|arXiv preprint)\b/i.test(text) && text.length < 420;
 }
@@ -6786,6 +6790,10 @@ function classifyPageArtifact(block) {
     return "figure-text";
   }
 
+  if (isLikelyTableBodyBlockText(text, block)) {
+    return "figure-text";
+  }
+
   return "";
 }
 
@@ -7452,19 +7460,64 @@ function buildHeuristicPaperStructureMap(paper, pages) {
   const pageNumbers = (pages || []).map((page) => Number(page.pageNumber)).filter(Number.isFinite);
   const firstPage = pageNumbers.length ? Math.min(...pageNumbers) : 1;
   const lastPage = pageNumbers.length ? Math.max(...pageNumbers) : firstPage;
+  const referencesStartPage = inferReferencesStartPageFromPages(pages, firstPage, lastPage);
+  const bodyEndPage = referencesStartPage
+    ? Math.max(firstPage, referencesStartPage - 1)
+    : lastPage;
+  const nonBodyZones = referencesStartPage
+    ? [{
+        type: "references",
+        label: "参考文献",
+        startPage: referencesStartPage,
+        endPage: lastPage,
+        description: "本地版面扫描识别到 References/Bibliography 起点。",
+      }]
+    : [];
   return {
     version: 1,
     paperTitle: paper.title || paper.filename || "",
     summary: "",
     bodyStartPage: firstPage,
-    referencesStartPage: null,
+    referencesStartPage,
     keywords: [],
     sections: [],
-    segmentationPlan: buildSegmentationPlanFromSections([], firstPage, lastPage),
+    segmentationPlan: buildSegmentationPlanFromSections([], firstPage, bodyEndPage),
     segmentationPlanVersion: SEGMENTATION_PLAN_VERSION,
-    nonBodyZones: [],
+    nonBodyZones,
     updatedAt: new Date().toISOString(),
   };
+}
+
+function inferReferencesStartPageFromPages(pages, firstPage, lastPage) {
+  for (const page of pages || []) {
+    const pageNumber = normalizePageNumber(page?.pageNumber, firstPage, lastPage, null);
+    if (!pageNumber) {
+      continue;
+    }
+
+    const blocks = Array.isArray(page.blocks) ? page.blocks : [];
+    if (blocks.some((block) => isReferencesHeadingBlock(block))) {
+      return pageNumber;
+    }
+
+    const text = String(page.text || "");
+    if (text.split(/\n+/).some((line) => isReferencesSectionTitle(line))) {
+      return pageNumber;
+    }
+  }
+
+  return null;
+}
+
+function isReferencesHeadingBlock(block) {
+  const clean = normalizeSectionTitleHint(block?.text || "");
+  if (!isReferencesSectionTitle(clean)) {
+    return false;
+  }
+
+  const lineCount = Number(block?.lineCount || 1);
+  const width = Number(block?.width || 0);
+  return lineCount <= 2 && (!width || width < 180);
 }
 
 function shouldUseLocalFirstSegmentation(settings = {}) {
@@ -7914,6 +7967,7 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
         "必须忠于原文，不翻译，不总结，不新增内容。",
         "必须优先遵守全文结构地图；如果结构地图指出某页进入 References 或某区域是作者/版权/链接/页眉页脚，不要把这些内容输出成正文段落。",
         "合并同一自然段内的换行和断词，保留标题、编号、公式引用和术语。",
+        "页面文本中的 [B...] 是块编号、页码、坐标和行数元信息，只用于判断顺序/栏位/跨页续接；sourceText 不要包含这些块标记。",
         "不要把上一窗口上下文重复输出成当前段落；它只用于判断跨页续接、章节脉络和术语一致性。",
         "只输出正文阅读需要的章节标题和自然段。作者列表、邮箱、单位、会议版权、ACM Reference、DOI/URL 脚注、页眉页脚、参考文献条目都必须省略。",
         "不要把图注、表格单元格、图片里的文字、公式块、代码块单独切成正文段落；正文里提到的 Figure/Table/Eq 引用要保留。",
@@ -7965,7 +8019,7 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
     keywords: normalizeKeywordList(parsed.keywords || parsed.keyTerms).slice(0, 16),
     items: rawItems
       .map((item) => {
-        const rawSourceText = String(item.sourceText || item.text || "");
+        const rawSourceText = stripSegmentationBlockMarkers(item.sourceText || item.text || "");
         return {
           kind: String(item.kind || "").toLowerCase() === "heading" ? "heading" : "paragraph",
           pageNumber: Number(item.pageNumber || pages[0]?.pageNumber || 1),
@@ -8127,14 +8181,51 @@ function getSegmentationPageText(page) {
   const blocks = getReadablePageBlocks(page);
   if (blocks.length) {
     return blocks
-      .map((block, index) => {
-        const text = typeof block === "string" ? block : block.text;
-        return `[B${index + 1}] ${normalizeParagraph(text)}`;
-      })
+      .map((block, index) => formatSegmentationPageBlock(page, block, index))
       .join("\n\n");
   }
 
   return String(page.text || "");
+}
+
+function formatSegmentationPageBlock(page, block, index) {
+  const text = typeof block === "string" ? block : block.text;
+  const clean = normalizeParagraph(text);
+  if (typeof block === "string") {
+    return `[B${index + 1}] ${clean}`;
+  }
+
+  const pageWidth = Number(page?.width || 0);
+  const pageHeight = Number(page?.height || 0);
+  const box = pickBlockBox(block);
+  const meta = [`B${index + 1}`, `p=${page?.pageNumber || "?"}`];
+  if (box && pageWidth && pageHeight) {
+    meta.push(
+      `x=${formatSegmentationRatio(box.x, pageWidth)}`,
+      `y=${formatSegmentationRatio(box.y, pageHeight)}`,
+      `w=${formatSegmentationRatio(box.width, pageWidth)}`,
+      `h=${formatSegmentationRatio(box.height, pageHeight)}`,
+    );
+  }
+  if (Number(block.column || 0)) {
+    meta.push(`col=${block.column}`);
+  }
+  if (Number(block.lineCount || 0)) {
+    meta.push(`lines=${block.lineCount}`);
+  }
+
+  return `[${meta.join(" ")}] ${clean}`;
+}
+
+function formatSegmentationRatio(value, total) {
+  return (Number(value || 0) / Math.max(1, Number(total || 1))).toFixed(2);
+}
+
+function stripSegmentationBlockMarkers(text) {
+  return String(text || "")
+    .replace(/\[B\d+(?:\s+[^\]]*)?]\s*/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function buildParagraphsFromSegmentItems(items, structureMap = null) {
@@ -8142,7 +8233,7 @@ function buildParagraphsFromSegmentItems(items, structureMap = null) {
   const seen = new Set();
 
   for (const item of items) {
-    const rawClean = normalizeParagraph(item.sourceText);
+    const rawClean = normalizeParagraph(stripSegmentationBlockMarkers(item.sourceText));
     const clean = normalizeParagraph(stripPublicationMetadataFragments(rawClean));
     if (!clean || (clean.length < 20 && item.kind !== "heading" && !isLikelyHeading(clean)) ||
       (item.kind !== "heading" && (

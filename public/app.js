@@ -2883,19 +2883,23 @@ function renderParagraphs(paper) {
 
   const fragment = document.createDocumentFragment();
   let lastSectionId = "";
-  let lastPageNumber = 0;
+  const shownPageNumbers = new Set();
 
   if (state.exportQa?.paperId === paper.id) {
     fragment.append(renderExportQaPanel(state.exportQa));
   }
 
   for (const paragraph of paragraphs) {
-    if (paragraph.pageNumber !== lastPageNumber) {
-      const pageImage = getPageImage(paper, paragraph.pageNumber);
-      if (pageImage) {
-        fragment.append(renderPagePreview(pageImage, getPageArtifacts(paper, paragraph.pageNumber)));
+    for (const pageNumber of getParagraphPageNumbers(paragraph)) {
+      if (shownPageNumbers.has(pageNumber)) {
+        continue;
       }
-      lastPageNumber = paragraph.pageNumber;
+
+      const pageImage = getPageImage(paper, pageNumber);
+      if (pageImage) {
+        fragment.append(renderPagePreview(pageImage, getPageArtifacts(paper, pageNumber)));
+        shownPageNumbers.add(pageNumber);
+      }
     }
 
     if (paragraph.sectionId !== lastSectionId) {
@@ -2910,6 +2914,25 @@ function renderParagraphs(paper) {
   }
 
   els.paragraphList.replaceChildren(fragment);
+}
+
+function getParagraphPageNumbers(paragraph) {
+  const start = Number(paragraph?.pageNumber || 0);
+  const rawEnd = Number(paragraph?.pageEndNumber || start);
+  if (!Number.isFinite(start) || start <= 0) {
+    return [];
+  }
+
+  const end = Number.isFinite(rawEnd) && rawEnd >= start ? rawEnd : start;
+  const maxEnd = Math.min(end, start + 5);
+  const pages = [];
+  for (let pageNumber = start; pageNumber <= maxEnd; pageNumber += 1) {
+    pages.push(pageNumber);
+  }
+  if (end > maxEnd) {
+    pages.push(end);
+  }
+  return pages;
 }
 
 function renderExportQaPanel(result) {
@@ -3073,6 +3096,7 @@ function getPageArtifacts(paper, pageNumber) {
 function renderPagePreview(pageImage, artifacts = []) {
   const wrapper = document.createElement("section");
   wrapper.className = "page-preview";
+  wrapper.id = getPagePreviewId(pageImage.pageNumber);
 
   const header = document.createElement("div");
   header.className = "page-preview-header";
@@ -3100,6 +3124,22 @@ function renderPagePreview(pageImage, artifacts = []) {
   }
 
   return wrapper;
+}
+
+function getPagePreviewId(pageNumber) {
+  return `page-preview-${pageNumber}`;
+}
+
+function focusPagePreview(pageNumber) {
+  const target = document.querySelector(`#${CSS.escape(getPagePreviewId(pageNumber))}`);
+  if (!target) {
+    setStatus(`当前阅读列表里还没有第 ${pageNumber} 页预览。`);
+    return;
+  }
+
+  target.scrollIntoView({ behavior: "smooth", block: "start" });
+  target.classList.add("is-focused");
+  window.setTimeout(() => target.classList.remove("is-focused"), 1200);
 }
 
 function renderPageArtifact(artifact) {
@@ -3661,7 +3701,12 @@ function renderParagraphCard(paragraph) {
   const status = document.createElement("span");
   status.className = `paragraph-status ${getAnalysisStatus(paragraph)}`;
   status.textContent = getAnalysisStatusText(paragraph);
-  meta.append(kicker, status);
+  meta.append(kicker);
+  const pageLinks = renderParagraphPageLinks(paragraph);
+  if (pageLinks) {
+    meta.append(pageLinks);
+  }
+  meta.append(status);
 
   const analyzeButton = document.createElement("button");
   analyzeButton.className = "secondary-button";
@@ -3729,6 +3774,34 @@ function renderParagraphCard(paragraph) {
   content.append(renderChatBox(paragraph));
   card.append(header, content);
   return card;
+}
+
+function renderParagraphPageLinks(paragraph) {
+  const start = Number(paragraph.pageNumber || 0);
+  const end = Number(paragraph.pageEndNumber || start);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start <= 0 || end <= start) {
+    return null;
+  }
+
+  const wrap = document.createElement("div");
+  wrap.className = "paragraph-page-links";
+  const maxLinks = Math.min(end, start + 5);
+  for (let pageNumber = start; pageNumber <= maxLinks; pageNumber += 1) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "paragraph-page-link";
+    button.textContent = `p.${pageNumber}`;
+    button.title = `跳到第 ${pageNumber} 页预览`;
+    button.addEventListener("click", () => focusPagePreview(pageNumber));
+    wrap.append(button);
+  }
+  if (end > maxLinks) {
+    const more = document.createElement("span");
+    more.className = "paragraph-page-more";
+    more.textContent = `+${end - maxLinks}`;
+    wrap.append(more);
+  }
+  return wrap;
 }
 
 function renderParagraphEditActions(paragraph, readingParagraph) {
@@ -3896,7 +3969,10 @@ function renderRelatedArtifacts(artifacts) {
     const previewButton = document.createElement("button");
     previewButton.className = "artifact-link";
     previewButton.type = "button";
-    previewButton.textContent = artifact.label || getArtifactLabel(artifact.type, artifact.visualType);
+    previewButton.textContent = [
+      artifact.label || getArtifactLabel(artifact.type, artifact.visualType),
+      artifact.pageNumber ? `p.${artifact.pageNumber}` : "",
+    ].filter(Boolean).join(" · ");
     previewButton.title = "打开裁剪预览";
     previewButton.addEventListener("click", () => openArtifactViewer(artifact));
 
