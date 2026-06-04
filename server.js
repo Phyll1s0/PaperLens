@@ -27,6 +27,9 @@ import {
   buildPaperSegmentationDebugReport,
 } from "./lib/segmentation-debug.js";
 import {
+  rescueReadableSegmentsFromMixedBlock,
+} from "./lib/segmentation-block-rescue.js";
+import {
   buildPaperDocxExport,
 } from "./lib/export-docx.js";
 import {
@@ -5230,14 +5233,24 @@ function parseModelBoolean(value) {
 
 function getReadablePageBlocks(page) {
   if (Array.isArray(page.blocks) && page.blocks.length) {
-    const blocks = page.blocks
-      .map((block) => ({
-        ...block,
-        rawText: String(block?.text || ""),
-        text: normalizeReadableBlockText(block?.text || ""),
-      }))
-      .filter((block) => block.text && !isLikelyNonReadingBlock(block, page))
-      .filter((block) => block.text);
+    const blocks = [];
+    for (const rawBlock of page.blocks) {
+      const block = {
+        ...rawBlock,
+        rawText: String(rawBlock?.text || ""),
+        text: normalizeReadableBlockText(rawBlock?.text || ""),
+      };
+      if (!block.text) {
+        continue;
+      }
+
+      if (!isLikelyNonReadingBlock(block, page)) {
+        blocks.push(block);
+        continue;
+      }
+
+      blocks.push(...buildRescuedReadableBlocks(block, page));
+    }
 
     if (blocks.length) {
       return blocks;
@@ -5245,6 +5258,63 @@ function getReadablePageBlocks(page) {
   }
 
   return extractTextBlocks(page.text);
+}
+
+function buildRescuedReadableBlocks(block, page) {
+  const segments = rescueReadableSegmentsFromMixedBlock(block, {
+    pageNumber: page?.pageNumber || block.pageNumber || 0,
+  });
+  if (!segments.length) {
+    return [];
+  }
+
+  return segments
+    .map((segment, index) => {
+      const text = normalizeReadableBlockText(segment.text || "");
+      const rescuedBlock = {
+        ...block,
+        ...estimateRescuedBlockGeometry(block, segment),
+        rawText: segment.text || "",
+        text,
+        rescuedFromMixedBlock: true,
+        rescueReason: segment.reason || "mixed-block-body-tail",
+        rescueIndex: index,
+        originalRawText: block.rawText || block.text || "",
+      };
+      const context = {
+        ...rescuedBlock,
+        pageNumber: page?.pageNumber || block.pageNumber || 0,
+      };
+      if (!text ||
+        isLikelyPdfExtractionGarbageText(text) ||
+        isLikelyNonReadingParagraphText(text, context) ||
+        isLikelyFrontMatterTitleText(text, context) ||
+        classifyPageArtifact(rescuedBlock) ||
+        isBlockCoveredByVisualStructure(rescuedBlock, page)) {
+        return null;
+      }
+      return rescuedBlock;
+    })
+    .filter(Boolean);
+}
+
+function estimateRescuedBlockGeometry(block, segment) {
+  const box = pickBlockBox(block);
+  const rawLength = Math.max(1, String(block.rawText || block.text || "").length);
+  if (!box) {
+    return {};
+  }
+
+  const startRatio = clampNumber(Number(segment.startOffset || 0) / rawLength, 0, 0.96);
+  const endRatio = clampNumber(Number(segment.endOffset || rawLength) / rawLength, startRatio + 0.04, 1);
+  const ratio = Math.max(0.04, endRatio - startRatio);
+  return {
+    x: box.x,
+    y: box.y + box.height * startRatio,
+    width: box.width,
+    height: Math.max(12, box.height * ratio),
+    lineCount: Math.max(1, Math.round(Number(block.lineCount || 1) * ratio)),
+  };
 }
 
 function isLikelyNonReadingBlock(block, page = null) {
