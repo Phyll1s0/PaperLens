@@ -2751,6 +2751,8 @@ function buildClientVisualQa(paper) {
         label: artifact.label || "",
         displayLabel: artifact.label || getArtifactLabel(artifact.type, artifact.visualType),
         textPreview: String(artifact.text || "").replace(/\s+/g, " ").trim().slice(0, 180),
+        formulaRole: artifact.formulaRole || "",
+        formulaRoleReason: artifact.formulaRoleReason || "",
         hidden: Boolean(artifact.hidden),
         manual: isClientManualArtifact(artifact),
         entersAiContext: doesClientArtifactEnterAiContext(artifact),
@@ -2799,6 +2801,7 @@ function getVisualQaCategories(summary = {}) {
     { type: "low-confidence", label: "低置信", count: summary.lowConfidence || 0 },
     { type: "oversized", label: "过大", count: summary.oversized || 0 },
     { type: "type-conflict", label: "类型冲突", count: summary.typeConflicts || 0 },
+    { type: "formula", label: "公式", count: summary.formulas || 0 },
     { type: "figure-text", label: "图中文字", count: summary.figureText || 0 },
     { type: "manual", label: "人工修正", count: summary.manualArtifacts || 0 },
     { type: "hidden", label: "隐藏", count: summary.hiddenArtifacts || 0 },
@@ -3447,6 +3450,9 @@ function getVisualQaFilteredItems(result, filter) {
   if (filter === "figure-text") {
     return items.filter((item) => item.type === "figure-text" || item.visualType === "figure-text");
   }
+  if (filter === "formula") {
+    return items.filter((item) => item.type === "formula" || item.visualType === "formula");
+  }
   return items.filter((item) => item.issueTypes?.includes(filter));
 }
 
@@ -3495,6 +3501,9 @@ function formatVisualQaItemContext(item) {
   if (item.cropQuality?.oversized) {
     parts.push("区域偏大");
   }
+  if (item.formulaRole) {
+    parts.push(`公式 ${formatFormulaRoleLabel(item.formulaRole)}`);
+  }
   if (item.manual) {
     parts.push("人工修正");
   }
@@ -3529,6 +3538,16 @@ function formatVisualQaConfidence(confidence) {
     unknown: "未知",
   };
   return labels[confidence] || confidence;
+}
+
+function formatFormulaRoleLabel(role) {
+  const labels = {
+    "display-formula": "独立块",
+    "inline-math": "行内",
+    "equation-number": "编号",
+    noise: "噪声",
+  };
+  return labels[role] || role;
 }
 
 function getArtifactById(artifactId) {

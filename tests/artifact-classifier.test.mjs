@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  classifyFormulaTextRole,
   isLikelyCaptionBlockText,
   isLikelyCodeBlockText,
   isLikelyFormulaBlockText,
@@ -124,6 +125,34 @@ assert.equal(
 assert.equal(
   isLikelyFormulaBlockText("xt = Codebook(OHLCVA), bt = [bc t,bf t], p(bt|b<t)=p(bc t|b<t)p(bf t|b<t,bc t)", { lineCount: 3 }),
   true,
+);
+
+assert.equal(
+  classifyFormulaTextRole("xt = Codebook(OHLCVA), bt = [bc t,bf t], p(bt|b<t)=p(bc t|b<t)p(bf t|b<t,bc t)", { lineCount: 3 }).role,
+  "display-formula",
+);
+
+assert.equal(
+  classifyFormulaTextRole("(4)", { lineCount: 1 }).role,
+  "equation-number",
+);
+
+assert.equal(
+  classifyFormulaTextRole(
+    "Let D-dimensional vector xt ∈ RD denote the K-line observation at discrete time t, comprising D key financial indicators.",
+    { lineCount: 3 },
+  ).role,
+  "inline-math",
+);
+
+assert.equal(
+  classifyFormulaTextRole("β", { lineCount: 1 }).role,
+  "noise",
+);
+
+assert.equal(
+  classifyFormulaTextRole("Loss 0.2 0.4 0.6 0.8 Accuracy 91.2 92.4 93.1 h = 1", { lineCount: 4 }).role,
+  "noise",
 );
 
 assert.equal(isUsefulFormulaArtifactText("Xt = i=1"), false);

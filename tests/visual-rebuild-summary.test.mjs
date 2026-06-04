@@ -233,7 +233,7 @@ assert.deepEqual(
         id: "formula-missing",
         type: "formula",
         visualType: "formula",
-        text: "y = f(x)",
+        text: "WQL = 1 WQLαj. j=1",
         pageNumber: 2,
       },
       {
@@ -294,11 +294,13 @@ assert.deepEqual(
   assert.equal(qa.summary.formulas, 1);
   assert.equal(qa.summary.codeBlocks, 1);
   assert.equal(qa.categories.some((category) => category.type === "missing-crop" && category.count === 1), true);
+  assert.equal(qa.categories.some((category) => category.type === "formula" && category.count === 1), true);
   assert.equal(qa.categories.some((category) => category.type === "ai-context" && category.count === 4), true);
 
   const missing = qa.items.find((item) => item.id === "formula-missing");
   assert.deepEqual(missing.issueTypes, ["missing-crop"]);
   assert.equal(missing.entersAiContext, true);
+  assert.equal(missing.formulaRole, "display-formula");
 
   const table = qa.items.find((item) => item.id === "table-low");
   assert.deepEqual(table.issueTypes, ["missing-asset", "low-confidence", "oversized"]);

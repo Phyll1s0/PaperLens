@@ -76,6 +76,7 @@ try {
   assert.equal(figure?.label, "Figure 1");
   assert.equal(figure?.imagePath, `${assetPublicBase}/page-001.png`);
   assert.equal(figure?.crop?.pixelRefined, true);
+  assert.equal(formula?.formulaRole, "display-formula");
   assert.equal(formula?.cropQuality?.confidence, "low");
   assert.equal(formula?.cropQuality?.oversized, true);
 

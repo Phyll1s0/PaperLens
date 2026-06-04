@@ -37,6 +37,14 @@ const pages = [
         height: 28,
         lineCount: 2,
       },
+      {
+        text: "Let D-dimensional vector xt ∈ RD denote the K-line observation at discrete time t.",
+        x: 20,
+        y: 162,
+        width: 240,
+        height: 18,
+        lineCount: 1,
+      },
     ],
   },
 ];
@@ -46,6 +54,8 @@ assert.match(scanInput, /hasUrl=1/);
 assert.match(scanInput, /https:\/\/github\.com\/example\/PaperLens/);
 assert.match(scanInput, /type=caption/);
 assert.match(scanInput, /type=formula/);
+assert.match(scanInput, /math=display-formula/);
+assert.match(scanInput, /math=inline-math/);
 
 const normalized = normalizePaperMemory({
   summary: "A model paper.",

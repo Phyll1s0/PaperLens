@@ -10452,7 +10452,12 @@ function rebuildPaperVisualArtifacts(paper, options = {}) {
     ? hasExtractableArtifacts
     : artifacts.some((artifact) =>
       ["caption", "formula", "code", "figure-text"].includes(artifact.type) &&
-        (artifact.cropVersion !== ARTIFACT_CROP_VERSION || !artifact.crop || !artifact.cropQuality));
+        (
+          artifact.cropVersion !== ARTIFACT_CROP_VERSION ||
+          !artifact.crop ||
+          !artifact.cropQuality ||
+          (artifact.type === "formula" && artifact.formulaRole !== "display-formula")
+        ));
   const emptyStats = buildVisualRebuildStats(paper, [], previousArtifactCount);
 
   if (!Array.isArray(paper.extractionPages) || !paper.extractionPages.length) {

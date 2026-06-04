@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   buildSegmentationPageText,
   extractTextBlocks,
+  formatSegmentationPageBlock,
   getReadablePageBlocks,
 } from "../lib/segmentation-page-input.js";
 
@@ -134,6 +135,41 @@ const twoColumnPage = {
   assert.equal(input.includes("Raw PDF"), false);
   assert.equal(input.includes("AI Segmenter"), false);
   assert.ok(input.includes("page-level evidence"));
+}
+
+{
+  const page = {
+    pageNumber: 3,
+    width: 600,
+    height: 800,
+    blocks: [
+      {
+        text: "Let D-dimensional vector xt ∈ RD denote the K-line observation at discrete time t, comprising D key financial indicators.",
+        x: 54,
+        y: 150,
+        width: 492,
+        height: 44,
+        column: 0,
+        lineCount: 2,
+      },
+      {
+        text: "This sentence follows the inline mathematical definition and remains ordinary prose.",
+        x: 500,
+        y: 210,
+        width: 260,
+        height: 36,
+        column: 0,
+        lineCount: 2,
+      },
+    ],
+  };
+  const input = buildSegmentationPageText(page);
+  assert.ok(input.includes("math=inline-math"));
+  assert.ok(input.includes("Let D-dimensional vector"));
+  assert.match(
+    formatSegmentationPageBlock(page, { text: "(4)", x: 500, y: 210, width: 26, height: 14, lineCount: 1 }, 2),
+    /math=equation-number/,
+  );
 }
 
 {
