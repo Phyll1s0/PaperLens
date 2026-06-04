@@ -49,9 +49,11 @@ import {
   extractPdfText,
 } from "./lib/pdf-extraction.js";
 import {
+  isLikelyPublicationMetadataText,
   isLikelyPdfExtractionGarbageText,
   shouldMergeSegmentedText,
   startsLikeTextContinuation,
+  stripPublicationMetadataFragments,
 } from "./lib/segmentation-repair.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -5342,6 +5344,10 @@ function isLikelyNonReadingParagraphText(text, context = {}) {
     return true;
   }
 
+  if (isLikelyPublicationMetadataText(clean)) {
+    return true;
+  }
+
   if (isLikelyHeading(clean)) {
     return false;
   }
@@ -5351,7 +5357,6 @@ function isLikelyNonReadingParagraphText(text, context = {}) {
   }
 
   return isLikelyAuthorOrAffiliationText(clean, context) ||
-    isLikelyPublicationMetadataText(clean) ||
     isLikelyStandaloneLinkText(clean) ||
     isLikelyBibliographyEntry(clean) ||
     isLikelyDiagramOnlyText(clean, context);
@@ -5378,11 +5383,6 @@ function isLikelyAuthorOrAffiliationText(text, context = {}) {
   }
 
   return /\b(?:author names are listed|equal contribution|corresponding author|correspondence to|authors contributed equally)\b/i.test(text);
-}
-
-function isLikelyPublicationMetadataText(text) {
-  return /\b(?:ACM Reference Format|Permission to make digital|Copyright held by|Proceedings of|ISBN|ISSN|DOI:|https:\/\/doi\.org|arXiv:\d|Creative Commons|©)\b/i.test(text) ||
-    /^EUROSYS\s+[’'\d]/i.test(text);
 }
 
 function isLikelyStandaloneLinkText(text) {
@@ -8142,11 +8142,12 @@ function buildParagraphsFromSegmentItems(items, structureMap = null) {
   const seen = new Set();
 
   for (const item of items) {
-    const clean = normalizeParagraph(item.sourceText);
+    const rawClean = normalizeParagraph(item.sourceText);
+    const clean = normalizeParagraph(stripPublicationMetadataFragments(rawClean));
     if (!clean || (clean.length < 20 && item.kind !== "heading" && !isLikelyHeading(clean)) ||
       (item.kind !== "heading" && (
         isNonReadingByStructureMap(item, structureMap) ||
-        isLikelyNonReadingParagraphText(item.rawSourceText || clean, item) ||
+        isLikelyNonReadingParagraphText(stripPublicationMetadataFragments(item.rawSourceText || rawClean) || clean, item) ||
         isLikelyNonReadingParagraphText(clean, item)
       ))) {
       continue;
@@ -8216,8 +8217,14 @@ function validateAndRepairSegmentedParagraphs(paragraphs, structureMap = null) {
   };
 
   for (const paragraph of paragraphs || []) {
-    const clean = normalizeParagraph(paragraph.sourceText || "");
-    const audit = auditSegmentedParagraphNoise(paragraph, structureMap, repeatedTextIndex);
+    const originalClean = normalizeParagraph(paragraph.sourceText || "");
+    const clean = normalizeParagraph(stripPublicationMetadataFragments(originalClean));
+    const auditTarget = {
+      ...paragraph,
+      rawSourceText: paragraph.rawSourceText || originalClean,
+      sourceText: clean || originalClean,
+    };
+    const audit = auditSegmentedParagraphNoise(auditTarget, structureMap, repeatedTextIndex);
     if (!clean || audit.action === "drop" || (!audit.action && shouldDropParagraphDuringSegmentationValidation(paragraph, structureMap))) {
       stats.removedNonReading += 1;
       recordSegmentationAuditReason(stats.qualityAudit, audit.reasons.length ? audit.reasons : ["heuristic-nonreading"], "removed");
@@ -8388,8 +8395,17 @@ function auditSegmentedParagraphsForNoise(paragraphs, structureMap = null) {
       continue;
     }
 
+    const originalClean = normalizeParagraph(paragraph.sourceText || "");
+    const strippedClean = normalizeParagraph(stripPublicationMetadataFragments(originalClean));
+    if (strippedClean && strippedClean !== originalClean) {
+      paragraph.sourceText = strippedClean;
+      resetParagraphAnalysis(paragraph);
+      changed = true;
+      recordSegmentationAuditReason(summary, ["publication-metadata"], "removed");
+    }
+
     const audit = auditSegmentedParagraphNoise(paragraph, structureMap, repeatedTextIndex);
-    if (audit.action !== "skip-analysis") {
+    if (audit.action !== "skip-analysis" && audit.action !== "drop") {
       if (paragraph.segmentationNoise) {
         delete paragraph.segmentationNoise;
         changed = true;
@@ -8414,15 +8430,19 @@ function auditSegmentedParagraphNoise(paragraph, structureMap = null, repeatedTe
     return { action: "drop", confidence: "high", reasons: ["empty"] };
   }
 
-  const kind = paragraph.kind === "heading" || isLikelyHeading(clean) ? "heading" : "paragraph";
-  if (kind === "heading") {
-    return { action: "", confidence: "low", reasons: [] };
-  }
-
   const context = {
     ...paragraph,
     sourceText: clean,
   };
+
+  if (isLikelyPublicationMetadataText(clean)) {
+    reasons.push("publication-metadata");
+  }
+
+  const kind = paragraph.kind === "heading" || isLikelyHeading(clean) ? "heading" : "paragraph";
+  if (kind === "heading" && !reasons.length) {
+    return { action: "", confidence: "low", reasons: [] };
+  }
 
   if (isNonReadingByStructureMap(paragraph, structureMap)) {
     reasons.push("structure-nonbody-zone");
@@ -8435,9 +8455,6 @@ function auditSegmentedParagraphNoise(paragraph, structureMap = null, repeatedTe
   }
   if (isLikelyAuthorOrAffiliationText(clean, context)) {
     reasons.push("author-affiliation");
-  }
-  if (isLikelyPublicationMetadataText(clean)) {
-    reasons.push("publication-metadata");
   }
   if (isLikelyStandaloneLinkText(clean) || isLikelyArtifactOnlyLinkText(clean)) {
     reasons.push("standalone-link");

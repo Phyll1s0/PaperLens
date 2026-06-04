@@ -3611,7 +3611,8 @@ function isLikelyNonReadingText(text, sectionTitle = "") {
     return true;
   }
 
-  if (/\b(?:author names are listed|equal contribution|corresponding author|correspondence to|ACM Reference Format|Copyright held by|Proceedings of|ISBN|ISSN|https:\/\/doi\.org|Creative Commons|©)\b/i.test(clean)) {
+  if (/\b(?:author names are listed|equal contribution|corresponding author|correspondence to|ACM Reference Format|Copyright held by|Proceedings of|ISBN|ISSN|https:\/\/doi\.org|Creative Commons|©)\b/i.test(clean) ||
+    /\b(?:AAAI|ACL|ASPLOS|CHI|CVPR|EMNLP|EuroSys|ICLR|ICML|KDD|MLSys|NeurIPS|NSDI|OSDI|PLDI|POPL|SIGCOMM|SIGGRAPH|SIGIR|SIGMOD|SOSP|USENIX|VLDB|WWW)\s*[’'‘]?\d{2,4}\b/i.test(clean) && !/[.!?。！？]/.test(clean)) {
     return true;
   }
 

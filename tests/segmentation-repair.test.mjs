@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import {
+  isLikelyPublicationMetadataText,
   isLikelyPdfExtractionGarbageText,
   shouldMergeSegmentedText,
   startsLikeTextContinuation,
+  stripPublicationMetadataFragments,
 } from "../lib/segmentation-repair.js";
 
 assert.equal(
@@ -12,6 +14,25 @@ assert.equal(
 assert.equal(isLikelyPdfExtractionGarbageText("\u0000L\u0000o\u0000s\u0000s\u0000 graph labels"), true);
 assert.equal(
   isLikelyPdfExtractionGarbageText("Chronos tokenizes time series values using scaling and quantization into a fixed vocabulary."),
+  false,
+);
+
+const asplosHeader = "ASPLOS ’26, March 22–26, 2026, Pittsburgh, PA, USA";
+assert.equal(isLikelyPublicationMetadataText(asplosHeader), true);
+assert.equal(
+  stripPublicationMetadataFragments(asplosHeader),
+  "",
+);
+assert.equal(
+  stripPublicationMetadataFragments(`State-of-the-art deployments involve hundreds of billions of parameters, such as ${asplosHeader}`),
+  "State-of-the-art deployments involve hundreds of billions of parameters,",
+);
+assert.equal(
+  stripPublicationMetadataFragments(`The design introduces minimal metadata ${asplosHeader} val[3:0] Top-1 Decode Unit`),
+  "The design introduces minimal metadata val[3:0] Top-1 Decode Unit",
+);
+assert.equal(
+  isLikelyPublicationMetadataText("Existing low-bit formats often suffer from substantial accuracy degradation."),
   false,
 );
 
