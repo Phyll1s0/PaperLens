@@ -50,6 +50,8 @@ PaperLens 仍然负责：
 
 这样普通用户可以获得 AI 布局的好处，但不会被某个模型的 PDF 能力、费用或超时问题锁死。
 
+具体协议和实施阶段见 [AI-first Layout Design](AI_FIRST_LAYOUT.md)。
+
 ## 普通用户默认路径
 
 默认建议：
@@ -65,4 +67,3 @@ PaperLens 仍然负责：
 2. 增加可选 `AI layout provider`，让支持 PDF/vision 的模型输出版面 JSON。
 3. 让 AI 输出必须经过本地校验，失败时回退到本地解析。
 4. Release 启动包继续保持轻量；真正的一键桌面端再考虑内置 Poppler/OCR。
-

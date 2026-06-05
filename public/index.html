@@ -21,7 +21,7 @@
         <p id="authStatusText" class="status-text"></p>
       </form>
     </div>
-    <div class="app-shell">
+    <div class="app-shell no-paper">
       <aside class="sidebar">
         <div class="brand">
           <div class="brand-mark">PR</div>
@@ -32,62 +32,71 @@
           <button id="sidebarCollapseButton" class="icon-button layout-toggle-button" type="button" title="收起侧栏" aria-label="收起侧栏">‹</button>
         </div>
 
-        <section class="panel">
-          <h2>模型</h2>
-          <details class="model-tutorial">
-            <summary>教程</summary>
-            <p id="providerHintText" class="diagnostics-text"></p>
-            <div id="providerGuide" class="provider-guide" aria-live="polite"></div>
-          </details>
-          <label>
-            Provider
-            <select id="providerSelect">
-              <option value="deepseek">DeepSeek</option>
-              <option value="claude-kimi-agent">Kimi Code Direct</option>
-              <option value="claude-local">Claude Code 本机配置</option>
-              <option value="kimi-code">Kimi Code</option>
-              <option value="kimi-platform">Kimi 开放平台</option>
-              <option value="openai">OpenAI</option>
-              <option value="custom">自定义</option>
-            </select>
-          </label>
-          <label>
-            Base URL
-            <input id="baseUrlInput" type="url" autocomplete="off" value="https://api.openai.com/v1">
-          </label>
-          <label>
-            Model
-            <input id="modelInput" type="text" autocomplete="off" value="gpt-4.1-mini">
-          </label>
-          <label>
-            API Key
-            <input id="apiKeyInput" type="password" autocomplete="off">
-          </label>
-          <label>
-            Agent Budget USD
-            <input id="agentBudgetInput" type="number" min="0" step="1" value="500">
-          </label>
-          <label>
-            Task Budget USD
-            <input id="taskBudgetInput" type="number" min="0" step="0.01" value="0" title="0 表示不限制单次分析任务预算">
-          </label>
-          <label>
-            Proxy URL
-            <input id="proxyUrlInput" type="url" autocomplete="off" placeholder="可选，例如 http://127.0.0.1:7897">
-          </label>
-          <div class="model-action-row">
-            <button id="pingButton" class="secondary-button" type="button">测试连接</button>
-            <button id="diagnosticButton" class="secondary-button" type="button" title="生成脱敏 Provider/Claude/Kimi 诊断包">诊断包</button>
-          </div>
-          <p id="modelStatusText" class="status-text">尚未测试</p>
-          <p id="modelDiagnosticsText" class="diagnostics-text"></p>
-          <div id="diagnosticReport" class="diagnostic-report hidden" aria-live="polite">
-            <div class="diagnostic-report-header">
-              <strong>Provider 诊断包</strong>
-              <button id="copyDiagnosticButton" class="text-button" type="button">复制</button>
+        <section class="panel model-panel">
+          <details id="modelSettingsDetails" class="model-settings-details" open>
+            <summary>
+              <span>
+                <strong>模型与 Key</strong>
+                <small id="modelDrawerSummary">尚未测试</small>
+              </span>
+            </summary>
+            <div class="model-settings-body">
+              <details class="model-tutorial">
+                <summary>教程</summary>
+                <p id="providerHintText" class="diagnostics-text"></p>
+                <div id="providerGuide" class="provider-guide" aria-live="polite"></div>
+              </details>
+              <label>
+                Provider
+                <select id="providerSelect">
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="claude-kimi-agent">Kimi Code Direct</option>
+                  <option value="claude-local">Claude Code 本机配置</option>
+                  <option value="kimi-code">Kimi Code</option>
+                  <option value="kimi-platform">Kimi 开放平台</option>
+                  <option value="openai">OpenAI</option>
+                  <option value="custom">自定义</option>
+                </select>
+              </label>
+              <label>
+                Base URL
+                <input id="baseUrlInput" type="url" autocomplete="off" value="https://api.openai.com/v1">
+              </label>
+              <label>
+                Model
+                <input id="modelInput" type="text" autocomplete="off" value="gpt-4.1-mini">
+              </label>
+              <label>
+                API Key
+                <input id="apiKeyInput" type="password" autocomplete="off">
+              </label>
+              <label>
+                Agent Budget USD
+                <input id="agentBudgetInput" type="number" min="0" step="1" value="500">
+              </label>
+              <label>
+                Task Budget USD
+                <input id="taskBudgetInput" type="number" min="0" step="0.01" value="0" title="0 表示不限制单次分析任务预算">
+              </label>
+              <label>
+                Proxy URL
+                <input id="proxyUrlInput" type="url" autocomplete="off" placeholder="可选，例如 http://127.0.0.1:7897">
+              </label>
+              <div class="model-action-row">
+                <button id="pingButton" class="secondary-button" type="button">测试连接</button>
+                <button id="diagnosticButton" class="secondary-button" type="button" title="生成脱敏 Provider/Claude/Kimi 诊断包">诊断包</button>
+              </div>
+              <p id="modelStatusText" class="status-text">尚未测试</p>
+              <p id="modelDiagnosticsText" class="diagnostics-text"></p>
+              <div id="diagnosticReport" class="diagnostic-report hidden" aria-live="polite">
+                <div class="diagnostic-report-header">
+                  <strong>Provider 诊断包</strong>
+                  <button id="copyDiagnosticButton" class="text-button" type="button">复制</button>
+                </div>
+                <pre id="diagnosticReportText"></pre>
+              </div>
             </div>
-            <pre id="diagnosticReportText"></pre>
-          </div>
+          </details>
         </section>
 
         <section class="panel">
@@ -143,26 +152,53 @@
                 <button id="favoriteButton" class="icon-button" type="button" title="收藏论文" aria-label="收藏论文">☆</button>
                 <input id="tagInput" type="text" placeholder="标签，用逗号分隔">
                 <button id="saveTagsButton" class="secondary-button" type="button">保存标签</button>
-                <button id="rebuildVisualButton" class="secondary-button" type="button" title="重新生成整篇论文的图片、公式和代码裁剪">重建图表</button>
-                <button id="toggleHiddenParagraphsButton" class="secondary-button" type="button" title="显示或收起被标记为噪声的段落">显示隐藏段落</button>
               </div>
             </div>
             <div class="toolbar-actions">
-              <div class="toolbar-buttons">
-                <button id="autoAnalyzeButton" class="secondary-button" type="button" title="自动翻译并讲解未完成段落">自动讲解</button>
-                <button id="resumeAnalyzeButton" class="secondary-button" type="button" title="只补跑失败、缺翻译或缺讲解的段落">补跑未完成</button>
-                <button id="downloadNotesButton" class="secondary-button" type="button" title="下载包含原文、翻译和讲解的 Markdown 笔记">下载笔记</button>
-                <button id="downloadDocxButton" class="secondary-button" type="button" title="下载包含章节、段落、图片和术语的 Word 文档">下载Word</button>
-                <button id="pipelineQualityButton" class="secondary-button" type="button" title="汇总分段、视觉、公式、讲解和导出风险">质量报告</button>
-                <button id="exportQaButton" class="secondary-button" type="button" title="检查未完成段落、图表引用、裁剪和 LaTeX 风险">导出检查</button>
-                <button id="segmentationDebugButton" class="secondary-button" type="button" title="查看 PDF block、清洗理由和段落来源">分段调试</button>
-                <button id="repairSegmentationButton" class="secondary-button" type="button" title="不重新调用 AI，只用本地规则修复已有分段并标记受影响段落">本地修复</button>
-                <button id="rerunAnalyzeButton" class="secondary-button" type="button" title="重新 AI 分段，然后重新生成全部段落">重分段+全跑</button>
-                <button id="stopAutoButton" class="secondary-button hidden" type="button">停止</button>
+              <div class="toolbar-groups" aria-label="阅读工具栏">
+                <section class="toolbar-group toolbar-read-group" aria-label="阅读">
+                  <span class="toolbar-group-label">阅读</span>
+                  <button id="primaryToolbarActionButton" class="primary-button toolbar-primary-action" type="button">继续讲解</button>
+                  <button id="autoAnalyzeButton" class="secondary-button" type="button" title="自动翻译并讲解未完成段落">自动讲解</button>
+                  <button id="resumeAnalyzeButton" class="secondary-button" type="button" title="只补跑失败、缺翻译或缺讲解的段落">补跑未完成</button>
+                  <button id="stopAutoButton" class="secondary-button hidden" type="button">停止</button>
+                </section>
+
+                <details class="toolbar-menu">
+                  <summary>导出</summary>
+                  <div class="toolbar-menu-panel">
+                    <button id="downloadNotesButton" class="secondary-button" type="button" title="下载包含原文、翻译和讲解的 Markdown 笔记">Markdown 笔记</button>
+                    <button id="downloadDocxButton" class="secondary-button" type="button" title="下载包含章节、段落、图片和术语的 Word 文档">Word 文档</button>
+                  </div>
+                </details>
+
+                <details class="toolbar-menu">
+                  <summary>修复</summary>
+                  <div class="toolbar-menu-panel">
+                    <button id="repairSegmentationButton" class="secondary-button" type="button" title="不重新调用 AI，只用本地规则修复已有分段并标记受影响段落">本地修复分段</button>
+                    <button id="rebuildVisualButton" class="secondary-button" type="button" title="重新生成整篇论文的图片、公式和代码裁剪">重建图表裁剪</button>
+                    <button id="rerunAnalyzeButton" class="secondary-button danger-button" type="button" title="重新 AI 分段，然后重新生成全部段落">重分段并全跑</button>
+                  </div>
+                </details>
+
+                <details class="toolbar-menu">
+                  <summary>检查</summary>
+                  <div class="toolbar-menu-panel">
+                    <button id="pipelineQualityButton" class="secondary-button" type="button" title="汇总分段、视觉、公式、讲解和导出风险">质量报告</button>
+                    <button id="exportQaButton" class="secondary-button" type="button" title="检查未完成段落、图表引用、裁剪和 LaTeX 风险">导出检查</button>
+                    <button id="segmentationDebugButton" class="secondary-button" type="button" title="查看 PDF block、清洗理由和段落来源">分段调试</button>
+                    <button id="toggleHiddenParagraphsButton" class="secondary-button" type="button" title="显示或收起被标记为噪声的段落">显示隐藏段落</button>
+                  </div>
+                </details>
               </div>
-              <input id="searchInput" type="search" placeholder="搜索段落">
+              <label class="toolbar-search">
+                <span>查找</span>
+                <input id="searchInput" type="search" placeholder="搜索段落">
+              </label>
             </div>
           </div>
+
+          <section id="taskRail" class="task-rail hidden" aria-live="polite"></section>
         </div>
 
         <section id="historyPanel" class="history-panel" aria-label="历史记录" aria-hidden="true">
@@ -196,8 +232,24 @@
         </section>
 
         <div id="emptyState" class="empty-state">
-          <div class="empty-icon">PDF</div>
-          <h2>上传论文开始阅读</h2>
+          <div class="empty-start">
+            <div class="empty-icon" aria-hidden="true">PDF</div>
+            <div class="empty-copy">
+              <p class="empty-kicker">PaperLens</p>
+              <h2>把论文拖进来，然后开始精读</h2>
+              <p>上传后会先解析版面，再按段落翻译、讲解、保留图表和公式，并支持导出笔记。</p>
+            </div>
+            <div class="empty-actions">
+              <button id="emptyChooseButton" class="primary-button" type="button">选择 PDF</button>
+              <button id="emptyHistoryButton" class="secondary-button" type="button">打开历史</button>
+              <button id="emptyModelButton" class="secondary-button" type="button">模型设置</button>
+            </div>
+            <div class="empty-steps" aria-label="开始步骤">
+              <span>1 选择 Provider</span>
+              <span>2 上传 PDF</span>
+              <span>3 阅读与导出</span>
+            </div>
+          </div>
         </div>
 
         <div id="paragraphList" class="paragraph-list"></div>

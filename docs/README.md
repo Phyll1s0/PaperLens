@@ -19,5 +19,7 @@
 ## 高级能力
 
 - [视觉结构 Provider](VISUAL_PROVIDER.md)：接入外部版面检测模型。
+- [AI-first Layout Design](AI_FIRST_LAYOUT.md)：让 AI 输出全文结构和版面 JSON 的设计方案。
+- [Whole-paper Deep Analysis Design](WHOLE_PAPER_ANALYSIS.md)：全文长思考、章节计划和防偷懒校验。
 - [项目路线](../ROADMAP.md)：后续开发重点。
 - [设计背景](../design.md)：产品和工程设计思路。

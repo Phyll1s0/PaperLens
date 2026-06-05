@@ -23,6 +23,15 @@ const paper = {
       explanation: "完整讲解",
       relatedArtifactIds: ["fig-ok", "missing-ref", "hidden-ref"],
       analysisStatus: "done",
+      weakAnalysis: true,
+      analysisRepairStatus: "weak-after-repair",
+      analysisWeakReasons: ["关键术语漂移。"],
+      analysisVerification: {
+        issues: [
+          { severity: "warn", code: "terminology-drift", message: "关键术语漂移。" },
+          { severity: "warn", code: "missing-figure-reference", message: "漏掉 Figure 1。" },
+        ],
+      },
     },
     {
       id: "p2",
@@ -107,17 +116,22 @@ assert.deepEqual(qa.summary, {
   readingParagraphs: 2,
   unfinishedParagraphs: 1,
   analysisErrors: 1,
+  weakAnalysisParagraphs: 1,
+  weakAfterRepairParagraphs: 1,
+  terminologyRisks: 1,
+  missingReferenceAnalysisRisks: 1,
   brokenArtifactRefs: 1,
   checkedArtifacts: 3,
   missingArtifactCrops: 1,
   lowConfidenceCrops: 1,
   missingAssetFiles: 1,
   latexRisks: 1,
-  issueCount: 7,
+  issueCount: 8,
   errorCount: 3,
-  warningCount: 4,
+  warningCount: 5,
 });
 
+assert.equal(qa.issues.some((issue) => issue.type === "weak-analysis" && issue.paragraphId === "p1"), true);
 assert.equal(qa.issues.some((issue) => issue.artifactId === "hidden-ref"), false);
 assert.equal(qa.issues.some((issue) => issue.type === "broken-artifact-reference" && issue.artifactId === "missing-ref"), true);
 assert.equal(qa.issues.some((issue) => issue.type === "missing-artifact-crop" && issue.artifactId === "formula-no-crop"), true);

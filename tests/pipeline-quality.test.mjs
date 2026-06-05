@@ -13,6 +13,18 @@ const riskyPaper = {
   status: "ready",
   segmentationMode: "ai",
   sections: [{ id: "s1", title: "Introduction" }],
+  deepPaperPlan: {
+    status: "ready",
+    source: "test",
+    fingerprint: "plan123",
+    terminology: [{ source: "Microscaling", zh: "微缩放" }],
+  },
+  sectionDigests: [
+    { id: "digest-s1", sectionId: "s1", title: "Introduction" },
+  ],
+  sectionDrafts: [
+    { id: "draft-s1", sectionId: "s1", sectionDigestId: "digest-s1", title: "Introduction" },
+  ],
   structureMap: {
     source: "ai",
     sections: [{ title: "Introduction", startPage: 1 }],
@@ -35,8 +47,21 @@ const riskyPaper = {
     sources: { structure: "ai", memory: "" },
   },
   paragraphs: [
-    completeParagraph("p1", { sourceBox: { x: 10, y: 20, width: 200, height: 80 } }),
-    completeParagraph("p2", { sourceBox: { x: 10, y: 120, width: 200, height: 80 } }),
+    completeParagraph("p1", { sectionDigestId: "digest-s1", sectionDraftId: "draft-s1", sourceBox: { x: 10, y: 20, width: 200, height: 80 } }),
+    completeParagraph("p2", {
+      sectionDigestId: "digest-s1",
+      sectionDraftId: "draft-s1",
+      weakAnalysis: true,
+      analysisRepairStatus: "weak-after-repair",
+      analysisWeakReasons: ["关键术语 Microscaling 没有按术语表保留或翻译。"],
+      analysisVerification: {
+        issues: [
+          { severity: "warn", code: "terminology-drift", message: "关键术语漂移。" },
+          { severity: "warn", code: "missing-figure-reference", message: "漏掉 Figure 1。" },
+        ],
+      },
+      sourceBox: { x: 10, y: 120, width: 200, height: 80 },
+    }),
     failedParagraph("p3"),
     pendingParagraph("p4"),
     pendingParagraph("p5"),
@@ -149,6 +174,17 @@ assert.equal(riskyReport.metrics.planning.planItems, 1);
 assert.equal(riskyReport.metrics.visual.issueArtifacts, 2);
 assert.equal(riskyReport.metrics.formulas.riskCount, 1);
 assert.equal(riskyReport.metrics.formulas.lowConfidenceLatex, 1);
+assert.equal(riskyReport.summary.deepPlanAvailable, true);
+assert.equal(riskyReport.summary.sectionDigestCoveragePercent, 25);
+assert.equal(riskyReport.summary.sectionDraftCoveragePercent, 25);
+assert.equal(riskyReport.summary.weakAnalysisParagraphs, 1);
+assert.equal(riskyReport.summary.terminologyRisks, 1);
+assert.equal(riskyReport.metrics.wholePaper.weakAfterRepairParagraphs, 1);
+assert.equal(riskyReport.metrics.wholePaper.missingReferenceIssues, 1);
+assert.equal(riskyReport.metrics.layout.mode, "hybrid");
+assert.equal(riskyReport.metrics.layout.status, "warn");
+assert.equal(riskyReport.metrics.layout.provider, "json");
+assert.equal(riskyReport.metrics.layout.externalVisualRegions, 3);
 assert.ok(riskyReport.score < 60);
 
 const riskyCodes = new Set(riskyReport.checks.map((check) => check.code));
@@ -159,6 +195,11 @@ assert.equal(riskyCodes.has("low-sourcebox-coverage"), true);
 assert.equal(riskyCodes.has("visual-artifact-issues"), true);
 assert.equal(riskyCodes.has("formula-risk"), true);
 assert.equal(riskyCodes.has("analysis-failed"), true);
+assert.equal(riskyCodes.has("section-digest-low-coverage"), true);
+assert.equal(riskyCodes.has("section-draft-low-coverage"), true);
+assert.equal(riskyCodes.has("weak-analysis"), true);
+assert.equal(riskyCodes.has("terminology-drift"), true);
+assert.equal(riskyCodes.has("analysis-reference-missing"), true);
 assert.equal(riskyCodes.has("export-errors"), true);
 assert.equal(riskyCodes.has("recoverable-filtered-content"), true);
 assert.ok(riskyReport.actions.some((action) => action.category === "segmentation"));
@@ -191,6 +232,8 @@ const cleanReport = buildPaperPipelineQualityReport(cleanPaper, {
 assert.equal(cleanReport.status, "ok");
 assert.equal(cleanReport.score, 100);
 assert.equal(cleanReport.summary.issueCount, 0);
+assert.equal(cleanReport.metrics.layout.mode, "local");
+assert.equal(cleanReport.metrics.layout.status, "ok");
 assert.equal(cleanReport.checks.length, 1);
 assert.equal(cleanReport.checks[0].code, "pipeline-ok");
 

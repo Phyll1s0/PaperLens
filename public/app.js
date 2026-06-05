@@ -20,6 +20,7 @@ const state = {
   jobHistory: [],
   recentPaperCount: 0,
   pipelineQuality: null,
+  pipelineQualityFilter: "all",
   exportQa: null,
   segmentationDebug: null,
   segmentationDebugSelection: null,
@@ -30,6 +31,10 @@ const state = {
   sidebarCollapsed: sessionStorage.getItem("paperlens-sidebar-collapsed") === "1",
   toolbarCollapsed: sessionStorage.getItem("paperlens-toolbar-collapsed") === "1",
   historyOpen: false,
+  modelDrawerTouched: false,
+  lastStatusText: "",
+  lastStatusError: false,
+  collapsedParagraphPanels: new Map(),
   progressTimer: null,
   lastProgressParagraphId: "",
   pendingChatMessages: new Map(),
@@ -72,6 +77,7 @@ const state = {
   },
   ocrJob: {
     running: false,
+    stopRequested: false,
     jobId: null,
     status: "",
     message: "",
@@ -103,6 +109,8 @@ const els = {
   agentBudgetInput: document.querySelector("#agentBudgetInput"),
   taskBudgetInput: document.querySelector("#taskBudgetInput"),
   proxyUrlInput: document.querySelector("#proxyUrlInput"),
+  modelSettingsDetails: document.querySelector("#modelSettingsDetails"),
+  modelDrawerSummary: document.querySelector("#modelDrawerSummary"),
   modelStatusText: document.querySelector("#modelStatusText"),
   modelDiagnosticsText: document.querySelector("#modelDiagnosticsText"),
   providerHintText: document.querySelector("#providerHintText"),
@@ -131,6 +139,7 @@ const els = {
   historyToggleButton: document.querySelector("#historyToggleButton"),
   historyCloseButton: document.querySelector("#historyCloseButton"),
   historyPanel: document.querySelector("#historyPanel"),
+  taskRail: document.querySelector("#taskRail"),
   historyCountBadge: document.querySelector("#historyCountBadge"),
   historyPanelSummary: document.querySelector("#historyPanelSummary"),
   paperListSummary: document.querySelector("#paperListSummary"),
@@ -148,10 +157,14 @@ const els = {
   rebuildVisualButton: document.querySelector("#rebuildVisualButton"),
   toggleHiddenParagraphsButton: document.querySelector("#toggleHiddenParagraphsButton"),
   emptyState: document.querySelector("#emptyState"),
+  emptyChooseButton: document.querySelector("#emptyChooseButton"),
+  emptyHistoryButton: document.querySelector("#emptyHistoryButton"),
+  emptyModelButton: document.querySelector("#emptyModelButton"),
   paragraphList: document.querySelector("#paragraphList"),
   outline: document.querySelector("#outline"),
   searchInput: document.querySelector("#searchInput"),
   autoAnalyzeButton: document.querySelector("#autoAnalyzeButton"),
+  primaryToolbarActionButton: document.querySelector("#primaryToolbarActionButton"),
   resumeAnalyzeButton: document.querySelector("#resumeAnalyzeButton"),
   downloadNotesButton: document.querySelector("#downloadNotesButton"),
   downloadDocxButton: document.querySelector("#downloadDocxButton"),
@@ -245,9 +258,32 @@ function bindEvents() {
   els.toolbarToggleButton.addEventListener("click", () => setToolbarCollapsed(!state.toolbarCollapsed));
   els.historyToggleButton.addEventListener("click", () => setHistoryOpen(!state.historyOpen));
   els.historyCloseButton.addEventListener("click", () => setHistoryOpen(false));
+  els.modelSettingsDetails?.addEventListener("toggle", (event) => {
+    if (event.isTrusted) {
+      state.modelDrawerTouched = true;
+    }
+  });
+  els.emptyChooseButton?.addEventListener("click", () => {
+    setSidebarCollapsed(false);
+    els.pdfInput?.click();
+  });
+  els.emptyHistoryButton?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setHistoryOpen(true);
+  });
+  els.emptyModelButton?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setSidebarCollapsed(false);
+    state.modelDrawerTouched = true;
+    if (els.modelSettingsDetails) {
+      els.modelSettingsDetails.open = true;
+    }
+    window.setTimeout(() => els.providerSelect?.focus(), 60);
+  });
   els.pingButton.addEventListener("click", pingModel);
   els.diagnosticButton.addEventListener("click", generateModelDiagnosticReport);
   els.copyDiagnosticButton.addEventListener("click", copyModelDiagnosticReport);
+  els.primaryToolbarActionButton.addEventListener("click", runPrimaryToolbarAction);
   els.autoAnalyzeButton.addEventListener("click", () => startAutoAnalyze());
   els.resumeAnalyzeButton.addEventListener("click", resumeMissingAnalysis);
   els.downloadNotesButton.addEventListener("click", downloadPaperNotes);
@@ -262,6 +298,7 @@ function bindEvents() {
     clearSavedApiKeyRef();
     applyProvider(els.providerSelect.value);
     saveSettings();
+    syncModelSettingsDrawer();
   });
   els.searchInput.addEventListener("input", () => {
     state.query = els.searchInput.value.trim().toLowerCase();
@@ -509,6 +546,7 @@ function loadSettings() {
   }
   updateApiKeyPlaceholder();
   updateAnalysisProfileButtons();
+  syncModelSettingsDrawer({ initial: true });
   renderAnalysisDashboard();
 }
 
@@ -583,6 +621,7 @@ function applySecuredSettings(settings) {
 
   saveSettings();
   updateModelDiagnostics();
+  syncModelSettingsDrawer({ configuredDone: true });
   renderAnalysisDashboard();
 }
 
@@ -706,7 +745,41 @@ function updateModelDiagnostics(remoteDiagnostics) {
   lines.push(`Proxy: ${diagnostics.proxyPresent ? `detected${proxySource}${proxyMode}` : "not detected"}`);
 
   els.modelDiagnosticsText.textContent = lines.join(" · ");
+  updateModelDrawerSummary(diagnostics, settings);
   renderProviderGuide(diagnostics);
+}
+
+function updateModelDrawerSummary(diagnostics = {}, settings = getSettings()) {
+  if (!els.modelDrawerSummary) {
+    return;
+  }
+  const providerLabel = PROVIDERS[settings.provider]?.label || settings.provider || "自定义";
+  const keyLabel = diagnostics.keyPresent
+    ? diagnostics.keySaved ? "Key 已保存" : "Key 已填写"
+    : settings.baseUrl === "local:claude-config" ? "本机认证" : "Key 未填";
+  els.modelDrawerSummary.textContent = `${providerLabel} · ${keyLabel}`;
+}
+
+function syncModelSettingsDrawer(options = {}) {
+  if (!els.modelSettingsDetails) {
+    return;
+  }
+  const keyInfo = getStoredKeyInfo();
+  const providerUsesLocalAuth = els.baseUrlInput.value.trim() === "local:claude-config";
+  const hasTypedKey = Boolean(normalizeApiKeyInput(els.apiKeyInput.value));
+  const configured = Boolean(keyInfo || hasTypedKey || providerUsesLocalAuth);
+  if (options.configuredDone) {
+    state.modelDrawerTouched = false;
+    els.modelSettingsDetails.open = false;
+    return;
+  }
+  if (options.initial && !state.paper) {
+    els.modelSettingsDetails.open = false;
+    return;
+  }
+  if (!state.modelDrawerTouched) {
+    els.modelSettingsDetails.open = !configured;
+  }
 }
 
 function renderProviderGuide(diagnostics) {
@@ -1081,6 +1154,7 @@ async function uploadPdf() {
     state.pendingChatMessages.clear();
     state.query = "";
     state.pipelineQuality = null;
+    state.pipelineQualityFilter = "all";
     state.exportQa = null;
     state.segmentationDebug = null;
     state.manualEditAffectedParagraphIds = [];
@@ -1941,6 +2015,101 @@ async function analyzeParagraph(paragraphId, options = {}) {
   });
 }
 
+function getPrimaryToolbarAction() {
+  const busy = state.autoAnalyze.running ||
+    state.segmentationJob.running ||
+    state.pipelineBusy ||
+    state.maintenanceBusy ||
+    state.ocrJob.running;
+  const stoppable = state.autoAnalyze.running || state.segmentationJob.running || state.ocrJob.running;
+
+  if (!state.paper) {
+    return {
+      kind: "upload",
+      label: "上传 PDF",
+      title: "选择一篇 PDF 开始解析",
+      disabled: busy,
+    };
+  }
+
+  if (busy) {
+    return {
+      kind: "busy",
+      label: stoppable ? "任务运行中" : "处理中",
+      title: "当前有任务正在运行，可在任务条查看进度和停止状态。",
+      disabled: true,
+    };
+  }
+
+  if (isOcrRequiredPaper(state.paper)) {
+    return {
+      kind: "ocr",
+      label: "先做 OCR",
+      title: "这篇 PDF 需要先 OCR，完成后再翻译讲解。",
+      disabled: false,
+    };
+  }
+
+  const readingParagraphs = getReadingParagraphs(state.paper);
+  const missingCount = getMissingAnalysisCount(state.paper);
+  if (missingCount > 0) {
+    const allMissing = missingCount >= readingParagraphs.length;
+    return {
+      kind: "analyze",
+      label: allMissing ? "开始精读" : `继续讲解 ${missingCount}`,
+      title: allMissing
+        ? "翻译并讲解这篇论文的正文段落。"
+        : `只补跑失败、缺翻译或缺讲解的 ${missingCount} 段。`,
+      disabled: false,
+    };
+  }
+
+  if (readingParagraphs.length === 0) {
+    return {
+      kind: "quality",
+      label: "查看质量报告",
+      title: "当前没有可读正文段落，先检查分段和解析质量。",
+      disabled: false,
+    };
+  }
+
+  return {
+    kind: "export",
+    label: "导出笔记",
+    title: "下载包含原文、翻译和讲解的 Markdown 笔记。",
+    disabled: false,
+  };
+}
+
+async function runPrimaryToolbarAction() {
+  const action = getPrimaryToolbarAction();
+  if (action.disabled) {
+    return;
+  }
+
+  if (action.kind === "upload") {
+    els.pdfInput?.click();
+    return;
+  }
+
+  if (action.kind === "ocr") {
+    await startOcrJob();
+    return;
+  }
+
+  if (action.kind === "quality") {
+    await runPipelineQualityReport();
+    return;
+  }
+
+  if (action.kind === "export") {
+    downloadPaperNotes();
+    return;
+  }
+
+  await resumeMissingAnalysis();
+}
+
 async function startAutoAnalyze(options = {}) {
   if (!state.paper || state.autoAnalyze.running) {
     return;
@@ -2108,6 +2277,7 @@ async function runPipelineQualityReport() {
     const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}/pipeline-quality`, {}, "质量报告");
     const result = await readResponse(response);
     state.pipelineQuality = result;
+    state.pipelineQualityFilter = "all";
     renderPaperPreservingViewport();
     window.requestAnimationFrame(() => {
       document.querySelector(".pipeline-quality-panel")?.scrollIntoView({
@@ -2415,6 +2585,7 @@ async function createAnalysisJob(payload = {}) {
         settings,
         paragraphIds: payload.paragraphIds || [],
         rerunAll: Boolean(payload.rerunAll),
+        repairWeakOnly: Boolean(payload.repairWeakOnly),
         force: Boolean(payload.force),
       }),
     }, "创建分析任务");
@@ -2882,6 +3053,313 @@ function renderJobHistory() {
   els.jobHistory.replaceChildren(fragment);
 }
 
+function renderTaskRail() {
+  if (!els.taskRail) {
+    return;
+  }
+
+  const model = buildTaskRailModel();
+  if (!model) {
+    els.taskRail.classList.add("hidden");
+    els.taskRail.replaceChildren();
+    return;
+  }
+
+  els.taskRail.className = `task-rail ${model.tone || "idle"}`;
+
+  const main = document.createElement("div");
+  main.className = "task-rail-main";
+  const marker = document.createElement("span");
+  marker.className = "task-rail-marker";
+  marker.setAttribute("aria-hidden", "true");
+
+  const copy = document.createElement("div");
+  copy.className = "task-rail-copy";
+  const title = document.createElement("strong");
+  title.textContent = model.title;
+  const message = document.createElement("span");
+  message.textContent = model.message;
+  copy.append(title, message);
+  main.append(marker, copy);
+
+  const meta = document.createElement("div");
+  meta.className = "task-rail-meta";
+  for (const item of model.meta.filter(Boolean).slice(0, 7)) {
+    const chip = document.createElement("span");
+    chip.textContent = item;
+    meta.append(chip);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "task-rail-actions";
+  for (const action of model.actions) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `secondary-button task-rail-action ${action.kind || ""}`;
+    button.textContent = action.label;
+    button.disabled = Boolean(action.disabled);
+    button.addEventListener("click", action.onClick);
+    actions.append(button);
+  }
+
+  els.taskRail.replaceChildren(main, meta, actions);
+}
+
+function buildTaskRailModel() {
+  if (!state.paper && !state.segmentationJob.running && !state.autoAnalyze.running && !state.ocrJob.running) {
+    return null;
+  }
+
+  if (state.segmentationJob.running) {
+    return buildSegmentationTaskRailModel();
+  }
+
+  if (state.autoAnalyze.running) {
+    return buildAnalysisTaskRailModel();
+  }
+
+  if (state.ocrJob.running) {
+    return buildOcrTaskRailModel();
+  }
+
+  if (state.pipelineBusy) {
+    return buildSimpleTaskRailModel({
+      tone: "active",
+      title: "重分段和全跑",
+      message: state.lastStatusText || "正在准备重新分段和讲解。",
+      meta: ["长任务", getTaskProviderLabel(), "已有内容可读"],
+    });
+  }
+
+  if (state.maintenanceBusy) {
+    return buildSimpleTaskRailModel({
+      tone: "active",
+      title: "维护任务",
+      message: state.lastStatusText || "正在更新图表、分段或视觉结构。",
+      meta: ["本地维护", "已有内容可读"],
+    });
+  }
+
+  if (!state.paper) {
+    return null;
+  }
+
+  const missingCount = getMissingAnalysisCount(state.paper);
+  const retryableJob = getRetryableFailedJob();
+  const failedOrWeak = getFailedOrWeakParagraphs();
+  if (missingCount || retryableJob || failedOrWeak.length) {
+    const actions = [];
+    if (missingCount) {
+      actions.push({
+        label: `补跑 ${missingCount}`,
+        onClick: resumeMissingAnalysis,
+      });
+    }
+    if (retryableJob) {
+      actions.push({
+        label: "重跑失败",
+        onClick: () => retryFailedJob(retryableJob.id),
+      });
+    }
+    if (failedOrWeak.length) {
+      actions.push({
+        label: "查看问题",
+        onClick: showTaskFailures,
+      });
+    }
+    return {
+      tone: "warn",
+      title: "还有内容需要处理",
+      message: `${missingCount || failedOrWeak.length} 段待补跑或复查；已有段落可以继续阅读。`,
+      meta: [
+        formatTaskRailReadingProgress(),
+        retryableJob ? `${getJobTypeLabel(retryableJob.type)}失败 ${retryableJob.failed}` : "",
+        getTaskProviderLabel(),
+        "可安全阅读已有结果",
+      ],
+      actions,
+    };
+  }
+
+  return {
+    tone: "idle",
+    title: "阅读就绪",
+    message: state.lastStatusText || "当前没有运行中的后台任务。",
+    meta: [
+      formatTaskRailReadingProgress(),
+      "无待补跑",
+      getTaskProviderLabel(),
+      "可安全导出或继续提问",
+    ],
+    actions: [
+      { label: "质量报告", onClick: runPipelineQualityReport },
+      { label: "导出", onClick: downloadPaperNotes },
+    ],
+  };
+}
+
+function buildSegmentationTaskRailModel() {
+  const elapsed = Math.max(0, Math.round((Date.now() - state.segmentationJob.startedAt) / 1000));
+  const progress = formatTaskProgress(state.segmentationJob);
+  const phase = state.segmentationJob.phase || formatClientSegmentationRetryStrategyLabel(state.segmentationJob.strategy);
+  const stopping = state.segmentationJob.stopRequested;
+  return {
+    tone: stopping ? "stopping" : state.segmentationJob.failed ? "warn" : "active",
+    title: stopping ? "正在停止 AI 分段" : "AI 分段运行中",
+    message: stopping
+      ? "后端已收到停止请求；正在运行的小步骤可能会先收尾。"
+      : state.segmentationJob.message || "正在生成章节结构和正文段落。",
+    meta: [
+      phase,
+      progress,
+      formatTaskEta(state.segmentationJob.timeEstimate, elapsed),
+      state.segmentationJob.failed ? `失败 ${state.segmentationJob.failed}` : "",
+      "分段完成后刷新正文",
+    ],
+    actions: [
+      {
+        label: stopping ? "停止中" : "停止",
+        disabled: stopping,
+        kind: "danger",
+        onClick: stopAutoAnalyze,
+      },
+      { label: "历史", onClick: () => setHistoryOpen(true) },
+    ],
+  };
+}
+
+function buildAnalysisTaskRailModel() {
+  const elapsed = Math.max(0, Math.round((Date.now() - state.autoAnalyze.startedAt) / 1000));
+  const progress = formatTaskProgress(state.autoAnalyze);
+  const current = state.paper?.paragraphs.find((paragraph) => paragraph.id === state.autoAnalyze.currentId);
+  const currentLabel = current ? `当前 P${current.order + 1}` : state.autoAnalyze.currentBatchSize ? `批量 ${state.autoAnalyze.currentBatchSize} 段` : "";
+  const stopping = state.autoAnalyze.stopRequested;
+  return {
+    tone: stopping ? "stopping" : state.autoAnalyze.failed ? "warn" : "active",
+    title: stopping ? "正在停止自动讲解" : "自动讲解运行中",
+    message: stopping
+      ? "停止请求已发出；正在处理的批次可能会写入已完成结果。"
+      : state.lastStatusText || "正在逐段翻译和讲解。",
+    meta: [
+      progress,
+      currentLabel,
+      formatTaskEta(state.autoAnalyze.timeEstimate, elapsed),
+      state.autoAnalyze.failed ? `失败 ${state.autoAnalyze.failed}` : "",
+      state.autoAnalyze.cacheHits ? `缓存 ${state.autoAnalyze.cacheHits}` : "",
+      getTaskProviderLabel(),
+      "已完成段落可读",
+    ],
+    actions: [
+      {
+        label: stopping ? "停止中" : "停止",
+        disabled: stopping,
+        kind: "danger",
+        onClick: stopAutoAnalyze,
+      },
+      { label: "查看问题", onClick: showTaskFailures },
+    ],
+  };
+}
+
+function buildOcrTaskRailModel() {
+  const elapsed = Math.max(0, Math.round((Date.now() - state.ocrJob.startedAt) / 1000));
+  const stopping = state.ocrJob.stopRequested;
+  return {
+    tone: stopping ? "stopping" : "active",
+    title: stopping ? "正在停止 OCR" : "OCR 运行中",
+    message: stopping
+      ? "停止请求已发出；已经生成的中间文件会由后端收尾。"
+      : state.ocrJob.message || "正在把扫描版 PDF 转成可解析文本。",
+    meta: [
+      state.ocrJob.status ? getJobStatusText(state.ocrJob.status) : "运行中",
+      `已用 ${formatDuration(elapsed)}`,
+      "OCR 完成后会重新解析",
+    ],
+    actions: [
+      {
+        label: stopping ? "停止中" : "停止 OCR",
+        disabled: stopping,
+        kind: "danger",
+        onClick: () => {
+          state.ocrJob.stopRequested = true;
+          renderTaskRail();
+          stopOcrJob();
+        },
+      },
+      { label: "历史", onClick: () => setHistoryOpen(true) },
+    ],
+  };
+}
+
+function buildSimpleTaskRailModel(model) {
+  return {
+    actions: [
+      { label: "历史", onClick: () => setHistoryOpen(true) },
+    ],
+    ...model,
+  };
+}
+
+function formatTaskProgress(job) {
+  const total = Number(job.total || 0);
+  const done = Number(job.completed || 0) + Number(job.failed || 0);
+  return total ? `${done}/${total}` : "准备中";
+}
+
+function formatTaskEta(estimate, elapsed) {
+  const label = formatJobEtaStatus(estimate, elapsed);
+  return label || `已用 ${formatDuration(elapsed)}`;
+}
+
+function formatTaskRailReadingProgress() {
+  if (!state.paper) {
+    return "";
+  }
+  const reading = getReadingParagraphs(state.paper).length;
+  const analyzed = getReadingParagraphs(state.paper).filter((paragraph) => !needsAnalysis(paragraph)).length;
+  return reading ? `讲解 ${analyzed}/${reading}` : `${state.paper.pageCount || 0} 页`;
+}
+
+function getTaskProviderLabel() {
+  const settings = getSettings();
+  return PROVIDERS[settings.provider]?.label || settings.provider || "自定义 Provider";
+}
+
+function getRetryableFailedJob() {
+  return (state.jobHistory || []).find((job) => (
+    !isActiveRetryableJob(job) &&
+    Number(job.failed || 0) > 0 &&
+    (job.type === "analysis" || job.type === "segmentation")
+  )) || null;
+}
+
+function getFailedOrWeakParagraphs() {
+  if (!state.paper || !Array.isArray(state.paper.paragraphs)) {
+    return [];
+  }
+  return state.paper.paragraphs.filter((paragraph) => (
+    paragraph.kind === "paragraph" &&
+    (
+      paragraph.analysisStatus === "error" ||
+      Boolean(paragraph.analysisError) ||
+      Boolean(paragraph.weakAnalysis)
+    )
+  ));
+}
+
+function showTaskFailures() {
+  const target = getFailedOrWeakParagraphs()[0];
+  if (target?.id) {
+    document.querySelector(`#${CSS.escape(target.id)}`)?.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+    });
+    setStatus(`已定位到需要复查的段落 P${Number(target.order || 0) + 1}`);
+    return;
+  }
+  setHistoryOpen(true);
+}
+
 function updateHistorySummary() {
   const paperCount = Number(state.recentPaperCount || 0);
   const jobCount = state.paper ? state.jobHistory.length : 0;
@@ -3020,6 +3498,7 @@ function needsAnalysis(paragraph) {
     (
       paragraph.analysisStatus === "error" ||
       Boolean(paragraph.analysisError) ||
+      Boolean(paragraph.weakAnalysis) ||
       !hasCompleteAnalysis(paragraph)
     );
 }
@@ -3038,6 +3517,11 @@ function resetParagraphAnalyses(paragraphs) {
     paragraph.translation = "";
     paragraph.explanation = "";
     paragraph.keyTerms = [];
+    paragraph.analysisCoverage = null;
+    paragraph.analysisVerification = null;
+    paragraph.weakAnalysis = false;
+    paragraph.analysisWeakReasons = [];
+    paragraph.analysisRepairStatus = "";
     paragraph.analysisStatus = "pending";
     paragraph.analysisError = "";
   }
@@ -3049,12 +3533,47 @@ async function askParagraph(paragraphId, input) {
     return;
   }
 
+  if (state.busyParagraphId) {
+    return;
+  }
+
   if (!ensureModelSettings()) {
     return;
   }
 
-  const pendingId = addPendingChatMessage(paragraphId, message);
   input.value = "";
+  await submitParagraphQuestion(paragraphId, message, { skipEnsure: true });
+}
+
+async function retryParagraphQuestion(paragraphId, pendingId) {
+  const item = findPendingChatMessage(paragraphId, pendingId);
+  if (!item?.question || state.busyParagraphId) {
+    return;
+  }
+
+  await submitParagraphQuestion(paragraphId, item.question, {
+    pendingId,
+    retry: true,
+  });
+}
+
+async function submitParagraphQuestion(paragraphId, message, options = {}) {
+  if (!state.paper || !paragraphId || !message || state.busyParagraphId) {
+    return false;
+  }
+
+  if (!options.skipEnsure && !ensureModelSettings()) {
+    return false;
+  }
+
+  const pendingId = options.pendingId || addPendingChatMessage(paragraphId, message);
+  if (options.pendingId) {
+    setPendingChatMessageState(paragraphId, pendingId, {
+      answer: options.retry ? "正在重新回答..." : "正在回答...",
+      pending: true,
+      error: false,
+    });
+  }
   state.busyParagraphId = paragraphId;
   renderPaperPreservingViewport();
 
@@ -3074,9 +3593,11 @@ async function askParagraph(paragraphId, input) {
     resolvePendingChatMessage(paragraphId, pendingId);
     replaceParagraph(result.paragraph);
     setStatus("回答完成");
+    return true;
   } catch (error) {
     failPendingChatMessage(paragraphId, pendingId, error.message);
     setStatus(error.message, true);
+    return false;
   } finally {
     state.busyParagraphId = null;
     renderPaperPreservingViewport();
@@ -3096,6 +3617,23 @@ function addPendingChatMessage(paragraphId, question) {
   return pendingId;
 }
 
+function findPendingChatMessage(paragraphId, pendingId) {
+  const messages = state.pendingChatMessages.get(paragraphId) || [];
+  return messages.find((entry) => entry.id === pendingId) || null;
+}
+
+function setPendingChatMessageState(paragraphId, pendingId, patch = {}) {
+  const messages = state.pendingChatMessages.get(paragraphId) || [];
+  const item = messages.find((entry) => entry.id === pendingId);
+  if (!item) {
+    return false;
+  }
+
+  Object.assign(item, patch);
+  state.pendingChatMessages.set(paragraphId, messages);
+  return true;
+}
+
 function resolvePendingChatMessage(paragraphId, pendingId) {
   const messages = state.pendingChatMessages.get(paragraphId) || [];
   const next = messages.filter((item) => item.id !== pendingId);
@@ -3107,16 +3645,11 @@ function resolvePendingChatMessage(paragraphId, pendingId) {
 }
 
 function failPendingChatMessage(paragraphId, pendingId, message) {
-  const messages = state.pendingChatMessages.get(paragraphId) || [];
-  const item = messages.find((entry) => entry.id === pendingId);
-  if (!item) {
-    return;
-  }
-
-  item.pending = false;
-  item.error = true;
-  item.answer = `回答失败：${normalizeDisplayError(message)}`;
-  state.pendingChatMessages.set(paragraphId, messages);
+  setPendingChatMessageState(paragraphId, pendingId, {
+    pending: false,
+    error: true,
+    answer: `回答失败：${normalizeDisplayError(message)}`,
+  });
 }
 
 function ensureModelSettings(options = {}) {
@@ -3160,15 +3693,20 @@ function renderPaper() {
   const paper = state.paper;
 
   if (!paper) {
+    els.appShell?.classList.add("no-paper");
     els.emptyState.classList.remove("hidden");
     els.paperLibraryControls.classList.add("hidden");
+    els.paperTitle.textContent = "选择一篇 PDF";
+    els.paperStats.textContent = "先上传论文，或从历史记录打开最近阅读";
+    els.paperMeta.textContent = "未载入论文";
     els.paragraphList.innerHTML = "";
     els.outline.innerHTML = "";
-    syncCompactPaperSummary("选择一篇 PDF", "段落会显示在这里");
+    syncCompactPaperSummary("选择一篇 PDF", "上传、历史、模型设置");
     updateAutoButtons();
     return;
   }
 
+  els.appShell?.classList.remove("no-paper");
   els.emptyState.classList.add("hidden");
   els.paperTitle.textContent = paper.title || paper.filename;
   els.paperMeta.textContent = `${paper.pageCount} 页`;
@@ -3781,10 +4319,12 @@ function beginOcrJob(job) {
       });
     }, 1800);
   }
+  updateAutoButtons();
 }
 
 function applyOcrJob(job) {
   state.ocrJob.running = isActiveAnalysisJob(job);
+  state.ocrJob.stopRequested = Boolean(job.cancelRequested || job.status === "canceling");
   state.ocrJob.jobId = job.id;
   state.ocrJob.status = job.status || "";
   state.ocrJob.message = job.message || getJobStatusText(job.status);
@@ -3855,6 +4395,8 @@ async function stopOcrJob() {
     return;
   }
 
+  state.ocrJob.stopRequested = true;
+  updateAutoButtons();
   setStatus("正在停止 OCR 任务");
   try {
     const response = await apiFetch(`/api/jobs/${encodeURIComponent(state.ocrJob.jobId)}/cancel`, {
@@ -3866,6 +4408,8 @@ async function stopOcrJob() {
     }
     await pollOcrJob();
   } catch (error) {
+    state.ocrJob.stopRequested = false;
+    updateAutoButtons();
     setStatus(error.message, true);
   }
 }
@@ -3874,6 +4418,7 @@ function resetOcrJobState(options = {}) {
   clearOcrTimer();
   Object.assign(state.ocrJob, {
     running: false,
+    stopRequested: false,
     jobId: null,
     status: "",
     message: options.keepMessage ? state.ocrJob.message : "",
@@ -4580,6 +5125,21 @@ function renderPipelineQualityPanel(result) {
   header.append(titleWrap, score);
   panel.append(header);
 
+  panel.append(renderPipelineQualityTrustSummary(result));
+
+  const checks = Array.isArray(result.checks) ? result.checks : [];
+  const activeFilter = getPipelineQualityActiveFilter(result);
+  const filteredChecks = filterPipelineQualityChecks(checks, activeFilter);
+  const categoryOverview = renderPipelineQualityCategoryOverview(result, activeFilter);
+  if (categoryOverview) {
+    panel.append(categoryOverview);
+  }
+
+  const layoutDiagnostics = renderPipelineLayoutDiagnostics(result);
+  if (layoutDiagnostics) {
+    panel.append(layoutDiagnostics);
+  }
+
   const metrics = document.createElement("div");
   metrics.className = "pipeline-quality-metrics";
   for (const item of getPipelineQualityMetricItems(result)) {
@@ -4594,27 +5154,342 @@ function renderPipelineQualityPanel(result) {
   }
   panel.append(metrics);
 
-  const recoverableAudit = renderPipelineRecoverableAudit(result);
+  const recoverableAudit = shouldShowPipelineRecoverableAudit(activeFilter)
+    ? renderPipelineRecoverableAudit(result)
+    : null;
   if (recoverableAudit) {
     panel.append(recoverableAudit);
   }
 
-  const checks = Array.isArray(result.checks) ? result.checks : [];
   const list = document.createElement("div");
   list.className = "pipeline-quality-checks";
-  for (const check of checks.slice(0, 10)) {
+  for (const check of filteredChecks.slice(0, 10)) {
     list.append(renderPipelineQualityCheck(check));
+  }
+  if (!filteredChecks.length) {
+    const empty = document.createElement("p");
+    empty.className = "pipeline-quality-empty";
+    empty.textContent = activeFilter === "all"
+      ? "没有需要展开的质量问题。"
+      : `${getPipelineQualityCategoryLabel(activeFilter)}没有需要展开的质量问题。`;
+    list.append(empty);
   }
   panel.append(list);
 
-  if (checks.length > 10) {
+  if (filteredChecks.length > 10) {
     const more = document.createElement("p");
     more.className = "export-qa-more";
-    more.textContent = `还有 ${checks.length - 10} 条检查未展开。`;
+    more.textContent = `还有 ${filteredChecks.length - 10} 条检查未展开。`;
     panel.append(more);
   }
 
   return panel;
+}
+
+function renderPipelineQualityTrustSummary(result) {
+  const summary = document.createElement("div");
+  summary.className = "pipeline-trust-summary";
+
+  const copy = document.createElement("div");
+  copy.className = "pipeline-trust-copy";
+  const eyebrow = document.createElement("span");
+  eyebrow.textContent = "这次结果能不能信？";
+  const verdict = document.createElement("strong");
+  verdict.className = `pipeline-trust-verdict ${getPipelineTrustLevel(result)}`;
+  verdict.textContent = getPipelineTrustVerdict(result);
+  const scoreLine = document.createElement("p");
+  scoreLine.className = "pipeline-trust-scoreline";
+  scoreLine.textContent = getPipelineTrustScoreLine(result);
+  copy.append(eyebrow, verdict, scoreLine);
+  summary.append(copy);
+
+  const risks = document.createElement("div");
+  risks.className = "pipeline-trust-risks";
+  const topRisks = getPipelineQualityTopRisks(result);
+  if (topRisks.length) {
+    for (const risk of topRisks) {
+      const item = document.createElement("span");
+      item.className = `pipeline-trust-risk severity-${risk.severity || "info"}`;
+      item.textContent = risk.title || risk.message || "质量风险";
+      item.title = risk.message || risk.action || item.textContent;
+      risks.append(item);
+    }
+  } else {
+    const item = document.createElement("span");
+    item.className = "pipeline-trust-risk severity-ok";
+    item.textContent = "没有明显阻塞项";
+    risks.append(item);
+  }
+  summary.append(risks);
+
+  const actions = document.createElement("div");
+  actions.className = "pipeline-trust-actions";
+  const primaryCheck = getPrimaryPipelineQualityCheck(result);
+  const actionButton = primaryCheck ? buildPipelineQualityActionButton(primaryCheck) : null;
+  if (actionButton) {
+    const label = document.createElement("span");
+    label.textContent = "下一步";
+    actions.append(label, actionButton);
+  } else {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary-button export-qa-locate";
+    button.textContent = "导出检查";
+    button.addEventListener("click", () => runExportQa());
+    actions.append(button);
+  }
+  summary.append(actions);
+
+  return summary;
+}
+
+function renderPipelineQualityCategoryOverview(result, activeFilter = "all") {
+  const checks = Array.isArray(result?.checks) ? result.checks : [];
+  if (!checks.length) {
+    return null;
+  }
+
+  const counts = new Map();
+  for (const check of checks) {
+    const category = check.category || "other";
+    const current = counts.get(category) || { total: 0, warn: 0, error: 0 };
+    current.total += 1;
+    if (check.severity === "error") {
+      current.error += 1;
+    } else if (check.severity === "warn") {
+      current.warn += 1;
+    }
+    counts.set(category, current);
+  }
+
+  const categories = [
+    "segmentation",
+    "visual",
+    "formula",
+    "analysis",
+    "export",
+    "provider",
+    "planning",
+    "ocr",
+  ].filter((category) => counts.has(category));
+  if (!categories.length) {
+    return null;
+  }
+
+  const wrap = document.createElement("div");
+  wrap.className = "pipeline-quality-categories";
+
+  const allChip = buildPipelineQualityFilterChip({
+    category: "all",
+    label: `全部 ${checks.length}`,
+    active: activeFilter === "all",
+    stateClass: getPipelineQualityAggregateStateClass(checks),
+    title: "显示全部质量问题",
+  });
+  wrap.append(allChip);
+
+  for (const category of categories) {
+    const count = counts.get(category);
+    wrap.append(buildPipelineQualityFilterChip({
+      category,
+      label: `${getPipelineQualityCategoryLabel(category)} ${count.total}`,
+      active: activeFilter === category,
+      stateClass: count.error ? "error" : count.warn ? "warn" : "ok",
+      title: [
+        count.error ? `严重 ${count.error}` : "",
+        count.warn ? `提醒 ${count.warn}` : "",
+      ].filter(Boolean).join(" · ") || "无严重问题",
+    }));
+  }
+  return wrap;
+}
+
+function buildPipelineQualityFilterChip({ category, label, active, stateClass, title }) {
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = `pipeline-quality-category-chip ${stateClass || "ok"}${active ? " active" : ""}`;
+  chip.textContent = label;
+  chip.title = title || label;
+  chip.setAttribute("aria-pressed", active ? "true" : "false");
+  chip.addEventListener("click", () => {
+    state.pipelineQualityFilter = category;
+    renderPaperPreservingViewport();
+  });
+  return chip;
+}
+
+function getPipelineQualityActiveFilter(result) {
+  const requested = state.pipelineQualityFilter || "all";
+  if (requested === "all") {
+    return "all";
+  }
+  const checks = Array.isArray(result?.checks) ? result.checks : [];
+  return checks.some((check) => (check.category || "other") === requested)
+    ? requested
+    : "all";
+}
+
+function filterPipelineQualityChecks(checks, activeFilter) {
+  if (activeFilter === "all") {
+    return checks;
+  }
+  return checks.filter((check) => (check.category || "other") === activeFilter);
+}
+
+function shouldShowPipelineRecoverableAudit(activeFilter) {
+  return activeFilter === "all" || activeFilter === "segmentation";
+}
+
+function getPipelineQualityAggregateStateClass(checks) {
+  if (checks.some((check) => check?.severity === "error")) {
+    return "error";
+  }
+  if (checks.some((check) => check?.severity === "warn")) {
+    return "warn";
+  }
+  return "ok";
+}
+
+function renderPipelineLayoutDiagnostics(result) {
+  const layout = getPipelineLayoutDiagnostics(result);
+  if (!layout) {
+    return null;
+  }
+
+  const wrap = document.createElement("div");
+  wrap.className = `pipeline-layout-diagnostics ${layout.status || "ok"}`;
+
+  const copy = document.createElement("div");
+  copy.className = "pipeline-layout-copy";
+  const heading = document.createElement("strong");
+  heading.textContent = "版面解析";
+  const mode = document.createElement("span");
+  mode.className = `pipeline-layout-mode ${layout.status || "ok"}`;
+  mode.textContent = getPipelineLayoutModeLabel(layout.mode);
+  const message = document.createElement("p");
+  message.textContent = formatPipelineLayoutMessage(layout);
+  copy.append(heading, mode, message);
+  wrap.append(copy);
+
+  const chips = document.createElement("div");
+  chips.className = "pipeline-layout-chips";
+  for (const item of getPipelineLayoutChipItems(layout)) {
+    const chip = document.createElement("span");
+    chip.textContent = `${item.label} ${item.value}`;
+    chip.title = item.title || chip.textContent;
+    chips.append(chip);
+  }
+  wrap.append(chips);
+
+  const actions = document.createElement("div");
+  actions.className = "pipeline-layout-actions";
+  const primary = buildPipelineLayoutActionButton(layout);
+  if (primary) {
+    actions.append(primary);
+  }
+  wrap.append(actions);
+
+  if (layout.warningSamples?.length) {
+    const warnings = document.createElement("div");
+    warnings.className = "pipeline-layout-warnings";
+    for (const warning of layout.warningSamples.slice(0, 3)) {
+      const item = document.createElement("span");
+      item.textContent = warning;
+      warnings.append(item);
+    }
+    wrap.append(warnings);
+  }
+
+  return wrap;
+}
+
+function getPipelineLayoutDiagnostics(result) {
+  const layout = result?.metrics?.layout;
+  if (layout && typeof layout === "object") {
+    return layout;
+  }
+  const provider = result?.metrics?.provider || {};
+  const planning = result?.metrics?.planning || {};
+  const hasExternalVisual = provider.visualProvider && provider.visualProvider !== "heuristic";
+  return {
+    mode: hasExternalVisual ? "hybrid" : planning.partialFallback ? "fallback" : "local",
+    status: provider.visualStatus === "error"
+      ? "error"
+      : provider.visualStatus === "warn" || provider.visualErrors || planning.partialFallback ? "warn" : "ok",
+    provider: provider.visualProvider || "heuristic",
+    regionCount: provider.visualRegions || 0,
+    visualRegionCount: provider.visualRegions || 0,
+    warningCount: 0,
+    warningSamples: [],
+    fallbackReason: planning.fallbackReason || "",
+    externalVisualErrors: provider.visualErrors || 0,
+  };
+}
+
+function formatPipelineLayoutMessage(layout = {}) {
+  const status = getPipelineLayoutStatusLabel(layout.status);
+  const provider = layout.provider && layout.provider !== "heuristic"
+    ? `Provider ${layout.provider}`
+    : "内置启发式";
+  const fallback = layout.fallbackReason ? `；兜底：${layout.fallbackReason}` : "";
+  const warnings = Number(layout.warningCount || 0) ? `；警告 ${layout.warningCount}` : "";
+  return `${status} · ${provider}${warnings}${fallback}`;
+}
+
+function getPipelineLayoutChipItems(layout = {}) {
+  return [
+    { label: "页", value: layout.pageCount || 0 },
+    { label: "区域", value: layout.regionCount || 0 },
+    { label: "视觉", value: layout.visualRegionCount || 0 },
+    { label: "段落", value: layout.paragraphCount || 0 },
+    Number(layout.externalVisualErrors || 0)
+      ? { label: "错误", value: layout.externalVisualErrors }
+      : null,
+  ].filter(Boolean);
+}
+
+function buildPipelineLayoutActionButton(layout = {}) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary-button export-qa-locate";
+  if (layout.mode === "fallback" || layout.fallbackReason) {
+    button.textContent = "分段调试";
+    button.addEventListener("click", () => runSegmentationDebug());
+    return button;
+  }
+  button.textContent = layout.provider && layout.provider !== "heuristic" ? "重建图表" : "视觉 QA";
+  button.addEventListener("click", () => {
+    const visualPanel = document.querySelector(".visual-qa-panel");
+    if (visualPanel) {
+      visualPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+    } else {
+      rebuildVisualArtifacts();
+    }
+  });
+  return button;
+}
+
+function getPipelineLayoutModeLabel(mode) {
+  if (mode === "ai-layout") {
+    return "AI layout";
+  }
+  if (mode === "hybrid") {
+    return "Hybrid";
+  }
+  if (mode === "fallback") {
+    return "Fallback";
+  }
+  return "Local";
+}
+
+function getPipelineLayoutStatusLabel(status) {
+  if (status === "error") {
+    return "需要修复";
+  }
+  if (status === "warn") {
+    return "需要复查";
+  }
+  return "可用";
 }
 
 function renderPipelineRecoverableAudit(result) {
@@ -4778,6 +5653,15 @@ function buildPipelineQualityActionButton(check) {
     return button;
   }
   if (check.category === "analysis") {
+    if (check.code === "weak-analysis" || check.code === "terminology-drift" || check.code === "analysis-reference-missing") {
+      button.textContent = "修弱段";
+      button.disabled = state.autoAnalyze.running || state.segmentationJob.running || state.pipelineBusy;
+      button.addEventListener("click", () => createAnalysisJob({
+        repairWeakOnly: true,
+        statusLabel: "已加入弱分析修复队列",
+      }));
+      return button;
+    }
     button.textContent = "补跑";
     button.disabled = state.autoAnalyze.running || state.segmentationJob.running || state.pipelineBusy;
     button.addEventListener("click", () => resumeMissingAnalysis());
@@ -4790,7 +5674,82 @@ function buildPipelineQualityActionButton(check) {
     return button;
   }
 
-  return null;
+  if (check.category === "pipeline") {
+    button.textContent = "导出检查";
+    button.addEventListener("click", () => runExportQa());
+    return button;
+  }
+
+  button.textContent = "说明";
+  button.title = check.action || check.message || "显示这条质量检查的处理建议";
+  button.addEventListener("click", () => {
+    const advice = check.action || check.message || "这条检查暂时没有自动修复入口，请根据提示人工复查。";
+    setStatus(`${check.title || "质量检查"}：${advice}`, check.severity === "error");
+  });
+  return button;
+}
+
+function getPipelineTrustLevel(result) {
+  const score = Number(result?.score ?? 0);
+  if (result?.status === "error" || score < 65) {
+    return "error";
+  }
+  if (result?.status === "warn" || score < 85) {
+    return "warn";
+  }
+  return "ok";
+}
+
+function getPipelineTrustVerdict(result) {
+  const level = getPipelineTrustLevel(result);
+  if (level === "error") {
+    return "先修复再信任";
+  }
+  if (level === "warn") {
+    return "可以读，但要复查";
+  }
+  return "可以信任";
+}
+
+function getPipelineTrustScoreLine(result) {
+  const summary = result?.summary || {};
+  const checks = Array.isArray(result?.checks) ? result.checks : [];
+  const issueCount = Number(summary.issueCount || checks.length || 0);
+  const errorCount = Number.isFinite(Number(summary.errorCount))
+    ? Number(summary.errorCount)
+    : checks.filter((check) => check?.severity === "error").length;
+  const warnCount = Number.isFinite(Number(summary.warnCount))
+    ? Number(summary.warnCount)
+    : checks.filter((check) => check?.severity === "warn").length;
+  return `质量分 ${result?.score ?? 0}/100 · ${issueCount} 项问题 · 严重 ${errorCount} · 提醒 ${warnCount}`;
+}
+
+function getPipelineQualityTopRisks(result) {
+  const checks = Array.isArray(result?.checks) ? result.checks : [];
+  return checks
+    .filter((check) => check && (check.severity === "error" || check.severity === "warn"))
+    .slice(0, 3);
+}
+
+function getPrimaryPipelineQualityCheck(result) {
+  const checks = Array.isArray(result?.checks) ? result.checks : [];
+  return checks.find((check) => check?.severity === "error" || check?.severity === "warn") ||
+    checks.find((check) => check?.severity === "info") ||
+    null;
+}
+
+function getPipelineQualityCategoryLabel(category) {
+  const labels = {
+    analysis: "讲解",
+    export: "导出",
+    formula: "公式",
+    ocr: "OCR",
+    planning: "规划",
+    provider: "模型",
+    segmentation: "分段",
+    visual: "图片",
+  };
+  return labels[category] || "其他";
 }
 
 function formatPipelineQualityPanelMeta(result) {
@@ -4833,6 +5792,10 @@ function getPipelineQualityMetricItems(result) {
       value: `${metrics.analysis?.complete || 0}/${metrics.analysis?.total || 0}`,
     },
     {
+      label: "整篇",
+      value: formatPipelineWholePaperMetric(metrics.wholePaper),
+    },
+    {
       label: "视觉",
       value: `${metrics.visual?.issueArtifacts || 0}/${metrics.visual?.visibleArtifacts || 0} 待查`,
     },
@@ -4845,6 +5808,23 @@ function getPipelineQualityMetricItems(result) {
       value: getPipelineQualityExportLabel(metrics.export?.status),
     },
   ];
+}
+
+function formatPipelineWholePaperMetric(wholePaper = {}) {
+  if (!wholePaper.deepPlanAvailable) {
+    return wholePaper.weakAnalysisParagraphs
+      ? `无蓝图 · 弱 ${wholePaper.weakAnalysisParagraphs}`
+      : "未启用";
+  }
+  const parts = [
+    wholePaper.deepPlanStatus === "ready" || wholePaper.deepPlanStatus === "fallback-ready" ? "蓝图" : "部分",
+    `摘要 ${wholePaper.sectionDigestCoveragePercent || 0}%`,
+    Number.isFinite(Number(wholePaper.sectionDraftCoveragePercent))
+      ? `草稿 ${wholePaper.sectionDraftCoveragePercent || 0}%`
+      : "",
+    wholePaper.weakAnalysisParagraphs ? `弱 ${wholePaper.weakAnalysisParagraphs}` : "",
+  ].filter(Boolean);
+  return parts.join(" · ");
 }
 
 function formatPipelineRecoverableMetric(paragraphs = {}) {
@@ -5120,12 +6100,15 @@ function renderSegmentationDebugPanel(result) {
   }
   panel.append(summary);
 
+  panel.append(renderSegmentationDebugReview(result));
+
   const layout = document.createElement("div");
   layout.className = "segmentation-debug-layout";
   layout.append(renderSegmentationDebugPages(result));
   const side = document.createElement("div");
   side.className = "segmentation-debug-side";
   side.append(renderSegmentationDebugIssues(result));
+  side.append(renderSegmentationDebugSectionMap(result));
   side.append(renderSegmentationDebugCrossPageRepair(result));
   side.append(renderSegmentationDebugMemory(result));
   side.append(renderSegmentationDebugEvidence(result));
@@ -5134,6 +6117,101 @@ function renderSegmentationDebugPanel(result) {
   panel.append(layout);
 
   return panel;
+}
+
+function renderSegmentationDebugReview(result) {
+  const review = document.createElement("div");
+  review.className = "segmentation-debug-review";
+  const summary = result?.summary || {};
+  const issueSummary = result?.issueSummary || {};
+  const paragraphs = Array.isArray(result?.paragraphs) ? result.paragraphs : [];
+  const readingParagraphs = paragraphs.filter((paragraph) =>
+    paragraph.kind !== "heading" &&
+    paragraph.analysisEligible !== false &&
+    !paragraph.hidden);
+  const highIssueCount = (issueSummary.categories || [])
+    .filter((category) => category.severity === "high")
+    .reduce((total, category) => total + Number(category.count || 0), 0);
+  const mediumIssueCount = (issueSummary.categories || [])
+    .filter((category) => category.severity === "medium")
+    .reduce((total, category) => total + Number(category.count || 0), 0);
+
+  const items = [
+    {
+      key: "kept",
+      label: "保留正文",
+      value: readingParagraphs.length || summary.reportedParagraphs || 0,
+      detail: `${summary.keptBlocks || 0} 个 PDF block 保留为候选来源`,
+      status: "ok",
+      action: "看页块",
+      target: ".segmentation-debug-pages",
+    },
+    {
+      key: "recoverable",
+      label: "可恢复隐藏",
+      value: summary.recoverableFilteredParagraphs || 0,
+      detail: "公式、链接、图注或代码候选已保留为隐藏段落",
+      status: summary.recoverableFilteredParagraphs ? "warn" : "ok",
+      action: "看样例",
+      target: ".segmentation-debug-issues",
+    },
+    {
+      key: "noise",
+      label: "疑似噪声",
+      value: highIssueCount + mediumIssueCount || summary.paragraphsWithNoise || 0,
+      detail: `${issueSummary.total || 0} 条证据；优先处理高/中风险类型`,
+      status: highIssueCount ? "error" : mediumIssueCount ? "warn" : "ok",
+      action: "看问题",
+      target: ".segmentation-debug-issues",
+    },
+    {
+      key: "sections",
+      label: "章节地图",
+      value: summary.sections || summary.structureSections || (result?.sections || []).length || 0,
+      detail: `${summary.segmentationPlanItems || 0} 个规划条目；检查段落是否落在正确章节`,
+      status: summary.sections || summary.structureSections ? "ok" : "warn",
+      action: "看章节",
+      target: ".segmentation-debug-section-map",
+    },
+  ];
+
+  for (const item of items) {
+    review.append(renderSegmentationDebugReviewCard(item));
+  }
+
+  return review;
+}
+
+function renderSegmentationDebugReviewCard(item) {
+  const card = document.createElement("article");
+  card.className = `segmentation-debug-review-card ${item.status || "ok"}`;
+
+  const label = document.createElement("span");
+  label.textContent = item.label;
+  const value = document.createElement("strong");
+  value.textContent = `${item.value}`;
+  const detail = document.createElement("p");
+  detail.textContent = item.detail || "";
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary-button segmentation-debug-review-action";
+  button.textContent = item.action || "查看";
+  button.addEventListener("click", () => scrollToSegmentationDebugSection(item.target));
+
+  card.append(label, value, detail, button);
+  return card;
+}
+
+function scrollToSegmentationDebugSection(selector) {
+  const target = selector ? document.querySelector(selector) : null;
+  if (!target) {
+    return;
+  }
+  target.scrollIntoView({
+    behavior: "smooth",
+    block: "start",
+  });
 }
 
 function downloadSegmentationDebugJson(result) {
@@ -5663,9 +6741,80 @@ function renderSegmentationDebugMemoryItem(item) {
   return row;
 }
 
+function renderSegmentationDebugSectionMap(result) {
+  const wrap = document.createElement("div");
+  wrap.className = "segmentation-debug-section segmentation-debug-section-map";
+  const heading = document.createElement("h4");
+  heading.textContent = "章节地图";
+  wrap.append(heading);
+
+  const sections = Array.isArray(result?.sections) ? result.sections : [];
+  if (!sections.length) {
+    const empty = document.createElement("p");
+    empty.className = "export-qa-empty";
+    empty.textContent = "当前报告没有保存章节地图。精读模式重分段后会在这里显示章节和段落分布。";
+    wrap.append(empty);
+    return wrap;
+  }
+
+  const meta = document.createElement("div");
+  meta.className = "segmentation-debug-section-map-meta";
+  const paragraphTotal = sections.reduce((total, section) => total + Number(section.paragraphCount || 0), 0);
+  for (const item of [
+    `章节 ${sections.length}`,
+    `段落 ${paragraphTotal}`,
+    result?.summary?.segmentationPlanItems ? `规划 ${result.summary.segmentationPlanItems}` : "",
+  ].filter(Boolean)) {
+    const chip = document.createElement("span");
+    chip.textContent = item;
+    meta.append(chip);
+  }
+  wrap.append(meta);
+
+  const list = document.createElement("div");
+  list.className = "segmentation-debug-section-map-list";
+  for (const section of sections.slice(0, 12)) {
+    list.append(renderSegmentationDebugSectionMapItem(section, result));
+  }
+  wrap.append(list);
+
+  if (sections.length > 12) {
+    const more = document.createElement("p");
+    more.className = "export-qa-more";
+    more.textContent = `还有 ${sections.length - 12} 个章节未展开。`;
+    wrap.append(more);
+  }
+
+  return wrap;
+}
+
+function renderSegmentationDebugSectionMapItem(section, result) {
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "segmentation-debug-section-map-item";
+  row.title = "定位到该章节的第一段";
+  row.addEventListener("click", () => {
+    const paragraph = (result?.paragraphs || []).find((item) => item.sectionId === section.id && item.id);
+    if (paragraph?.id) {
+      revealAndScrollToParagraph(paragraph.id);
+    }
+  });
+
+  const title = document.createElement("strong");
+  title.textContent = section.title || "未命名章节";
+  const meta = document.createElement("span");
+  meta.textContent = [
+    section.firstPage ? `p.${section.firstPage}${section.lastPage && section.lastPage !== section.firstPage ? `-${section.lastPage}` : ""}` : "",
+    `${section.paragraphCount || 0} 段`,
+    section.source ? `来源 ${section.source}` : "",
+  ].filter(Boolean).join(" · ");
+  row.append(title, meta);
+  return row;
+}
+
 function renderSegmentationDebugPages(result) {
   const wrap = document.createElement("div");
-  wrap.className = "segmentation-debug-section";
+  wrap.className = "segmentation-debug-section segmentation-debug-pages";
   const heading = document.createElement("h4");
   heading.textContent = "PDF 页块";
   wrap.append(heading);
@@ -6037,19 +7186,73 @@ function renderSegmentationDebugParagraph(paragraph, legend) {
 
   row.append(marker, body);
   if (paragraph.id) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "secondary-button export-qa-locate";
-    button.textContent = "定位";
-    button.addEventListener("click", () => {
-      document.querySelector(`#${CSS.escape(paragraph.id)}`)?.scrollIntoView({
-        behavior: "smooth",
-        block: "center",
-      });
-    });
-    row.append(button);
+    row.append(renderSegmentationDebugParagraphActions(paragraph));
   }
   return row;
+}
+
+function renderSegmentationDebugParagraphActions(paragraph) {
+  const actions = document.createElement("div");
+  actions.className = "segmentation-debug-paragraph-actions";
+
+  const readingParagraph = isReadingParagraph(state.paper, paragraph);
+  const busy = state.paragraphEditBusyId === paragraph.id;
+
+  actions.append(
+    createSegmentationDebugParagraphAction("定位", "滚动到阅读区中的这个段落。", () => {
+      revealAndScrollToParagraph(paragraph.id);
+    }, { passive: true }),
+    createSegmentationDebugParagraphAction(
+      readingParagraph ? "隐藏" : "恢复",
+      readingParagraph ? "标记为噪声并从自动讲解中跳过。" : "恢复为正文段落，并标记为待补跑。",
+      () => {
+        editParagraph(paragraph.id, { action: readingParagraph ? "mark-noise" : "restore" });
+      },
+      { danger: readingParagraph },
+    ),
+  );
+
+  if (readingParagraph) {
+    actions.append(
+      createSegmentationDebugParagraphAction("合并下段", "把当前段落和后面的正文段落合并，只补跑合并后的段落。", () => {
+        if (window.confirm("合并后会删除下一段，并清空当前段落已有翻译/讲解。确定继续吗？")) {
+          editParagraph(paragraph.id, { action: "merge-next" });
+        }
+      }),
+      createSegmentationDebugParagraphAction("拆分", "用 || 把当前段落拆成两段，只补跑拆出的段落。", () => {
+        promptSplitParagraph(paragraph);
+      }),
+      createSegmentationDebugParagraphAction("补跑", "只重新生成这个段落的翻译和讲解。", () => {
+        analyzeParagraph(paragraph.id);
+      }, { analysis: true }),
+    );
+  }
+
+  if (busy) {
+    actions.setAttribute("aria-busy", "true");
+  }
+
+  return actions;
+}
+
+function createSegmentationDebugParagraphAction(label, title, onClick, options = {}) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `segmentation-debug-paragraph-action${options.danger ? " danger" : ""}`;
+  button.textContent = label;
+  button.title = title;
+  button.disabled = options.passive
+    ? false
+    : Boolean(state.paragraphEditBusyId) ||
+      state.autoAnalyze.running ||
+      state.segmentationJob.running ||
+      state.pipelineBusy ||
+      (options.analysis && Boolean(state.busyParagraphId));
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    onClick();
+  });
+  return button;
 }
 
 function formatSegmentationDebugParagraphMeta(paragraph, legend) {
@@ -7156,30 +8359,27 @@ function renderParagraphCard(paragraph) {
     meta.append(pageLinks);
   }
   meta.append(status);
-
-  const analyzeButton = document.createElement("button");
-  analyzeButton.className = "secondary-button";
-  analyzeButton.type = "button";
-  analyzeButton.textContent = getAnalyzeButtonText(paragraph);
-  analyzeButton.disabled = !readingParagraph ||
-    Boolean(state.busyParagraphId) ||
-    state.autoAnalyze.running ||
-    Boolean(state.paragraphEditBusyId);
-  analyzeButton.addEventListener("click", () => analyzeParagraph(paragraph.id));
+  const qualityBadges = renderParagraphQualityBadges(paragraph);
+  if (qualityBadges) {
+    meta.append(qualityBadges);
+  }
 
   const actions = document.createElement("div");
   actions.className = "paragraph-actions";
-  actions.append(renderParagraphEditActions(paragraph, readingParagraph), analyzeButton);
+  actions.append(renderParagraphActionMenu(paragraph, readingParagraph));
 
   header.append(meta, actions);
 
   const content = document.createElement("div");
   content.className = "paragraph-content";
 
-  const source = document.createElement("div");
-  source.className = "source-text markdown-body";
-  renderMarkdownBlock(source, paragraph.sourceMarkdown || paragraph.sourceText);
-  content.append(source);
+  content.append(renderParagraphReadingPanel({
+    paragraph,
+    type: "source",
+    title: "原文",
+    text: paragraph.sourceMarkdown || paragraph.sourceText,
+    bodyClassName: "source-text markdown-body",
+  }));
 
   if (relatedArtifacts.length) {
     content.append(renderRelatedArtifacts(relatedArtifacts));
@@ -7197,12 +8397,16 @@ function renderParagraphCard(paragraph) {
     content.append(renderAnalysisNotice(paragraph.analysisError, true));
   }
 
+  if (paragraph.weakAnalysis) {
+    content.append(renderAnalysisNotice(formatParagraphWeakAnalysisNotice(paragraph), true));
+  }
+
   if (paragraph.translation || paragraph.explanation || paragraph.keyTerms?.length) {
     const grid = document.createElement("div");
     grid.className = "analysis-grid";
     grid.append(
-      renderAnalysisBox("翻译", paragraph.translation || "尚未生成"),
-      renderAnalysisBox("讲解", paragraph.explanation || "尚未生成"),
+      renderAnalysisBox(paragraph, "translation", "翻译", paragraph.translation || "尚未生成"),
+      renderAnalysisBox(paragraph, "explanation", "讲解", paragraph.explanation || "尚未生成"),
     );
     content.append(grid);
 
@@ -7222,6 +8426,63 @@ function renderParagraphCard(paragraph) {
   content.append(renderChatBox(paragraph));
   card.append(header, content);
   return card;
+}
+
+function renderParagraphQualityBadges(paragraph) {
+  const badges = [];
+  if (paragraph.sectionDigestId || paragraph.analysisVerification) {
+    badges.push({
+      label: "全文上下文",
+      className: "context",
+      title: paragraph.sectionDigestId
+        ? `已绑定章节草稿：${paragraph.sectionDigestId}`
+        : "已通过整篇分析 verifier 检查。",
+    });
+  }
+  if (paragraph.analysisRepairStatus === "repaired") {
+    badges.push({
+      label: "已修复",
+      className: "repaired",
+      title: "弱分析已补跑并通过 verifier。",
+    });
+  } else if (paragraph.analysisRepairStatus === "weak-after-repair") {
+    badges.push({
+      label: "仍需复查",
+      className: "weak",
+      title: formatParagraphWeakAnalysisNotice(paragraph),
+    });
+  } else if (paragraph.weakAnalysis) {
+    badges.push({
+      label: "弱分析",
+      className: "weak",
+      title: formatParagraphWeakAnalysisNotice(paragraph),
+    });
+  }
+
+  if (!badges.length) {
+    return null;
+  }
+
+  const row = document.createElement("div");
+  row.className = "paragraph-quality-badges";
+  for (const badge of badges) {
+    const chip = document.createElement("span");
+    chip.className = `paragraph-quality-badge ${badge.className}`;
+    chip.textContent = badge.label;
+    chip.title = badge.title;
+    row.append(chip);
+  }
+  return row;
+}
+
+function formatParagraphWeakAnalysisNotice(paragraph) {
+  const reasons = Array.isArray(paragraph.analysisWeakReasons)
+    ? paragraph.analysisWeakReasons.filter(Boolean).slice(0, 3)
+    : [];
+  const prefix = paragraph.analysisRepairStatus === "weak-after-repair"
+    ? "补跑后仍需复查"
+    : "Verifier 标记这段需要修复";
+  return reasons.length ? `${prefix}：${reasons.join("；")}` : `${prefix}。`;
 }
 
 function renderParagraphLocationSummary(location) {
@@ -7372,6 +8633,81 @@ function formatParagraphPageAnchorLabel(pageNumber, index, total) {
   return `续 p.${pageNumber}`;
 }
 
+function renderParagraphActionMenu(paragraph, readingParagraph) {
+  const menu = document.createElement("details");
+  menu.className = "paragraph-action-menu";
+
+  const summary = document.createElement("summary");
+  summary.textContent = "操作";
+  summary.title = "段落操作";
+
+  const panel = document.createElement("div");
+  panel.className = "paragraph-action-panel";
+
+  const analyzeButton = document.createElement("button");
+  analyzeButton.className = "paragraph-menu-button";
+  analyzeButton.type = "button";
+  analyzeButton.textContent = getAnalyzeButtonText(paragraph);
+  analyzeButton.disabled = !readingParagraph ||
+    Boolean(state.busyParagraphId) ||
+    state.autoAnalyze.running ||
+    Boolean(state.paragraphEditBusyId);
+  analyzeButton.addEventListener("click", () => {
+    menu.open = false;
+    analyzeParagraph(paragraph.id);
+  });
+
+  panel.append(analyzeButton, renderParagraphEditActions(paragraph, readingParagraph));
+  menu.append(summary, panel);
+  return menu;
+}
+
+function renderParagraphReadingPanel({ paragraph, type, title, text, bodyClassName = "markdown-body" }) {
+  const panel = document.createElement("section");
+  panel.className = `paragraph-reading-panel ${type}`;
+  const collapsed = isParagraphPanelCollapsed(paragraph.id, type);
+  panel.classList.toggle("is-collapsed", collapsed);
+
+  const header = document.createElement("div");
+  header.className = "paragraph-reading-panel-header";
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "paragraph-panel-toggle";
+  toggle.textContent = collapsed ? "展开" : "收起";
+  toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  toggle.addEventListener("click", () => {
+    setParagraphPanelCollapsed(paragraph.id, type, !isParagraphPanelCollapsed(paragraph.id, type));
+    renderPaperPreservingViewport();
+  });
+  header.append(heading, toggle);
+
+  const body = document.createElement("div");
+  body.className = `paragraph-reading-panel-body ${bodyClassName}`;
+  renderMarkdownBlock(body, text || "");
+
+  panel.append(header, body);
+  return panel;
+}
+
+function getParagraphPanelStateKey(paragraphId, type) {
+  return `${paragraphId || ""}:${type || ""}`;
+}
+
+function isParagraphPanelCollapsed(paragraphId, type) {
+  return Boolean(state.collapsedParagraphPanels.get(getParagraphPanelStateKey(paragraphId, type)));
+}
+
+function setParagraphPanelCollapsed(paragraphId, type, collapsed) {
+  const key = getParagraphPanelStateKey(paragraphId, type);
+  if (collapsed) {
+    state.collapsedParagraphPanels.set(key, true);
+  } else {
+    state.collapsedParagraphPanels.delete(key);
+  }
+}
+
 function normalizeOptionalPositivePageNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? Math.trunc(number) : null;
@@ -7402,7 +8738,7 @@ function renderParagraphEditActions(paragraph, readingParagraph) {
 function createParagraphEditButton(label, title, onClick, options = {}) {
   const button = document.createElement("button");
   button.type = "button";
-  button.className = `paragraph-edit-button${options.danger ? " danger" : ""}`;
+  button.className = `paragraph-menu-button paragraph-edit-button${options.danger ? " danger" : ""}`;
   button.textContent = label;
   button.title = title;
   button.disabled = Boolean(state.paragraphEditBusyId) || state.autoAnalyze.running || state.pipelineBusy;
@@ -7755,6 +9091,10 @@ function getAnalysisStatus(paragraph) {
     return "error";
   }
 
+  if (paragraph.weakAnalysis && hasCompleteAnalysis(paragraph)) {
+    return "weak";
+  }
+
   if (!needsAnalysis(paragraph)) {
     return "done";
   }
@@ -7776,6 +9116,9 @@ function getAnalysisStatusText(paragraph) {
   if (status === "error") {
     return "失败";
   }
+  if (status === "weak") {
+    return "需修复";
+  }
   if (status === "skipped") {
     return "已隐藏";
   }
@@ -7795,6 +9138,9 @@ function getAnalyzeButtonText(paragraph) {
   }
   if (status === "error") {
     return "重试";
+  }
+  if (status === "weak") {
+    return "修复";
   }
   if (status === "skipped") {
     return "已跳过";
@@ -8761,19 +10107,14 @@ const LATEX_COMMANDS = {
   softmax: "softmax",
 };
 
-function renderAnalysisBox(title, text) {
-  const box = document.createElement("section");
-  box.className = "analysis-box";
-
-  const heading = document.createElement("h3");
-  heading.textContent = title;
-
-  const body = document.createElement("div");
-  body.className = "markdown-body";
-  renderMarkdownBlock(body, text);
-
-  box.append(heading, body);
-  return box;
+function renderAnalysisBox(paragraph, type, title, text) {
+  return renderParagraphReadingPanel({
+    paragraph,
+    type,
+    title,
+    text,
+    bodyClassName: "markdown-body",
+  });
 }
 
 function renderChatBox(paragraph) {
@@ -8790,7 +10131,19 @@ function renderChatBox(paragraph) {
 
     const answer = document.createElement("div");
     answer.className = `chat-message from-ai${item.pending ? " is-pending" : ""}${item.error ? " is-error" : ""}`;
-    answer.append(label("AI"), paragraphText(item.answer));
+    answer.append(label(item.pending ? "AI 正在回答" : "AI"), paragraphText(item.answer));
+    if (item.error && item.id) {
+      const retryRow = document.createElement("div");
+      retryRow.className = "chat-message-actions";
+      const retryButton = document.createElement("button");
+      retryButton.type = "button";
+      retryButton.className = "secondary-button chat-retry-button";
+      retryButton.textContent = state.busyParagraphId === paragraph.id ? "等待中" : "重试";
+      retryButton.disabled = Boolean(state.busyParagraphId);
+      retryButton.addEventListener("click", () => retryParagraphQuestion(paragraph.id, item.id));
+      retryRow.append(retryButton);
+      answer.append(retryRow);
+    }
 
     thread.append(question, answer);
   }
@@ -8848,6 +10201,10 @@ function renderAnalysisDashboard() {
   const strategy = getVisibleAnalysisStrategy();
   const hasPaper = Boolean(state.paper);
   const activeOrKnownJob = Boolean(state.autoAnalyze.jobId && state.autoAnalyze.total);
+  if (!hasPaper && !activeOrKnownJob) {
+    els.analysisDashboard.replaceChildren();
+    return;
+  }
   const targetCount = activeOrKnownJob
     ? Math.max(0, state.autoAnalyze.total - state.autoAnalyze.completed - state.autoAnalyze.failed)
     : hasPaper ? getMissingAnalysisCount(state.paper) : 0;
@@ -9028,6 +10385,10 @@ function getClientAnalysisTargetParagraphs(payload = {}, paper = state.paper) {
 
   if (payload.rerunAll) {
     return readingParagraphs;
+  }
+
+  if (payload.repairWeakOnly) {
+    return readingParagraphs.filter((paragraph) => Boolean(paragraph.weakAnalysis) && hasCompleteAnalysis(paragraph));
   }
 
   return readingParagraphs.filter((paragraph) => needsAnalysis(paragraph));
@@ -9328,9 +10689,15 @@ function updateAutoButtons() {
   const busy = state.autoAnalyze.running || state.segmentationJob.running || state.pipelineBusy || state.maintenanceBusy || state.ocrJob.running;
   const ocrRequired = isOcrRequiredPaper(state.paper);
   const missingCount = state.paper ? getMissingAnalysisCount(state.paper) : 0;
+  const primaryAction = getPrimaryToolbarAction();
   els.qualityProfileButton.disabled = busy;
   els.fastProfileButton.disabled = busy;
-  els.autoAnalyzeButton.disabled = !state.paper || busy || ocrRequired;
+  els.primaryToolbarActionButton.textContent = primaryAction.label;
+  els.primaryToolbarActionButton.title = primaryAction.title;
+  els.primaryToolbarActionButton.disabled = primaryAction.disabled;
+  els.primaryToolbarActionButton.dataset.action = primaryAction.kind;
+  els.autoAnalyzeButton.disabled = !state.paper || busy || ocrRequired || missingCount === 0;
+  els.autoAnalyzeButton.textContent = missingCount ? "自动讲解" : "已讲解";
   els.resumeAnalyzeButton.disabled = !state.paper || busy || ocrRequired || missingCount === 0;
   els.resumeAnalyzeButton.textContent = missingCount
     ? `补跑未完成 ${missingCount}`
@@ -9358,6 +10725,7 @@ function updateAutoButtons() {
   els.stopAutoButton.textContent = state.segmentationJob.running ? "停止分段" : "停止";
   renderAnalysisDashboard();
   renderJobHistory();
+  renderTaskRail();
 }
 
 function clearAutoTimer() {
@@ -9372,6 +10740,7 @@ function setBusy(isBusy) {
   els.pdfInput.disabled = isBusy;
   els.aiSegmentInput.disabled = isBusy;
   els.autoAnalyzeInput.disabled = isBusy;
+  els.primaryToolbarActionButton.disabled = isBusy;
   els.rebuildAllVisualButton.disabled = isBusy || state.maintenanceBusy;
   els.rebuildVisualButton.disabled = isBusy || state.maintenanceBusy || !state.paper;
   els.repairSegmentationButton.disabled = isBusy || state.maintenanceBusy || !state.paper;
@@ -9379,8 +10748,11 @@ function setBusy(isBusy) {
 }
 
 function setStatus(text, isError = false) {
+  state.lastStatusText = isError ? normalizeDisplayError(text) : text;
+  state.lastStatusError = Boolean(isError);
   els.statusText.textContent = isError ? normalizeDisplayError(text) : text;
   els.statusText.classList.toggle("error-text", isError);
+  renderTaskRail();
 }
 
 function setModelStatus(text, isError = false) {

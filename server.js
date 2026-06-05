@@ -34,6 +34,10 @@ import {
   buildPaperPipelineQualityReport,
 } from "./lib/pipeline-quality.js";
 import {
+  verifyBatchAnalysisResults,
+  verifyParagraphAnalysis,
+} from "./lib/analysis-verifier.js";
+import {
   attachSegmentationPlanningSnapshot,
 } from "./lib/segmentation-planning-snapshot.js";
 import {
@@ -50,6 +54,19 @@ import {
   formatPaperMemoryForPrompt,
   normalizePaperMemory,
 } from "./lib/paper-memory.js";
+import {
+  attachSectionDigestsToPaper,
+  attachSectionDraftsToPaper,
+  buildDeepPaperPlanFromPaperMemory,
+  buildSectionDigestsForPaper,
+  buildSectionDraftsForPaper,
+  findSectionDigestForParagraph,
+  findSectionDraftForParagraph,
+  formatDeepPaperPlanForPrompt,
+  formatSectionDigestForPrompt,
+  formatSectionDraftForPrompt,
+  normalizeDeepPaperPlan,
+} from "./lib/deep-paper-plan.js";
 import {
   attachParagraphArtifactLinks,
   resolveParagraphRelatedArtifacts,
@@ -251,6 +268,7 @@ const ANALYSIS_CONCURRENCY = readIntegerEnv("PAPERLENS_ANALYSIS_CONCURRENCY", 3,
 const CLAUDE_AGENT_ANALYSIS_CONCURRENCY = readIntegerEnv("PAPERLENS_AGENT_ANALYSIS_CONCURRENCY", 2, 1, 3);
 const ANALYSIS_FAILED_RETRY_BATCH_SIZE = readIntegerEnv("PAPERLENS_ANALYSIS_FAILED_RETRY_BATCH_SIZE", 2, 1, 8);
 const ANALYSIS_TARGET_MINUTES = readIntegerEnv("PAPERLENS_ANALYSIS_TARGET_MINUTES", 20, 5, 240);
+const MAX_WEAK_ANALYSIS_REPAIR_PASSES = readIntegerEnv("PAPERLENS_WEAK_ANALYSIS_REPAIR_PASSES", 1, 0, 3);
 const KIMI_CODE_USE_CLAUDE_CLI = /^(1|true|yes|on)$/i
   .test(String(process.env.PAPERLENS_KIMI_CODE_USE_CLAUDE_CLI || ""));
 const KIMI_CODE_DIRECT_MAX_TOKENS = readIntegerEnv("PAPERLENS_KIMI_CODE_MAX_TOKENS", 12_000, 1024, 64_000);
@@ -259,7 +277,9 @@ const ANALYSIS_CACHE_MAX_ENTRIES = 800;
 const ANALYSIS_CONTEXT_TEXT_LIMIT = 900;
 const ANALYSIS_CONTEXT_TOTAL_LIMIT = 5200;
 const BATCH_ANALYSIS_CONTEXT_LIMIT = 1100;
-const BATCH_GLOBAL_CONTEXT_LIMIT = 900;
+const BATCH_GLOBAL_CONTEXT_LIMIT = 1400;
+const BATCH_SECTION_DIGEST_CONTEXT_LIMIT = 1800;
+const BATCH_SECTION_DRAFT_CONTEXT_LIMIT = 1600;
 const MAX_BATCH_SPLIT_DEPTH = 4;
 const SEGMENTATION_CONTEXT_TEXT_LIMIT = 1600;
 const SEGMENTATION_STRUCTURE_INPUT_LIMIT = 28_000;
@@ -1568,6 +1588,7 @@ async function handleCreateAnalysisJob(req, res, paperId) {
       ? [String(payload.paragraphId)]
       : [];
   const rerunAll = Boolean(payload.rerunAll);
+  const repairWeakOnly = Boolean(payload.repairWeakOnly);
   const forceSelected = Boolean(payload.force);
   await syncJobsFromDisk();
   const existing = findActiveAnalysisJobForPaper(paperId);
@@ -1587,7 +1608,7 @@ async function handleCreateAnalysisJob(req, res, paperId) {
   const segmentationAuditChanged = auditPaperSegmentationQuality(paper);
   const readingParagraphs = getReadingParagraphs(paper);
   const requestedSet = requestedIds.length ? new Set(requestedIds) : null;
-  const cacheEnabled = payload.useCache !== false && !forceSelected;
+  const cacheEnabled = payload.useCache !== false && !forceSelected && !repairWeakOnly;
   let cacheWarmups = 0;
   let cacheHits = 0;
   if (cacheEnabled) {
@@ -1599,6 +1620,10 @@ async function handleCreateAnalysisJob(req, res, paperId) {
     }
 
     const needsAnalysisNow = needsParagraphAnalysis(paragraph);
+    if (repairWeakOnly) {
+      return needsWeakAnalysisRepair(paragraph);
+    }
+
     if (cacheEnabled && (rerunAll || needsAnalysisNow) && hydrateParagraphAnalysisFromCache(paper, paragraph)) {
       cacheHits += 1;
       return false;
@@ -1617,7 +1642,9 @@ async function handleCreateAnalysisJob(req, res, paperId) {
       job: null,
       paper,
       settings: serializeClientSettings(settings),
-      message: cacheHits > 0 ? `已从缓存恢复 ${cacheHits} 段，没有待分析段落。` : "没有待分析段落。",
+      message: repairWeakOnly
+        ? "没有弱分析段落需要修复。"
+        : cacheHits > 0 ? `已从缓存恢复 ${cacheHits} 段，没有待分析段落。` : "没有待分析段落。",
     });
   }
   enforceAnalysisResourceLimits(resourceEstimate);
@@ -1629,6 +1656,10 @@ async function handleCreateAnalysisJob(req, res, paperId) {
     }
     paragraph.analysisStatus = "queued";
     paragraph.analysisError = "";
+    if (repairWeakOnly) {
+      paragraph.analysisRepairStatus = "queued";
+      paragraph.analysisRepairQueuedAt = new Date().toISOString();
+    }
   }
   await savePaper(paper);
 
@@ -1637,6 +1668,7 @@ async function handleCreateAnalysisJob(req, res, paperId) {
     paragraphIds: targets.map((paragraph) => paragraph.id),
     settings,
     rerunAll,
+    repairWeakOnly,
     cacheHits,
     resourceEstimate,
     budgetEstimate,
@@ -2784,6 +2816,7 @@ function createAnalysisJob({
   paragraphIds,
   settings,
   rerunAll,
+  repairWeakOnly = false,
   cacheHits = 0,
   resourceEstimate = null,
   budgetEstimate = null,
@@ -2798,8 +2831,11 @@ function createAnalysisJob({
     cancelRequested: false,
     rerunAll: Boolean(rerunAll),
     retryFailedOnly: false,
+    repairWeakOnly: Boolean(repairWeakOnly),
+    weakRepairActive: Boolean(repairWeakOnly),
+    weakRepairPasses: repairWeakOnly ? 1 : 0,
     cacheHits: Number(cacheHits || 0),
-    adaptiveBatchSize: null,
+    adaptiveBatchSize: repairWeakOnly ? getAnalysisProviderStrategy(settings, { repairWeakOnly: true }).failedRetryBatchSize : null,
     resourceEstimate: resourceEstimate || null,
     budgetEstimate: budgetEstimate || null,
     settings,
@@ -2807,6 +2843,8 @@ function createAnalysisJob({
       paragraphId,
       status: "queued",
       attempts: 0,
+      weakRepairAttempts: repairWeakOnly ? 1 : 0,
+      weakRepairReasons: [],
       error: "",
       startedAt: "",
       completedAt: "",
@@ -2963,6 +3001,9 @@ function serializeJob(job) {
     cancelRequested: Boolean(job.cancelRequested),
     rerunAll: Boolean(job.rerunAll),
     retryFailedOnly: Boolean(job.retryFailedOnly),
+    repairWeakOnly: Boolean(job.repairWeakOnly),
+    weakRepairActive: Boolean(job.weakRepairActive),
+    weakRepairPasses: Number(job.weakRepairPasses || 0),
     cacheHits: Number(job.cacheHits || 0),
     adaptiveBatchSize: Number(job.adaptiveBatchSize || 0),
     resourceEstimate: job.resourceEstimate || null,
@@ -3017,6 +3058,9 @@ function serializeJobSummary(job) {
     paperTitle: job.paperTitle,
     status: job.status,
     retryFailedOnly: Boolean(job.retryFailedOnly),
+    repairWeakOnly: Boolean(job.repairWeakOnly),
+    weakRepairActive: Boolean(job.weakRepairActive),
+    weakRepairPasses: Number(job.weakRepairPasses || 0),
     cacheHits: Number(job.cacheHits || 0),
     resourceEstimate: job.resourceEstimate || null,
     budgetEstimate: job.budgetEstimate || null,
@@ -3257,6 +3301,10 @@ async function runAnalysisJob(job, signal) {
       if (requeued) {
         continue;
       }
+      const weakRequeued = await queueWeakAnalysisRepairItems(job);
+      if (weakRequeued) {
+        continue;
+      }
       break;
     }
 
@@ -3272,6 +3320,7 @@ async function runAnalysisJob(job, signal) {
   const finishedAt = new Date().toISOString();
   job.currentParagraphId = "";
   job.currentBatchSize = 0;
+  job.weakRepairActive = false;
   job.updatedAt = finishedAt;
   if (job.cancelRequested || signal.aborted) {
     job.status = "canceled";
@@ -3280,6 +3329,58 @@ async function runAnalysisJob(job, signal) {
     job.status = "done";
     job.completedAt = finishedAt;
   }
+}
+
+async function queueWeakAnalysisRepairItems(job) {
+  if (job.type !== "analysis" ||
+    job.repairWeakOnly ||
+    MAX_WEAK_ANALYSIS_REPAIR_PASSES <= 0 ||
+    normalizeAnalysisProfile(job.settings?.analysisProfile) === "fast" ||
+    Number(job.weakRepairPasses || 0) >= MAX_WEAK_ANALYSIS_REPAIR_PASSES) {
+    return 0;
+  }
+
+  const paper = await loadPaper(job.paperId);
+  const paragraphById = new Map((paper.paragraphs || []).map((paragraph) => [paragraph.id, paragraph]));
+  const candidates = (job.items || [])
+    .filter((item) => item.status === "done")
+    .filter((item) => Number(item.weakRepairAttempts || 0) < MAX_WEAK_ANALYSIS_REPAIR_PASSES)
+    .filter((item) => needsWeakAnalysisRepair(paragraphById.get(item.paragraphId)));
+
+  if (!candidates.length) {
+    return 0;
+  }
+
+  const now = new Date().toISOString();
+  for (const item of candidates) {
+    const paragraph = paragraphById.get(item.paragraphId);
+    item.status = "queued";
+    item.attempts = 0;
+    item.error = "弱分析已自动加入修复队列。";
+    item.startedAt = "";
+    item.completedAt = "";
+    item.weakRepairAttempts = Number(item.weakRepairAttempts || 0) + 1;
+    item.weakRepairReasons = getWeakAnalysisRepairReasons(paragraph);
+  }
+
+  await updatePaperParagraphs(job.paperId, candidates.map((item) => item.paragraphId), (paragraph) => {
+    paragraph.analysisStatus = "queued";
+    paragraph.analysisError = "";
+    paragraph.analysisRepairStatus = "queued";
+    paragraph.analysisRepairReasons = getWeakAnalysisRepairReasons(paragraph);
+    paragraph.analysisRepairQueuedAt = now;
+  });
+
+  job.weakRepairActive = true;
+  job.weakRepairPasses = Number(job.weakRepairPasses || 0) + 1;
+  job.weakRepairQueuedAt = now;
+  job.adaptiveBatchSize = getAnalysisProviderStrategy(job.settings, { ...job, weakRepairActive: true }).failedRetryBatchSize;
+  job.currentParagraphId = "";
+  job.currentBatchSize = 0;
+  job.updatedAt = now;
+  recalculateJobProgress(job);
+  await persistJobs();
+  return candidates.length;
 }
 
 async function runSegmentationJob(job, signal) {
@@ -3851,8 +3952,13 @@ async function runAnalysisJobItem(job, item, signal) {
       return;
     }
 
-    await analyzeParagraphInPaper(paper, paragraph, resolveJobSettings(job.settings), { signal });
+    await analyzeParagraphInPaper(paper, paragraph, resolveJobSettings(job.settings), {
+      signal,
+      repairWeakOnly: Boolean(job.repairWeakOnly),
+      weakRepairActive: Boolean(job.weakRepairActive),
+    });
     await updatePaperParagraph(job.paperId, item.paragraphId, (target, targetPaper) => {
+      copyPaperDeepAnalysisFields(targetPaper, paper);
       copyParagraphAnalysisFields(target, paragraph);
       rememberParagraphAnalysisInCache(targetPaper, target);
     });
@@ -3970,14 +4076,14 @@ function getAnalysisBatchSize(settings = {}, job = null) {
     return configured;
   }
 
-  if (job.retryFailedOnly) {
+  if (job.retryFailedOnly || job.repairWeakOnly || job.weakRepairActive) {
     return Math.max(1, Math.min(strategy.failedRetryBatchSize, configured));
   }
 
   if (Number.isFinite(Number(job.adaptiveBatchSize)) && Number(job.adaptiveBatchSize) > 0) {
     return clampAdaptiveBatchSize(job.adaptiveBatchSize, {
       configuredBatchSize: configured,
-      retryFailedOnly: job.retryFailedOnly,
+      retryFailedOnly: job.retryFailedOnly || job.repairWeakOnly || job.weakRepairActive,
       minAdaptiveBatchSize: strategy.minAdaptiveBatchSize,
     });
   }
@@ -4069,7 +4175,7 @@ function getAnalysisProviderStrategy(settings = {}, job = null) {
   }
 
   applyAnalysisProfileToStrategy(strategy);
-  if (job?.retryFailedOnly) {
+  if (job?.retryFailedOnly || job?.repairWeakOnly || job?.weakRepairActive) {
     strategy.concurrency = Math.min(strategy.concurrency, 2);
   }
   return strategy;
@@ -4726,9 +4832,14 @@ async function runAnalysisJobBatch(job, items, signal, options = {}) {
     const paragraphs = readable.map(({ paragraph }) => paragraph);
     const readableItems = readable.map(({ item }) => item);
 
-    const analyzedParagraphs = await analyzeParagraphBatchInPaper(paper, paragraphs, resolveJobSettings(job.settings), { signal });
+    const analyzedParagraphs = await analyzeParagraphBatchInPaper(paper, paragraphs, resolveJobSettings(job.settings), {
+      signal,
+      repairWeakOnly: Boolean(job.repairWeakOnly),
+      weakRepairActive: Boolean(job.weakRepairActive),
+    });
     const analyzedById = new Map(analyzedParagraphs.map((paragraph) => [paragraph.id, paragraph]));
     const updatedParagraphs = await updatePaperParagraphs(job.paperId, readableItems.map((item) => item.paragraphId), (paragraph, targetPaper) => {
+      copyPaperDeepAnalysisFields(targetPaper, paper);
       const analyzed = analyzedById.get(paragraph.id);
       if (analyzed) {
         copyParagraphAnalysisFields(paragraph, analyzed);
@@ -4739,7 +4850,7 @@ async function runAnalysisJobBatch(job, items, signal, options = {}) {
       .filter((item) => !updatedParagraphs.some((paragraph) => paragraph.id === item.paragraphId))
       .map((item) => item.paragraphId);
     const incompleteWritebacks = updatedParagraphs
-      .filter((paragraph) => needsParagraphAnalysis(paragraph))
+      .filter((paragraph) => hasMissingAnalysisOutput(paragraph))
       .map((paragraph) => paragraph.id);
     if (missingWritebacks.length || incompleteWritebacks.length) {
       throw new Error(`Batch analysis writeback incomplete: ${[...missingWritebacks, ...incompleteWritebacks].join(", ")}`);
@@ -4785,7 +4896,7 @@ async function runAnalysisJobBatch(job, items, signal, options = {}) {
         nextBatchSize,
         currentAdaptiveBatchSize: job.adaptiveBatchSize || nextBatchSize,
         configuredBatchSize: strategy.batchSize,
-        retryFailedOnly: job.retryFailedOnly,
+        retryFailedOnly: job.retryFailedOnly || job.repairWeakOnly || job.weakRepairActive,
         failedRetryBatchSize: retryBatchSize,
         minAdaptiveBatchSize: strategy.minAdaptiveBatchSize,
       });
@@ -4856,7 +4967,7 @@ async function requeueDoneAnalysisItemsMissingPaperOutput(job) {
     const paragraph = paragraphById.get(item.paragraphId);
     return paragraph &&
       isReadingParagraphForPaper(paper, paragraph) &&
-      needsParagraphAnalysis(paragraph);
+      hasMissingAnalysisOutput(paragraph);
   });
   if (!staleDoneItems.length) {
     return 0;
@@ -5066,10 +5177,21 @@ function isVisiblePaperArtifact(artifact) {
 function needsParagraphAnalysis(paragraph) {
   return isReadingParagraph(paragraph) &&
     (
-      paragraph.analysisStatus === "error" ||
-      Boolean(paragraph.analysisError) ||
-      !hasCompleteParagraphAnalysis(paragraph)
+      hasMissingAnalysisOutput(paragraph) ||
+      Boolean(paragraph.weakAnalysis)
     );
+}
+
+function hasMissingAnalysisOutput(paragraph) {
+  return paragraph?.analysisStatus === "error" ||
+    Boolean(paragraph?.analysisError) ||
+    !hasCompleteParagraphAnalysis(paragraph);
+}
+
+function needsWeakAnalysisRepair(paragraph) {
+  return isReadingParagraph(paragraph) &&
+    Boolean(paragraph.weakAnalysis) &&
+    hasCompleteParagraphAnalysis(paragraph);
 }
 
 function hasCompleteParagraphAnalysis(paragraph) {
@@ -5095,6 +5217,14 @@ function resetParagraphAnalysis(paragraph) {
   paragraph.translation = "";
   paragraph.explanation = "";
   paragraph.keyTerms = [];
+  paragraph.analysisCoverage = null;
+  paragraph.analysisVerification = null;
+  paragraph.weakAnalysis = false;
+  paragraph.analysisWeakReasons = [];
+  paragraph.analysisRepairStatus = "";
+  paragraph.analysisRepairReasons = [];
+  paragraph.analysisRepairQueuedAt = "";
+  paragraph.analysisRepairCompletedAt = "";
   paragraph.analysisStatus = "pending";
   paragraph.analysisError = "";
   paragraph.analysisCacheHit = false;
@@ -5145,6 +5275,8 @@ function rememberParagraphAnalysisInCache(paper, paragraph) {
   const translation = String(paragraph.translation || "").trim();
   const explanation = String(paragraph.explanation || "").trim();
   const keyTerms = normalizeKeywordList(paragraph.keyTerms).slice(0, 16);
+  const analysisCoverage = normalizeAnalysisCoverage(paragraph.analysisCoverage);
+  const analysisVerification = normalizeAnalysisVerification(paragraph.analysisVerification);
   const payload = {
     key,
     sourceHash: getParagraphSourceHash(paragraph),
@@ -5153,6 +5285,10 @@ function rememberParagraphAnalysisInCache(paper, paragraph) {
     translation,
     explanation,
     keyTerms,
+    analysisCoverage,
+    analysisVerification,
+    weakAnalysis: Boolean(paragraph.weakAnalysis),
+    analysisWeakReasons: normalizeKeywordList(paragraph.analysisWeakReasons).slice(0, 8),
     updatedAt: new Date().toISOString(),
   };
 
@@ -5184,6 +5320,10 @@ function hydrateParagraphAnalysisFromCache(paper, paragraph) {
   paragraph.translation = entry.translation;
   paragraph.explanation = entry.explanation;
   paragraph.keyTerms = normalizeKeywordList(entry.keyTerms).slice(0, 16);
+  paragraph.analysisCoverage = normalizeAnalysisCoverage(entry.analysisCoverage);
+  paragraph.analysisVerification = normalizeAnalysisVerification(entry.analysisVerification);
+  paragraph.weakAnalysis = Boolean(entry.weakAnalysis || paragraph.analysisVerification?.weak);
+  paragraph.analysisWeakReasons = normalizeKeywordList(entry.analysisWeakReasons).slice(0, 8);
   paragraph.analysisStatus = "done";
   paragraph.analysisError = "";
   paragraph.analysisCacheHit = true;
@@ -5234,10 +5374,272 @@ function copyParagraphAnalysisFields(target, source) {
   target.translation = source.translation || "";
   target.explanation = source.explanation || "";
   target.keyTerms = Array.isArray(source.keyTerms) ? source.keyTerms : [];
+  target.analysisCoverage = normalizeAnalysisCoverage(source.analysisCoverage);
+  target.analysisVerification = normalizeAnalysisVerification(source.analysisVerification);
+  target.weakAnalysis = Boolean(source.weakAnalysis || target.analysisVerification?.weak);
+  target.analysisWeakReasons = normalizeKeywordList(source.analysisWeakReasons).slice(0, 8);
+  target.analysisRepairStatus = source.analysisRepairStatus || "";
+  target.analysisRepairReasons = normalizeKeywordList(source.analysisRepairReasons).slice(0, 8);
+  target.analysisRepairQueuedAt = source.analysisRepairQueuedAt || "";
+  target.analysisRepairCompletedAt = source.analysisRepairCompletedAt || "";
+  if (source.sectionDigestId) {
+    target.sectionDigestId = source.sectionDigestId;
+  }
+  if (source.sectionDraftId) {
+    target.sectionDraftId = source.sectionDraftId;
+  }
   target.analysisStatus = source.analysisStatus || "done";
   target.analysisError = source.analysisError || "";
   target.analysisCacheHit = Boolean(source.analysisCacheHit);
   target.analysisCachedAt = source.analysisCachedAt || "";
+}
+
+function copyPaperDeepAnalysisFields(targetPaper, sourcePaper) {
+  if (!targetPaper || !sourcePaper) {
+    return;
+  }
+  if (sourcePaper.deepPaperPlan) {
+    targetPaper.deepPaperPlan = clonePlainJson(sourcePaper.deepPaperPlan);
+  }
+  if (Array.isArray(sourcePaper.sectionDigests)) {
+    targetPaper.sectionDigests = clonePlainJson(sourcePaper.sectionDigests);
+  }
+  if (sourcePaper.sectionDigestFingerprint) {
+    targetPaper.sectionDigestFingerprint = sourcePaper.sectionDigestFingerprint;
+  }
+  if (sourcePaper.sectionDigestGeneratedAt) {
+    targetPaper.sectionDigestGeneratedAt = sourcePaper.sectionDigestGeneratedAt;
+  }
+  if (sourcePaper.sectionDigestSource) {
+    targetPaper.sectionDigestSource = sourcePaper.sectionDigestSource;
+  }
+  if (Array.isArray(sourcePaper.sectionDrafts)) {
+    targetPaper.sectionDrafts = clonePlainJson(sourcePaper.sectionDrafts);
+  }
+  if (sourcePaper.sectionDraftFingerprint) {
+    targetPaper.sectionDraftFingerprint = sourcePaper.sectionDraftFingerprint;
+  }
+  if (sourcePaper.sectionDraftGeneratedAt) {
+    targetPaper.sectionDraftGeneratedAt = sourcePaper.sectionDraftGeneratedAt;
+  }
+  if (sourcePaper.sectionDraftSource) {
+    targetPaper.sectionDraftSource = sourcePaper.sectionDraftSource;
+  }
+  if (sourcePaper.deepAnalysisContext) {
+    targetPaper.deepAnalysisContext = clonePlainJson(sourcePaper.deepAnalysisContext);
+  }
+}
+
+function prepareDeepPaperAnalysisContext(paper, settings = {}) {
+  if (!shouldUseDeepPaperAnalysisContext(settings)) {
+    return null;
+  }
+
+  const plan = ensureDeepPaperPlanForAnalysis(paper, settings);
+  if (!plan || plan.status === "missing") {
+    return null;
+  }
+
+  paper.deepPaperPlan = plan;
+  const proposedDigests = buildSectionDigestsForPaper(paper, plan, { source: "analysis" });
+  const proposedAttachment = attachSectionDigestsToPaper(paper, proposedDigests, { mutate: false });
+  const existingDigests = Array.isArray(paper.sectionDigests) ? paper.sectionDigests : [];
+  const existingFingerprint = normalizeParagraph(paper.sectionDigestFingerprint || "");
+  const canReuseExisting = existingDigests.length > 0 &&
+    existingFingerprint &&
+    existingFingerprint === proposedAttachment.fingerprint;
+  const attached = canReuseExisting
+    ? attachSectionDigestsToPaper(paper, existingDigests)
+    : attachSectionDigestsToPaper(paper, proposedDigests);
+  const now = new Date().toISOString();
+
+  paper.sectionDigestFingerprint = attached.fingerprint;
+  paper.sectionDigestGeneratedAt = canReuseExisting
+    ? paper.sectionDigestGeneratedAt || now
+    : now;
+  paper.sectionDigestSource = canReuseExisting ? "reused" : "generated";
+
+  const proposedDrafts = buildSectionDraftsForPaper(paper, attached.sectionDigests, plan, { source: "section-digest" });
+  const proposedDraftAttachment = attachSectionDraftsToPaper(paper, proposedDrafts, plan, { mutate: false });
+  const existingDrafts = Array.isArray(paper.sectionDrafts) ? paper.sectionDrafts : [];
+  const existingDraftFingerprint = normalizeParagraph(paper.sectionDraftFingerprint || "");
+  const canReuseExistingDrafts = existingDrafts.length > 0 &&
+    existingDraftFingerprint &&
+    existingDraftFingerprint === proposedDraftAttachment.fingerprint;
+  const draftAttached = canReuseExistingDrafts
+    ? attachSectionDraftsToPaper(paper, existingDrafts, plan)
+    : attachSectionDraftsToPaper(paper, proposedDrafts, plan);
+
+  paper.sectionDraftFingerprint = draftAttached.fingerprint;
+  paper.sectionDraftGeneratedAt = canReuseExistingDrafts
+    ? paper.sectionDraftGeneratedAt || now
+    : now;
+  paper.sectionDraftSource = canReuseExistingDrafts ? "reused" : "generated";
+  paper.deepAnalysisContext = {
+    version: 1,
+    enabled: true,
+    source: paper.sectionDraftSource === "generated" ? "section-draft" : paper.sectionDigestSource,
+    planFingerprint: plan.fingerprint || "",
+    sectionDigestFingerprint: attached.fingerprint,
+    sectionDraftFingerprint: draftAttached.fingerprint,
+    sectionDigests: attached.sectionDigests.length,
+    sectionDrafts: draftAttached.sectionDrafts.length,
+    updatedAt: now,
+  };
+
+  return {
+    plan,
+    sectionDigests: attached.sectionDigests,
+    sectionDrafts: draftAttached.sectionDrafts,
+    paragraphSectionDigestMap: attached.paragraphSectionDigestMap,
+    paragraphSectionDraftMap: draftAttached.paragraphSectionDraftMap,
+    fingerprint: draftAttached.fingerprint,
+    reused: canReuseExisting && canReuseExistingDrafts,
+  };
+}
+
+function ensureDeepPaperPlanForAnalysis(paper, settings = {}) {
+  const existingPlan = paper?.deepPaperPlan && typeof paper.deepPaperPlan === "object"
+    ? normalizeDeepPaperPlan(paper.deepPaperPlan, paper, paper.structureMap, paper.paperMemory, {
+        source: paper.deepPaperPlan.source || "stored-deep-plan",
+        generatedAt: paper.deepPaperPlan.generatedAt || new Date().toISOString(),
+      })
+    : null;
+  if (existingPlan && existingPlan.status !== "missing" && existingPlan.sectionPlans.length) {
+    return existingPlan;
+  }
+
+  return buildDeepPaperPlanFromPaperMemory(paper, paper.structureMap, paper.paperMemory, {
+    generatedAt: existingPlan?.generatedAt || new Date().toISOString(),
+    fallbackReason: paper.paperMemory
+      ? ""
+      : "No Paper Memory available; built from sections and structure map.",
+  });
+}
+
+function shouldUseDeepPaperAnalysisContext(settings = {}) {
+  return normalizeAnalysisProfile(settings.analysisProfile) !== "fast";
+}
+
+function normalizeAnalysisCoverage(value = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return {
+    translatedAllSentences: value.translatedAllSentences !== false,
+    mentionsSectionRole: value.mentionsSectionRole !== false,
+    mentionsRelevantFormulaOrFigure: value.mentionsRelevantFormulaOrFigure !== false,
+    confidence: normalizeCoverageConfidence(value.confidence),
+    notes: normalizeKeywordList(value.notes || value.warnings || value.issues).slice(0, 6),
+  };
+}
+
+function normalizeCoverageConfidence(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return null;
+  }
+  if (number > 1 && number <= 100) {
+    return Math.round(number) / 100;
+  }
+  return Math.round(Math.max(0, Math.min(1, number)) * 1000) / 1000;
+}
+
+function normalizeAnalysisVerification(value = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const issues = Array.isArray(value.issues)
+    ? value.issues
+      .filter((issue) => issue && typeof issue === "object")
+      .map((issue) => ({
+        severity: String(issue.severity || "warn"),
+        code: String(issue.code || "analysis-verification"),
+        message: String(issue.message || "").trim(),
+        reference: issue.reference && typeof issue.reference === "object" ? issue.reference : undefined,
+        term: issue.term ? String(issue.term) : undefined,
+        expected: issue.expected ? String(issue.expected) : undefined,
+      }))
+      .filter((issue) => issue.message)
+      .slice(0, 20)
+    : [];
+  return {
+    version: Number(value.version || 1),
+    paragraphId: String(value.paragraphId || ""),
+    status: String(value.status || (issues.length ? "warn" : "ok")),
+    weak: Boolean(value.weak || issues.some((issue) => issue.severity === "error" || issue.severity === "warn")),
+    issues,
+    metrics: value.metrics && typeof value.metrics === "object" && !Array.isArray(value.metrics)
+      ? value.metrics
+      : {},
+  };
+}
+
+function applyAnalysisVerification(paper, paragraph, analysis = {}, options = {}) {
+  const verification = verifyParagraphAnalysis(paper, paragraph, {
+    ...analysis,
+    translation: analysis.translation ?? paragraph.translation,
+    explanation: analysis.explanation ?? paragraph.explanation,
+    keyTerms: analysis.keyTerms ?? paragraph.keyTerms,
+    coverage: analysis.coverage ?? paragraph.analysisCoverage,
+  }, options);
+  paragraph.analysisVerification = verification;
+  paragraph.weakAnalysis = Boolean(verification.weak);
+  paragraph.analysisWeakReasons = verification.issues
+    .filter((issue) => issue.severity === "error" || issue.severity === "warn")
+    .map((issue) => issue.message)
+    .slice(0, 8);
+  return verification;
+}
+
+function buildWeakAnalysisRepairContext(paragraph) {
+  const reasons = getWeakAnalysisRepairReasons(paragraph);
+  const lines = [];
+  if (reasons.length) {
+    lines.push(...reasons.map((reason, index) => `${index + 1}. ${reason}`));
+  }
+
+  const previousTranslation = truncateText(normalizeParagraph(paragraph.translation || ""), 520);
+  const previousExplanation = truncateText(normalizeParagraph(paragraph.explanation || ""), 520);
+  if (previousTranslation) {
+    lines.push(`上一版翻译: ${previousTranslation}`);
+  }
+  if (previousExplanation) {
+    lines.push(`上一版讲解: ${previousExplanation}`);
+  }
+
+  return lines.join("\n");
+}
+
+function getWeakAnalysisRepairReasons(paragraph = {}) {
+  const reasons = [];
+  for (const reason of normalizeKeywordList(paragraph.analysisWeakReasons).slice(0, 8)) {
+    pushUnique(reasons, reason);
+  }
+  for (const issue of Array.isArray(paragraph.analysisVerification?.issues)
+    ? paragraph.analysisVerification.issues
+    : []) {
+    if (issue?.message) {
+      pushUnique(reasons, String(issue.message));
+    }
+  }
+  if (!reasons.length && paragraph.weakAnalysis) {
+    reasons.push("Verifier 标记该段为 weakAnalysis，请补全翻译、章节作用、关键术语和图表/公式关系。");
+  }
+  return reasons.slice(0, 10);
+}
+
+function finalizeWeakAnalysisRepairState(paragraph, options = {}) {
+  if (!options.repairWeakOnly && !options.weakRepairActive) {
+    return;
+  }
+  paragraph.analysisRepairStatus = paragraph.weakAnalysis ? "weak-after-repair" : "repaired";
+  paragraph.analysisRepairCompletedAt = new Date().toISOString();
+  paragraph.analysisRepairReasons = getWeakAnalysisRepairReasons(paragraph);
+}
+
+function clonePlainJson(value) {
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
 
 function sleep(ms) {
@@ -5271,7 +5673,8 @@ async function handleAnalyze(req, res) {
 }
 
 async function analyzeParagraphInPaper(paper, paragraph, settings, options = {}) {
-  const content = await callModel(settings, buildParagraphAnalysisMessages(paper, paragraph, settings), {
+  prepareDeepPaperAnalysisContext(paper, settings);
+  const content = await callModel(settings, buildParagraphAnalysisMessages(paper, paragraph, settings, options), {
     signal: options.signal,
   });
   const parsed = parseModelJson(content);
@@ -5279,6 +5682,11 @@ async function analyzeParagraphInPaper(paper, paragraph, settings, options = {})
   paragraph.translation = parsed.translation || "";
   paragraph.explanation = parsed.explanation || content;
   paragraph.keyTerms = Array.isArray(parsed.keyTerms) ? parsed.keyTerms : [];
+  paragraph.analysisCoverage = normalizeAnalysisCoverage(parsed.coverage);
+  applyAnalysisVerification(paper, paragraph, parsed, {
+    profile: normalizeAnalysisProfile(settings.analysisProfile),
+  });
+  finalizeWeakAnalysisRepairState(paragraph, options);
   paragraph.analysisStatus = "done";
   paragraph.analysisError = "";
   paragraph.updatedAt = new Date().toISOString();
@@ -5287,24 +5695,40 @@ async function analyzeParagraphInPaper(paper, paragraph, settings, options = {})
 }
 
 async function analyzeParagraphBatchInPaper(paper, paragraphs, settings, options = {}) {
-  const content = await callModel(settings, buildParagraphBatchAnalysisMessages(paper, paragraphs, settings), {
+  prepareDeepPaperAnalysisContext(paper, settings);
+  const content = await callModel(settings, buildParagraphBatchAnalysisMessages(paper, paragraphs, settings, options), {
     signal: options.signal,
     maxTokens: Math.min(18000, Math.max(3600, 1800 + paragraphs.length * 1600)),
     timeoutMs: getBatchAnalysisTimeoutMs(paragraphs.length, settings),
   });
   const parsed = parseBatchAnalysisResult(content);
+  const batchVerification = verifyBatchAnalysisResults(paper, paragraphs, parsed, {
+    profile: normalizeAnalysisProfile(settings.analysisProfile),
+  });
+  const verificationById = new Map(batchVerification.itemVerifications
+    .map((item) => [item.paragraphId, item]));
   const results = new Map(parsed.map((item) => [String(item.paragraphId || item.id || ""), item]));
-  const missing = [];
+  const missing = [...batchVerification.missingParagraphIds];
   for (const paragraph of paragraphs) {
     const result = results.get(paragraph.id);
     if (!result) {
-      missing.push(paragraph.id);
       continue;
     }
 
     paragraph.translation = result.translation || "";
     paragraph.explanation = result.explanation || "";
     paragraph.keyTerms = normalizeKeywordList(result.keyTerms || result.keywords).slice(0, 16);
+    paragraph.analysisCoverage = normalizeAnalysisCoverage(result.coverage);
+    paragraph.analysisVerification = normalizeAnalysisVerification(verificationById.get(paragraph.id)) ||
+      applyAnalysisVerification(paper, paragraph, result, {
+        profile: normalizeAnalysisProfile(settings.analysisProfile),
+      });
+    paragraph.weakAnalysis = Boolean(paragraph.analysisVerification?.weak);
+    paragraph.analysisWeakReasons = (paragraph.analysisVerification?.issues || [])
+      .filter((issue) => issue.severity === "error" || issue.severity === "warn")
+      .map((issue) => issue.message)
+      .slice(0, 8);
+    finalizeWeakAnalysisRepairState(paragraph, options);
     paragraph.analysisStatus = "done";
     paragraph.analysisError = "";
     paragraph.updatedAt = new Date().toISOString();
@@ -5357,10 +5781,12 @@ function getAnalysisProfileInstruction(settings = {}) {
   return "精读模式：translation 忠实完整翻译当前原文，保留必要英文术语和 LaTeX；explanation 需要 3-5 句中文，约 180-360 个汉字。";
 }
 
-function buildParagraphAnalysisMessages(paper, paragraph, settings = {}) {
+function buildParagraphAnalysisMessages(paper, paragraph, settings = {}, options = {}) {
   const section = (paper.sections || []).find((item) => item.id === paragraph.sectionId);
   const analysisContext = buildParagraphAnalysisContext(paper, paragraph, settings);
   const profileInstruction = getAnalysisProfileInstruction(settings);
+  const repairMode = Boolean(options.repairWeakOnly || options.weakRepairActive);
+  const repairContext = repairMode ? buildWeakAnalysisRepairContext(paragraph) : "";
   return [
     {
       role: "system",
@@ -5381,22 +5807,30 @@ function buildParagraphAnalysisMessages(paper, paragraph, settings = {}) {
         "原文:",
         paragraph.sourceText,
         "",
+        repairMode ? "弱分析修复要求:" : "",
+        repairMode ? repairContext || "修复上一次分析中过短、漏引用、术语漂移或讲解空泛的问题。" : "",
+        repairMode ? "" : "",
         profileInstruction,
+        repairMode ? "请在保留忠实翻译的基础上，重点修复上述弱点；不要因为是修复任务就压缩输出。" : "",
         "",
         "输出 JSON 格式:",
         "{",
         '  "translation": "忠实中文翻译，保留必要英文术语",',
         '  "explanation": "面向读者的中文讲解，说明这段在论文中的作用、关键概念和阅读难点",',
-        '  "keyTerms": ["术语1", "术语2"]',
+        '  "keyTerms": ["术语1", "术语2"],',
+        '  "coverage": { "translatedAllSentences": true, "mentionsSectionRole": true, "mentionsRelevantFormulaOrFigure": true, "confidence": 0.9 }',
         "}",
       ].join("\n"),
     },
   ];
 }
 
-function buildParagraphBatchAnalysisMessages(paper, paragraphs, settings = {}) {
+function buildParagraphBatchAnalysisMessages(paper, paragraphs, settings = {}, options = {}) {
   const globalContext = buildPaperProfileContext(paper, settings) || "无。";
+  const sectionDigestContext = buildBatchSectionDigestContext(paper, paragraphs, settings) || "无。";
+  const sectionDraftContext = buildBatchSectionDraftContext(paper, paragraphs, settings) || "无。";
   const profileInstruction = getAnalysisProfileInstruction(settings);
+  const repairMode = Boolean(options.repairWeakOnly || options.weakRepairActive);
   return [
     {
       role: "system",
@@ -5407,6 +5841,7 @@ function buildParagraphBatchAnalysisMessages(paper, paragraphs, settings = {}) {
       role: "user",
       content: [
         "请批量精读下面这些论文段落。",
+        repairMode ? "当前是弱分析修复任务：只处理被 verifier 标记为 weak 的段落，必须逐条修复每段列出的弱点。" : "",
         profileInstruction,
         "explanation 至少覆盖：这段在说什么、它在论文论证中的作用、关键概念/假设/公式/图表关系、读者容易误解或需要注意的点。简单过渡段可以略短，但不能只写一句泛泛总结。",
         "不要把上下文翻译进结果；上下文只用于消解术语、承接关系和引用。",
@@ -5415,13 +5850,19 @@ function buildParagraphBatchAnalysisMessages(paper, paragraphs, settings = {}) {
         "全局上下文:",
         truncateText(globalContext, BATCH_GLOBAL_CONTEXT_LIMIT),
         "",
+        "本批章节摘要:",
+        truncateText(sectionDigestContext, BATCH_SECTION_DIGEST_CONTEXT_LIMIT),
+        "",
+        "本批整节草稿（仅作上下文，不替代逐段输出）:",
+        truncateText(sectionDraftContext, BATCH_SECTION_DRAFT_CONTEXT_LIMIT),
+        "",
         "段落列表:",
-        ...paragraphs.map((paragraph) => formatBatchAnalysisParagraph(paper, paragraph)),
+        ...paragraphs.map((paragraph) => formatBatchAnalysisParagraph(paper, paragraph, { repairMode })),
         "",
         "输出 JSON 格式:",
         "{",
         '  "items": [',
-        '    { "paragraphId": "para_xxx", "translation": "忠实中文翻译，保留必要英文术语和 LaTeX", "explanation": "3-5 句中文精读讲解，说明含义、作用、关键难点和上下文关系", "keyTerms": ["术语1", "术语2"] }',
+        '    { "paragraphId": "para_xxx", "translation": "忠实中文翻译，保留必要英文术语和 LaTeX", "explanation": "3-5 句中文精读讲解，说明含义、作用、关键难点和上下文关系", "keyTerms": ["术语1", "术语2"], "coverage": { "translatedAllSentences": true, "mentionsSectionRole": true, "mentionsRelevantFormulaOrFigure": true, "confidence": 0.9 } }',
         "  ]",
         "}",
       ].join("\n"),
@@ -5429,8 +5870,10 @@ function buildParagraphBatchAnalysisMessages(paper, paragraphs, settings = {}) {
   ];
 }
 
-function formatBatchAnalysisParagraph(paper, paragraph) {
+function formatBatchAnalysisParagraph(paper, paragraph, options = {}) {
   const section = (paper.sections || []).find((item) => item.id === paragraph.sectionId);
+  const digest = findSectionDigestForParagraph(paper.sectionDigests, paragraph);
+  const draft = findSectionDraftForParagraph(paper.sectionDrafts, paragraph);
   const pageLabel = paragraph.pageEndNumber && paragraph.pageEndNumber !== paragraph.pageNumber
     ? `${paragraph.pageNumber}-${paragraph.pageEndNumber}`
     : `${paragraph.pageNumber}`;
@@ -5442,13 +5885,17 @@ function formatBatchAnalysisParagraph(paper, paragraph) {
   return [
     `<paragraph id="${paragraph.id}">`,
     `章节: ${section?.title || "未知章节"}`,
+    digest ? `章节摘要ID: ${digest.id}` : "",
+    draft ? `整节草稿ID: ${draft.id}` : "",
     `页码: ${pageLabel}`,
+    options.repairMode ? "弱分析修复要求:" : "",
+    options.repairMode ? buildWeakAnalysisRepairContext(paragraph) || "修复上一次分析中过短、漏引用、术语漂移或讲解空泛的问题。" : "",
     "上下文:",
     context || "无额外上下文。",
     "原文:",
     paragraph.sourceText,
     "</paragraph>",
-  ].join("\n");
+  ].filter((line) => line !== "").join("\n");
 }
 
 function buildFastBatchAnalysisContext(paper, paragraph) {
@@ -5535,6 +5982,8 @@ function getArtifactContextLabel(artifact) {
 function buildParagraphAnalysisContext(paper, paragraph, settings = {}) {
   const blocks = [
     buildPaperProfileContext(paper, settings),
+    buildParagraphSectionDigestContext(paper, paragraph, settings),
+    buildParagraphSectionDraftContext(paper, paragraph, settings),
     buildSectionWindowContext(paper, paragraph),
     buildNearbyParagraphContext(paper, paragraph),
     buildReferenceWindowContext(paper, paragraph),
@@ -5549,6 +5998,13 @@ function buildPaperProfileContext(paper, settings = {}) {
   const profile = paper.contextProfile || {};
   const structure = paper.structureMap || {};
   const lines = [];
+  if (shouldUseDeepPaperAnalysisContext(settings) && paper.deepPaperPlan) {
+    const deepPlan = formatDeepPaperPlanForPrompt(paper.deepPaperPlan, { limit: 1500 });
+    if (deepPlan && deepPlan !== "None.") {
+      lines.push(`全文精读蓝图:\n${deepPlan}`);
+    }
+  }
+
   if (structure.summary) {
     lines.push(`全文结构: ${truncateText(structure.summary, 420)}`);
   }
@@ -5574,6 +6030,76 @@ function buildPaperProfileContext(paper, settings = {}) {
   }
 
   return lines.length ? lines.join("\n") : "";
+}
+
+function buildBatchSectionDigestContext(paper, paragraphs, settings = {}) {
+  if (!shouldUseDeepPaperAnalysisContext(settings) || !Array.isArray(paper.sectionDigests)) {
+    return "";
+  }
+
+  const selected = [];
+  for (const paragraph of paragraphs || []) {
+    const digest = findSectionDigestForParagraph(paper.sectionDigests, paragraph);
+    if (!digest || selected.some((item) => item.id === digest.id)) {
+      continue;
+    }
+    selected.push(digest);
+  }
+
+  if (!selected.length) {
+    return "";
+  }
+
+  return selected
+    .slice(0, 4)
+    .map((digest) => formatSectionDigestForPrompt(digest, { limit: 900 }))
+    .join("\n\n---\n\n");
+}
+
+function buildBatchSectionDraftContext(paper, paragraphs, settings = {}) {
+  if (!shouldUseDeepPaperAnalysisContext(settings) || !Array.isArray(paper.sectionDrafts)) {
+    return "";
+  }
+
+  const selected = [];
+  for (const paragraph of paragraphs || []) {
+    const draft = findSectionDraftForParagraph(paper.sectionDrafts, paragraph);
+    if (!draft || selected.some((item) => item.id === draft.id)) {
+      continue;
+    }
+    selected.push(draft);
+  }
+
+  if (!selected.length) {
+    return "";
+  }
+
+  return selected
+    .slice(0, 3)
+    .map((draft) => formatSectionDraftForPrompt(draft, { limit: 900 }))
+    .join("\n\n---\n\n");
+}
+
+function buildParagraphSectionDigestContext(paper, paragraph, settings = {}) {
+  if (!shouldUseDeepPaperAnalysisContext(settings) || !Array.isArray(paper.sectionDigests)) {
+    return "";
+  }
+  const digest = findSectionDigestForParagraph(paper.sectionDigests, paragraph);
+  if (!digest) {
+    return "";
+  }
+  return `当前章节摘要:\n${formatSectionDigestForPrompt(digest, { limit: 1200 })}`;
+}
+
+function buildParagraphSectionDraftContext(paper, paragraph, settings = {}) {
+  if (!shouldUseDeepPaperAnalysisContext(settings) || !Array.isArray(paper.sectionDrafts)) {
+    return "";
+  }
+  const draft = findSectionDraftForParagraph(paper.sectionDrafts, paragraph);
+  if (!draft) {
+    return "";
+  }
+  return `当前整节草稿（仅上下文）:\n${formatSectionDraftForPrompt(draft, { limit: 1200 })}`;
 }
 
 function formatStructureSectionsForContext(sections) {
@@ -6372,7 +6898,7 @@ function createRecoverableFilteredParagraph(order, page, block, sourceText, stru
   const sourceRichText = buildParagraphSourceRichText(sourceText, block);
   const filteredReason = String(block.filteredReason || "filtered");
   return {
-    id: `para_${order}_${randomUUID().slice(0, 8)}`,
+    id: createRecoverableFilteredParagraphId(pageNumber, block, sourceText, filteredReason, sourceBox),
     kind: "paragraph",
     order,
     pageNumber,
@@ -6408,6 +6934,29 @@ function createRecoverableFilteredParagraph(order, page, block, sourceText, stru
       source: "segmentation-input-filter",
     },
   };
+}
+
+function createRecoverableFilteredParagraphId(pageNumber, block, sourceText, filteredReason, sourceBox = null) {
+  const originalIndex = Number.isFinite(Number(block?.originalIndex)) ? Math.trunc(Number(block.originalIndex)) : "";
+  const box = sourceBox || pickBlockBox(block);
+  const boxSignature = box
+    ? [
+      roundCoordinate(box.x),
+      roundCoordinate(box.y),
+      roundCoordinate(box.width),
+      roundCoordinate(box.height),
+    ].join(",")
+    : "";
+  const textSignature = normalizeRecoverableCoverageText(sourceText).slice(0, 520);
+  const seed = [
+    "recoverable-filtered",
+    Number(pageNumber || 0),
+    originalIndex,
+    String(filteredReason || ""),
+    boxSignature,
+    textSignature,
+  ].join("|");
+  return `para_rf_${createHash("sha1").update(seed).digest("hex").slice(0, 12)}`;
 }
 
 function isRecoverableFilteredBlockCovered(paragraphs, block, sourceText) {
