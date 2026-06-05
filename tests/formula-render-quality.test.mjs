@@ -5,6 +5,7 @@ import {
   FORMULA_RENDER_MODE_LATEX,
   applyFormulaRenderFields,
   buildFormulaRenderFields,
+  getFormulaAuxiliaryTextLabel,
   shouldExportFormulaLatexText,
   shouldExportFormulaTextAsAuxiliary,
 } from "../lib/formula-render-quality.js";
@@ -43,6 +44,45 @@ assert.equal(brokenFields.renderMode, FORMULA_RENDER_MODE_IMAGE_LATEX);
 assert.equal(brokenFields.formulaLatexRisk, "broken-pdf-spacing");
 assert.equal(shouldExportFormulaLatexText(brokenPdfFormula), false);
 assert.equal(shouldExportFormulaTextAsAuxiliary(brokenPdfFormula), true);
+assert.equal(getFormulaAuxiliaryTextLabel(brokenPdfFormula), "识别文本（低置信，仅供核对）");
+
+const mediumPdfFormulaWithCrop = {
+  id: "eq-medium-crop",
+  type: "formula",
+  visualType: "formula",
+  text: "WQL = 1 WQLαj. j=1",
+  imagePath: "/assets/page.png",
+  crop,
+};
+const mediumCropFields = buildFormulaRenderFields(mediumPdfFormulaWithCrop);
+assert.equal(mediumCropFields.latexConfidence, "medium");
+assert.equal(mediumCropFields.renderMode, FORMULA_RENDER_MODE_IMAGE_LATEX);
+assert.equal(shouldExportFormulaLatexText(mediumPdfFormulaWithCrop), false);
+assert.equal(shouldExportFormulaTextAsAuxiliary(mediumPdfFormulaWithCrop), true);
+assert.equal(getFormulaAuxiliaryTextLabel(mediumPdfFormulaWithCrop), "识别文本（图片优先，供核对）");
+
+const mediumPdfFormulaWithoutCrop = {
+  id: "eq-medium-no-crop",
+  type: "formula",
+  visualType: "formula",
+  text: "WQL = 1 WQLαj. j=1",
+};
+const mediumNoCropFields = buildFormulaRenderFields(mediumPdfFormulaWithoutCrop);
+assert.equal(mediumNoCropFields.latexConfidence, "medium");
+assert.equal(mediumNoCropFields.renderMode, FORMULA_RENDER_MODE_LATEX);
+
+const manualFormulaWithCrop = {
+  id: "eq-manual",
+  type: "formula",
+  visualType: "formula",
+  text: "WQL = \\sum_j WQL_{\\alpha_j}",
+  latexSource: "manual",
+  imagePath: "/assets/page.png",
+  crop,
+};
+const manualFields = buildFormulaRenderFields(manualFormulaWithCrop);
+assert.equal(manualFields.latexConfidence, "high");
+assert.equal(manualFields.renderMode, FORMULA_RENDER_MODE_LATEX);
 
 const modelOnly = {
   id: "eq-model",

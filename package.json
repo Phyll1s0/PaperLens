@@ -13,6 +13,8 @@
     "health": "node scripts/healthcheck.mjs",
     "storage:migrate:sqlite": "node scripts/migrate-json-to-sqlite.mjs",
     "storage:export:json": "node scripts/export-sqlite-to-json.mjs",
+    "data:export": "node scripts/export-portable-data.mjs",
+    "data:import": "node scripts/import-portable-data.mjs",
     "docker:up": "docker compose up -d --build",
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f paperlens",

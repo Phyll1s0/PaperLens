@@ -110,17 +110,6 @@
           <p id="statusText" class="status-text">等待上传</p>
         </section>
 
-        <section class="panel">
-          <h2>最近</h2>
-          <input id="librarySearchInput" type="search" placeholder="搜索论文库">
-          <label class="check-row">
-            <input id="favoriteOnlyInput" type="checkbox">
-            只看收藏
-          </label>
-          <button id="rebuildAllVisualButton" class="secondary-button full-width" type="button" title="批量重建本地论文库的图片、公式和代码裁剪">重建全部图表</button>
-          <div id="paperList" class="paper-list"></div>
-        </section>
-
         <details id="serviceStatusPanel" class="service-status-panel">
           <summary><span id="serviceStatusSummary">服务状态</span></summary>
           <div id="serviceStatusText" class="service-status" aria-live="polite"></div>
@@ -167,6 +156,7 @@
                 <button id="pipelineQualityButton" class="secondary-button" type="button" title="汇总分段、视觉、公式、讲解和导出风险">质量报告</button>
                 <button id="exportQaButton" class="secondary-button" type="button" title="检查未完成段落、图表引用、裁剪和 LaTeX 风险">导出检查</button>
                 <button id="segmentationDebugButton" class="secondary-button" type="button" title="查看 PDF block、清洗理由和段落来源">分段调试</button>
+                <button id="repairSegmentationButton" class="secondary-button" type="button" title="不重新调用 AI，只用本地规则修复已有分段并标记受影响段落">本地修复</button>
                 <button id="rerunAnalyzeButton" class="secondary-button" type="button" title="重新 AI 分段，然后重新生成全部段落">重分段+全跑</button>
                 <button id="stopAutoButton" class="secondary-button hidden" type="button">停止</button>
               </div>
@@ -175,15 +165,34 @@
           </div>
         </div>
 
-        <section id="historyPanel" class="history-panel" aria-label="任务历史记录" aria-hidden="true">
+        <section id="historyPanel" class="history-panel" aria-label="历史记录" aria-hidden="true">
           <div class="history-panel-header">
             <div>
               <strong>历史记录</strong>
-              <span id="historyPanelSummary">当前论文任务</span>
+              <span id="historyPanelSummary">论文库和当前任务</span>
             </div>
             <button id="historyCloseButton" class="icon-button" type="button" title="关闭历史记录" aria-label="关闭历史记录">×</button>
           </div>
-          <div id="jobHistory" class="job-history"></div>
+          <section class="history-section history-library-section">
+            <div class="history-section-header">
+              <strong>论文库</strong>
+              <span id="paperListSummary">最近论文</span>
+            </div>
+            <input id="librarySearchInput" type="search" placeholder="搜索论文库">
+            <label class="check-row history-check-row">
+              <input id="favoriteOnlyInput" type="checkbox">
+              只看收藏
+            </label>
+            <button id="rebuildAllVisualButton" class="secondary-button full-width" type="button" title="批量重建本地论文库的图片、公式和代码裁剪">重建全部图表</button>
+            <div id="paperList" class="paper-list"></div>
+          </section>
+          <section class="history-section">
+            <div class="history-section-header">
+              <strong>当前任务</strong>
+              <span id="jobHistorySummary">载入论文后显示</span>
+            </div>
+            <div id="jobHistory" class="job-history"></div>
+          </section>
         </section>
 
         <div id="emptyState" class="empty-state">

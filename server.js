@@ -136,6 +136,9 @@ import {
   validateAndRepairSegmentedParagraphs as repairSegmentedParagraphs,
 } from "./lib/segmentation-validation.js";
 import {
+  repairExistingPaperSegmentation,
+} from "./lib/segmentation-local-repair.js";
+import {
   inferHeuristicStructureSectionsFromPages,
 } from "./lib/segmentation-structure.js";
 import {
@@ -275,6 +278,14 @@ const PAPER_MEMORY_INPUT_LIMIT = readIntegerEnv("PAPERLENS_PAPER_MEMORY_INPUT_CH
 const PAPER_MEMORY_CHUNK_TIMEOUT_MS = readIntegerEnv("PAPERLENS_PAPER_MEMORY_CHUNK_TIMEOUT_SECONDS", 210, 60, 1200) * 1000;
 const PAPER_MEMORY_SYNTHESIS_TIMEOUT_MS = readIntegerEnv("PAPERLENS_PAPER_MEMORY_SYNTHESIS_TIMEOUT_SECONDS", 210, 60, 1200) * 1000;
 const SEGMENTATION_ITEM_TEXT_LIMIT = 900;
+const SEGMENTATION_READING_SKILL = [
+  "分段 skill:",
+  "- 只处理页面文本里真实出现的内容；如果重要公式、图、表、代码只存在于图片或 crop 中，不要凭空补全文本，只保留正文中的引用，交给 artifact 关联。",
+  "- paragraph 的目标长度是 300-900 个英文字符；超过 1200 字符时，必须按真实语义边界拆开，优先在段落转折、冒号后的列表、贡献点、公式前后、小标题 lead-in 后拆分。",
+  "- 不要把两个章节或小节合在一个 paragraph；遇到 4.2、4.2.1、Key Takeaway、Weights vs. Activations、Baseline FP4 MAC 这类小标题，要么输出 heading，要么作为下一段 sourceText 的 lead-in。",
+  "- 贡献列表、算法步骤、图表主体、图中文字、表格数值和参考文献不是普通正文；除非它们以正文句子解释方法，否则不要进入阅读 paragraph。",
+  "- 跨页续接只在上一页末尾没有句末标点、下一页开头是小写/连接词/同一句延续时成立；页眉、会议名、作者名不能触发跨页合并。",
+].join("\n");
 const SECTION_CONTEXT_TEXT_LIMIT = 900;
 const SEGMENTATION_PLAN_VERSION = 1;
 const EXTRA_BIN_DIRS = [
@@ -419,6 +430,11 @@ const server = http.createServer(async (req, res) => {
     const segmentMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/segment$/);
     if (req.method === "POST" && segmentMatch) {
       return await handleSegmentPaper(req, res, segmentMatch[1]);
+    }
+
+    const segmentationRepairMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/segmentation\/repair$/);
+    if (req.method === "POST" && segmentationRepairMatch) {
+      return await handleRepairPaperSegmentation(res, segmentationRepairMatch[1]);
     }
 
     const segmentJobsMatch = url.pathname.match(/^\/api\/papers\/([^/]+)\/segment-jobs$/);
@@ -967,6 +983,37 @@ async function handleGetActiveSegmentationJob(res, paperId) {
   return json(res, { job: job ? serializeJob(job) : null });
 }
 
+async function handleRepairPaperSegmentation(res, paperId) {
+  const result = await withPaperWriteLock(paperId, async () => {
+    const paper = await loadPaper(paperId);
+    if (!Array.isArray(paper.paragraphs) || !paper.paragraphs.length) {
+      throw badRequest("这篇论文还没有可修复的分段。");
+    }
+
+    ensurePaperAnalysisCache(paper);
+    const repairResult = repairExistingPaperSegmentation(paper, {
+      pageMetrics: buildSegmentationPageMetrics(paper.extractionPages || []),
+    });
+    paper.paragraphs = repairResult.paragraphs;
+    rebuildPaperAfterLocalSegmentationRepair(paper, repairResult);
+    await savePaper(paper);
+
+    return {
+      paper,
+      changed: repairResult.changed,
+      changedParagraphIds: repairResult.changedParagraphIds,
+      metadataChangedParagraphIds: repairResult.metadataChangedParagraphIds,
+      removedParagraphIds: repairResult.removedParagraphIds,
+      hiddenParagraphIds: repairResult.hiddenParagraphIds,
+      mergedParagraphIds: repairResult.mergedParagraphIds,
+      summary: repairResult.summary,
+      message: formatLocalSegmentationRepairMessage(repairResult),
+    };
+  });
+
+  return json(res, result);
+}
+
 async function handleEditPaperParagraph(req, res, paperId, paragraphId) {
   const payload = await readJson(req);
   const result = await withPaperWriteLock(paperId, async () => {
@@ -1442,6 +1489,73 @@ function rebuildPaperAfterManualParagraphEdit(paper) {
       edits: Array.isArray(paper.manualSegmentationEdits) ? paper.manualSegmentationEdits.length : 0,
     },
   };
+}
+
+function rebuildPaperAfterLocalSegmentationRepair(paper, repairResult) {
+  const paragraphs = Array.isArray(paper.paragraphs) ? paper.paragraphs : [];
+  const chunkSummaries = Array.isArray(paper.segmentationChunkSummaries) ? paper.segmentationChunkSummaries : [];
+  const updatedAt = repairResult?.summary?.updatedAt || new Date().toISOString();
+  normalizePaperParagraphOrders(paragraphs);
+  paper.sections = inferSectionsFromSegmentationPlan(paragraphs, paper.structureMap || null);
+  enrichSectionsWithContext(paper.sections, paragraphs, chunkSummaries);
+  paper.contextProfile = buildPaperContextProfile(paragraphs, paper.sections, chunkSummaries, paper.structureMap || null);
+  attachParagraphArtifactLinks(paper);
+  paper.segmentationValidation = {
+    ...(paper.segmentationValidation || {}),
+    localRepair: repairResult?.summary || null,
+  };
+  if (repairResult?.validationSummary?.qualityAudit) {
+    paper.segmentationQualityAudit = {
+      ...repairResult.validationSummary.qualityAudit,
+      updatedAt,
+    };
+    paper.segmentationValidation.qualityAudit = paper.segmentationQualityAudit;
+  }
+  paper.segmentationStages = {
+    ...(paper.segmentationStages || {}),
+    localRepair: {
+      updatedAt,
+      inputVisibleParagraphs: Number(repairResult?.summary?.inputVisibleParagraphs || 0),
+      outputVisibleParagraphs: Number(repairResult?.summary?.outputVisibleParagraphs || 0),
+      changedParagraphs: Number(repairResult?.summary?.changedParagraphs || 0),
+      hiddenByLocalRepair: Number(repairResult?.summary?.hiddenByLocalRepair || 0),
+      mergedParagraphs: Number(repairResult?.summary?.mergedParagraphs || 0),
+    },
+  };
+  paper.segmentationRepairHistory = [
+    {
+      updatedAt,
+      changedParagraphIds: repairResult?.changedParagraphIds || [],
+      removedParagraphIds: repairResult?.removedParagraphIds || [],
+      hiddenParagraphIds: repairResult?.hiddenParagraphIds || [],
+      summary: repairResult?.summary || null,
+    },
+    ...(Array.isArray(paper.segmentationRepairHistory) ? paper.segmentationRepairHistory : []),
+  ].slice(0, 20);
+  paper.segmentationEditedAt = updatedAt;
+  paper.updatedAt = updatedAt;
+}
+
+function formatLocalSegmentationRepairMessage(repairResult) {
+  if (!repairResult?.changed) {
+    return "本地分段校验通过，没有发现需要修复的段落。";
+  }
+
+  const summary = repairResult.summary || {};
+  const parts = [];
+  if (summary.mergedParagraphs) {
+    parts.push(`合并 ${summary.mergedParagraphs} 个断裂段`);
+  }
+  if (summary.hiddenByLocalRepair) {
+    parts.push(`隐藏 ${summary.hiddenByLocalRepair} 个疑似噪声/重复段`);
+  }
+  if (summary.changedParagraphs) {
+    parts.push(`${summary.changedParagraphs} 段待补跑`);
+  }
+  if (!parts.length) {
+    parts.push("刷新了章节和上下文");
+  }
+  return `本地分段修复完成：${parts.join("，")}。`;
 }
 
 async function handleCreateAnalysisJob(req, res, paperId) {
@@ -2853,6 +2967,7 @@ function serializeJob(job) {
     adaptiveBatchSize: Number(job.adaptiveBatchSize || 0),
     resourceEstimate: job.resourceEstimate || null,
     budgetEstimate: job.budgetEstimate || null,
+    timeEstimate: buildJobTimeEstimate(job),
     total: job.total,
     completed: job.completed,
     failed: job.failed,
@@ -2905,6 +3020,7 @@ function serializeJobSummary(job) {
     cacheHits: Number(job.cacheHits || 0),
     resourceEstimate: job.resourceEstimate || null,
     budgetEstimate: job.budgetEstimate || null,
+    timeEstimate: buildJobTimeEstimate(job),
     total: job.total,
     completed: job.completed,
     failed: job.failed,
@@ -3137,6 +3253,10 @@ async function runAnalysisJob(job, signal) {
 
     const batches = getNextAnalysisBatchGroup(job);
     if (!batches.length) {
+      const requeued = await requeueDoneAnalysisItemsMissingPaperOutput(job);
+      if (requeued) {
+        continue;
+      }
       break;
     }
 
@@ -3373,6 +3493,7 @@ function buildPaperSegmentationJobStatus(job, patch = {}) {
     total: Number(job.total || 0),
     completed: Number(job.completed || 0),
     failed: Number(job.failed || 0),
+    timeEstimate: buildJobTimeEstimate(job),
     strategy: normalizeSegmentationRetryStrategy(job.segmentation?.strategy),
     strategyLabel: formatSegmentationRetryStrategyLabel(job.segmentation?.strategy),
     error: patch.error || job.error || "",
@@ -4003,6 +4124,380 @@ function estimateAnalysisSeconds(paragraphCount, batchSize, concurrency, expecte
     Math.max(1, Number(expectedBatchSeconds || 45));
 }
 
+function buildJobTimeEstimate(job) {
+  if (!job || typeof job !== "object") {
+    return null;
+  }
+
+  const total = Math.max(0, Number(job.total || job.items?.length || 0));
+  const completed = Math.max(0, Number(job.completed || 0));
+  const failed = Math.max(0, Number(job.failed || 0));
+  const done = Math.min(total || completed + failed, completed + failed);
+  const startedMs = parseJobTimeMs(job.startedAt || job.createdAt);
+  const completedMs = parseJobTimeMs(job.completedAt);
+  const nowMs = completedMs || Date.now();
+  const elapsedSeconds = startedMs ? Math.max(0, Math.round((nowMs - startedMs) / 1000)) : 0;
+  const active = isActiveJobStatus(job.status);
+  const staticEstimate = getStaticJobTimeEstimate(job);
+  const historyEstimate = getHistoricalJobTotalSeconds(job);
+  const staticTotalSeconds = Math.max(
+    0,
+    Math.round(historyEstimate?.totalSeconds || staticEstimate.totalSeconds || elapsedSeconds || 0),
+  );
+  const dynamicRemainingSeconds = active
+    ? getDynamicRemainingSeconds(job, elapsedSeconds, staticEstimate)
+    : 0;
+  const staticRemainingSeconds = active
+    ? Math.max(0, staticTotalSeconds - elapsedSeconds)
+    : 0;
+  const remainingSeconds = active
+    ? Math.max(0, Math.round(
+        dynamicRemainingSeconds != null
+          ? blendTimeEstimates(staticRemainingSeconds, dynamicRemainingSeconds)
+          : staticRemainingSeconds,
+      ))
+    : 0;
+  const totalSeconds = active
+    ? Math.max(staticTotalSeconds, elapsedSeconds + remainingSeconds)
+    : elapsedSeconds || staticTotalSeconds;
+  const progressRatio = total > 0 ? clampNumber(done / total, 0, 1) : active ? 0 : 1;
+  const expectedElapsedSeconds = active
+    ? Math.max(1, Math.round(staticTotalSeconds * progressRatio))
+    : totalSeconds;
+  const slowRatio = active && expectedElapsedSeconds > 0
+    ? roundTo(elapsedSeconds / expectedElapsedSeconds, 2)
+    : 1;
+  const slow = active &&
+    elapsedSeconds > 45 &&
+    (
+      (progressRatio > 0.08 && slowRatio >= 1.35) ||
+      (progressRatio === 0 && staticEstimate.currentPhaseSeconds > 0 && elapsedSeconds > staticEstimate.currentPhaseSeconds * 1.35)
+    );
+  const etaAt = active && remainingSeconds
+    ? new Date(Date.now() + remainingSeconds * 1000).toISOString()
+    : "";
+
+  return {
+    version: 1,
+    source: historyEstimate ? "history+strategy" : "strategy",
+    providerClass: getJobProviderTimeClass(job.settings),
+    phase: job.phase || "",
+    totalSeconds: Math.round(totalSeconds),
+    estimatedTotalSeconds: staticTotalSeconds,
+    elapsedSeconds,
+    remainingSeconds,
+    etaAt,
+    progressRatio: roundTo(progressRatio, 3),
+    expectedElapsedSeconds,
+    slowRatio,
+    slow,
+    confidence: historyEstimate ? "medium" : staticEstimate.confidence || "low",
+    historySamples: historyEstimate?.samples || 0,
+    unitSeconds: historyEstimate?.unitSeconds ? roundTo(historyEstimate.unitSeconds, 1) : 0,
+    breakdown: staticEstimate.breakdown || [],
+  };
+}
+
+function getStaticJobTimeEstimate(job) {
+  if (job.type === "segmentation") {
+    return getStaticSegmentationTimeEstimate(job);
+  }
+
+  if (job.type === "ocr") {
+    const pages = Number(job.ocr?.pages || job.resourceEstimate?.pages || job.total || 1);
+    return {
+      totalSeconds: Math.max(20, pages * 18),
+      currentPhaseSeconds: 0,
+      confidence: "low",
+      breakdown: [{ key: "ocr", label: "OCR", seconds: Math.max(20, pages * 18) }],
+    };
+  }
+
+  const strategy = getAnalysisProviderStrategy(job.settings || {}, job);
+  const effectiveBatchSize = getAnalysisBatchSize(job.settings || {}, job);
+  const total = Math.max(0, Number(job.total || job.items?.length || 0));
+  const totalSeconds = Number(job.budgetEstimate?.estimatedSeconds || 0) ||
+    estimateAnalysisSeconds(total, effectiveBatchSize, strategy.concurrency, strategy.expectedBatchSeconds);
+  return {
+    totalSeconds,
+    currentPhaseSeconds: 0,
+    confidence: "medium",
+    breakdown: [{
+      key: "analysis",
+      label: "翻译讲解",
+      seconds: Math.round(totalSeconds),
+    }],
+  };
+}
+
+function getStaticSegmentationTimeEstimate(job) {
+  const settings = job.settings || {};
+  const segmentation = normalizeSegmentationJobPayload(job.segmentation);
+  const strategy = normalizeSegmentationRetryStrategy(segmentation.strategy);
+  const provider = getSegmentationTimeProfile(settings);
+  const chunks = Math.max(1, Number(segmentation.chunks || job.total || job.items?.length || 1));
+  const pages = Math.max(1, Number(segmentation.pageCount || estimatePagesFromJobItems(job.items) || chunks));
+  const useMemory = shouldUsePaperMemoryForSegmentation(settings) &&
+    strategy !== SEGMENTATION_RETRY_STRATEGIES.STRUCTURE_ONLY;
+  const structureReused = strategy === SEGMENTATION_RETRY_STRATEGIES.REUSE_MEMORY &&
+    segmentation.canReuseStructureMap;
+  const memoryReused = strategy === SEGMENTATION_RETRY_STRATEGIES.REUSE_MEMORY &&
+    segmentation.canReusePaperMemory;
+  const structureSeconds = structureReused
+    ? 5
+    : strategy === SEGMENTATION_RETRY_STRATEGIES.REUSE_MEMORY
+      ? 10
+      : provider.structureSeconds;
+  const memoryChunks = useMemory && !memoryReused
+    ? Math.max(1, chunks)
+    : 0;
+  const memorySeconds = memoryChunks
+    ? memoryChunks * provider.memoryChunkSeconds + provider.memorySynthesisSeconds
+    : 0;
+  const segmentSeconds = strategy === SEGMENTATION_RETRY_STRATEGIES.STRUCTURE_ONLY ||
+      strategy === SEGMENTATION_RETRY_STRATEGIES.PLANNING_ONLY
+    ? 0
+    : chunks * provider.segmentChunkSeconds;
+  const validationSeconds = strategy === SEGMENTATION_RETRY_STRATEGIES.STRUCTURE_ONLY
+    ? 8
+    : Math.max(10, Math.min(90, pages * provider.validationSecondsPerPage));
+  const breakdown = [
+    { key: "structure", label: structureReused ? "结构复用" : "结构扫描", seconds: Math.round(structureSeconds) },
+    memorySeconds ? { key: "memory", label: memoryReused ? "预读复用" : "Paper Memory", seconds: Math.round(memorySeconds) } : null,
+    segmentSeconds ? { key: "segment", label: "页块分段", seconds: Math.round(segmentSeconds) } : null,
+    { key: "validation", label: "校验清理", seconds: Math.round(validationSeconds) },
+  ].filter(Boolean);
+  const totalSeconds = breakdown.reduce((sum, item) => sum + Number(item.seconds || 0), 0);
+  const currentPhaseSeconds = getCurrentSegmentationPhaseBudget(job.phase, breakdown);
+  return {
+    totalSeconds,
+    currentPhaseSeconds,
+    confidence: provider.confidence,
+    breakdown,
+  };
+}
+
+function getSegmentationTimeProfile(settings = {}) {
+  const providerClass = getJobProviderTimeClass(settings);
+  if (providerClass === "kimi-code-direct") {
+    return {
+      structureSeconds: CLAUDE_SEGMENTATION_STRUCTURE_SCAN ? 90 : 8,
+      memoryChunkSeconds: 38,
+      memorySynthesisSeconds: 45,
+      segmentChunkSeconds: 42,
+      validationSecondsPerPage: 2.5,
+      confidence: "medium",
+    };
+  }
+
+  if (providerClass === "claude-agent") {
+    return {
+      structureSeconds: CLAUDE_SEGMENTATION_STRUCTURE_SCAN ? 150 : 10,
+      memoryChunkSeconds: 70,
+      memorySynthesisSeconds: 80,
+      segmentChunkSeconds: 78,
+      validationSecondsPerPage: 3,
+      confidence: "low",
+    };
+  }
+
+  if (providerClass === "deepseek") {
+    return {
+      structureSeconds: 70,
+      memoryChunkSeconds: 36,
+      memorySynthesisSeconds: 40,
+      segmentChunkSeconds: 32,
+      validationSecondsPerPage: 2,
+      confidence: "medium",
+    };
+  }
+
+  return {
+    structureSeconds: 80,
+    memoryChunkSeconds: 42,
+    memorySynthesisSeconds: 48,
+    segmentChunkSeconds: 38,
+    validationSecondsPerPage: 2.2,
+    confidence: "low",
+  };
+}
+
+function getCurrentSegmentationPhaseBudget(phase, breakdown = []) {
+  const key = phase === "memory"
+    ? "memory"
+    : phase === "segment"
+      ? "segment"
+      : phase === "validation"
+        ? "validation"
+        : "structure";
+  return Number(breakdown.find((item) => item.key === key)?.seconds || 0);
+}
+
+function getHistoricalJobTotalSeconds(job) {
+  if (!jobStore?.jobs || !job.type || !job.settings) {
+    return null;
+  }
+
+  const providerClass = getJobProviderTimeClass(job.settings);
+  const strategy = job.type === "segmentation"
+    ? normalizeSegmentationRetryStrategy(job.segmentation?.strategy)
+    : normalizeAnalysisProfile(job.settings?.analysisProfile);
+  const samples = [...jobStore.jobs.values()]
+    .filter((candidate) => candidate.id !== job.id &&
+      candidate.type === job.type &&
+      candidate.status === "done" &&
+      getJobProviderTimeClass(candidate.settings) === providerClass &&
+      getHistoricalStrategyKey(candidate) === strategy)
+    .map((candidate) => {
+      const durationSeconds = getJobDurationSeconds(candidate);
+      const units = getJobTimeUnits(candidate);
+      return durationSeconds > 0 && units > 0 ? durationSeconds / units : 0;
+    })
+    .filter((value) => value > 0 && Number.isFinite(value))
+    .slice(-8);
+
+  if (!samples.length) {
+    return null;
+  }
+
+  const unitSeconds = medianNumber(samples);
+  return {
+    samples: samples.length,
+    unitSeconds,
+    totalSeconds: Math.max(1, Math.round(unitSeconds * getJobTimeUnits(job))),
+  };
+}
+
+function getHistoricalStrategyKey(job) {
+  if (job.type === "segmentation") {
+    return normalizeSegmentationRetryStrategy(job.segmentation?.strategy);
+  }
+
+  return normalizeAnalysisProfile(job.settings?.analysisProfile);
+}
+
+function getDynamicRemainingSeconds(job, elapsedSeconds, staticEstimate = {}) {
+  if (!elapsedSeconds || !Array.isArray(job.items) || !job.items.length) {
+    return null;
+  }
+
+  const total = Math.max(0, Number(job.total || job.items.length));
+  const done = Math.min(total, Number(job.completed || 0) + Number(job.failed || 0));
+  const remaining = Math.max(0, total - done);
+  if (!remaining) {
+    return 0;
+  }
+
+  if (job.type !== "segmentation") {
+    return done > 0 ? Math.ceil((elapsedSeconds / done) * remaining) : null;
+  }
+
+  const completedDurations = job.items
+    .filter((item) => item.status === "done" || item.status === "error")
+    .map((item) => getDateDeltaSeconds(item.startedAt, item.completedAt))
+    .filter((value) => value > 0);
+  if (!completedDurations.length) {
+    return null;
+  }
+
+  const chunkRemainingSeconds = medianNumber(completedDurations) * remaining;
+  const validationSeconds = Number(staticEstimate.breakdown?.find((item) => item.key === "validation")?.seconds || 0);
+  return Math.ceil(chunkRemainingSeconds + (job.phase === "segment" ? validationSeconds : 0));
+}
+
+function blendTimeEstimates(staticSeconds, dynamicSeconds) {
+  if (!Number.isFinite(Number(dynamicSeconds))) {
+    return staticSeconds;
+  }
+
+  if (!Number.isFinite(Number(staticSeconds)) || staticSeconds <= 0) {
+    return dynamicSeconds;
+  }
+
+  return staticSeconds * 0.35 + dynamicSeconds * 0.65;
+}
+
+function getJobProviderTimeClass(settings = {}) {
+  const cleanSettings = resolveSettingsForModel(settings);
+  const provider = String(cleanSettings.provider || "").toLowerCase();
+  const baseUrl = String(cleanSettings.baseUrl || "").toLowerCase();
+  const model = String(cleanSettings.model || "").toLowerCase();
+  if (shouldUseKimiCodeDirectApi(cleanSettings)) {
+    return "kimi-code-direct";
+  }
+  if (isClaudeAgentSettings(cleanSettings)) {
+    return "claude-agent";
+  }
+  if (provider.includes("deepseek") || baseUrl.includes("deepseek") || model.includes("deepseek")) {
+    return "deepseek";
+  }
+  if (provider.includes("kimi") || baseUrl.includes("moonshot") || baseUrl.includes("api.kimi.com")) {
+    return "kimi-direct";
+  }
+  return "openai-compatible";
+}
+
+function getJobDurationSeconds(job) {
+  return getDateDeltaSeconds(job.startedAt || job.createdAt, job.completedAt || "");
+}
+
+function getDateDeltaSeconds(start, end) {
+  const startMs = parseJobTimeMs(start);
+  const endMs = parseJobTimeMs(end);
+  if (!startMs || !endMs || endMs < startMs) {
+    return 0;
+  }
+
+  return Math.max(0, Math.round((endMs - startMs) / 1000));
+}
+
+function parseJobTimeMs(value) {
+  const ms = Date.parse(String(value || ""));
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function getJobTimeUnits(job) {
+  const total = Math.max(1, Number(job.total || job.items?.length || 1));
+  return total;
+}
+
+function estimatePagesFromJobItems(items = []) {
+  const pages = new Set();
+  for (const item of items || []) {
+    const range = String(item?.pageRange || "");
+    const match = range.match(/(\d+)(?:\D+(\d+))?/);
+    if (!match) {
+      continue;
+    }
+    const start = Number(match[1]);
+    const end = Number(match[2] || match[1]);
+    for (let page = start; page <= end; page += 1) {
+      pages.add(page);
+    }
+  }
+  return pages.size;
+}
+
+function medianNumber(values = []) {
+  const sorted = values
+    .map(Number)
+    .filter((value) => Number.isFinite(value))
+    .sort((a, b) => a - b);
+  if (!sorted.length) {
+    return 0;
+  }
+
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2
+    ? sorted[middle]
+    : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function roundTo(value, digits = 2) {
+  const factor = 10 ** digits;
+  return Math.round(Number(value || 0) * factor) / factor;
+}
+
 function buildAnalysisResourceEstimate(paragraphs = []) {
   return buildAnalysisResourceEstimatePayload(paragraphs);
 }
@@ -4233,13 +4728,22 @@ async function runAnalysisJobBatch(job, items, signal, options = {}) {
 
     const analyzedParagraphs = await analyzeParagraphBatchInPaper(paper, paragraphs, resolveJobSettings(job.settings), { signal });
     const analyzedById = new Map(analyzedParagraphs.map((paragraph) => [paragraph.id, paragraph]));
-    await updatePaperParagraphs(job.paperId, readableItems.map((item) => item.paragraphId), (paragraph, targetPaper) => {
+    const updatedParagraphs = await updatePaperParagraphs(job.paperId, readableItems.map((item) => item.paragraphId), (paragraph, targetPaper) => {
       const analyzed = analyzedById.get(paragraph.id);
       if (analyzed) {
         copyParagraphAnalysisFields(paragraph, analyzed);
         rememberParagraphAnalysisInCache(targetPaper, paragraph);
       }
     });
+    const missingWritebacks = readableItems
+      .filter((item) => !updatedParagraphs.some((paragraph) => paragraph.id === item.paragraphId))
+      .map((item) => item.paragraphId);
+    const incompleteWritebacks = updatedParagraphs
+      .filter((paragraph) => needsParagraphAnalysis(paragraph))
+      .map((paragraph) => paragraph.id);
+    if (missingWritebacks.length || incompleteWritebacks.length) {
+      throw new Error(`Batch analysis writeback incomplete: ${[...missingWritebacks, ...incompleteWritebacks].join(", ")}`);
+    }
     const completedAt = new Date().toISOString();
     for (const item of readableItems) {
       item.status = "done";
@@ -4336,6 +4840,43 @@ async function runAnalysisJobBatch(job, items, signal, options = {}) {
     job.updatedAt = new Date().toISOString();
     await persistJobs();
   }
+}
+
+async function requeueDoneAnalysisItemsMissingPaperOutput(job) {
+  if (job.type !== "analysis") {
+    return 0;
+  }
+
+  const paper = await loadPaper(job.paperId);
+  const paragraphById = new Map((paper.paragraphs || []).map((paragraph) => [paragraph.id, paragraph]));
+  const staleDoneItems = (job.items || []).filter((item) => {
+    if (item.status !== "done") {
+      return false;
+    }
+    const paragraph = paragraphById.get(item.paragraphId);
+    return paragraph &&
+      isReadingParagraphForPaper(paper, paragraph) &&
+      needsParagraphAnalysis(paragraph);
+  });
+  if (!staleDoneItems.length) {
+    return 0;
+  }
+
+  for (const item of staleDoneItems) {
+    item.status = "queued";
+    item.completedAt = "";
+    item.error = "分析结果未写回，已重新排队。";
+  }
+  await updatePaperParagraphs(job.paperId, staleDoneItems.map((item) => item.paragraphId), (paragraph) => {
+    paragraph.analysisStatus = "queued";
+    paragraph.analysisError = "";
+  });
+  recalculateJobProgress(job);
+  job.currentParagraphId = "";
+  job.currentBatchSize = 0;
+  job.updatedAt = new Date().toISOString();
+  await persistJobs();
+  return staleDoneItems.length;
 }
 
 async function markJobBatchItemsError(job, items, error) {
@@ -7920,6 +8461,36 @@ function inferTitle(paragraphs, filename) {
   return firstLongText || filename.replace(/\.pdf$/i, "");
 }
 
+function inferSegmentedPaperTitle(paper, paragraphs, structureMap = null, paperMemory = null) {
+  const candidates = [
+    structureMap?.paperTitle,
+    paperMemory?.paperTitle,
+    inferTitleFromPages(paper?.extractionPages || [], paragraphs, paper?.filename || ""),
+    paper?.title,
+    inferTitle(paragraphs, paper?.filename || ""),
+  ]
+    .map((title) => normalizeParagraph(title || ""))
+    .filter(Boolean);
+
+  return candidates.find((title) => !isLikelyFilenameTitle(title, paper?.filename)) ||
+    candidates[0] ||
+    String(paper?.filename || "").replace(/\.pdf$/i, "");
+}
+
+function isLikelyFilenameTitle(title, filename = "") {
+  const cleanTitle = normalizeParagraph(title || "");
+  if (!cleanTitle) {
+    return true;
+  }
+
+  const fileBase = normalizeParagraph(String(filename || "").replace(/\.pdf$/i, ""));
+  if (fileBase && cleanTitle.toLowerCase() === fileBase.toLowerCase()) {
+    return true;
+  }
+
+  return /^[\d._-]+v?\d*$/i.test(cleanTitle);
+}
+
 function inferTitleFromPages(pages, paragraphs, filename) {
   const firstPage = (pages || []).find((page) => Number(page?.pageNumber || 0) === 1) || pages?.[0];
   const blocks = Array.isArray(firstPage?.blocks) ? firstPage.blocks : [];
@@ -8925,7 +9496,7 @@ async function segmentPaperFailedChunks(paper, settings, options = {}) {
   const segmentationChunkMap = mergeSegmentationChunkMaps(paper.segmentationChunkMap, retryChunkMap, now);
   const segmented = {
     ...paper,
-    title: paper.title || inferTitle(paragraphs, paper.filename),
+    title: inferSegmentedPaperTitle(paper, paragraphs, structureMap, paperMemory || paper.paperMemory || null),
     status: "ready",
     segmentationMode: "ai",
     structureMap,
@@ -9017,7 +9588,7 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
 
   await options.onProgress?.({
     phase: "structure-done",
-    reusedStructureMap,
+    reusedStructureMap: reuseStructureMap,
     totalChunks: chunks.length,
   });
   let paperMemory = null;
@@ -9127,7 +9698,7 @@ async function segmentPaperWithAi(paper, settings, options = {}) {
   enrichSectionsWithContext(sections, paragraphs, chunkSummaries);
   const segmented = {
     ...paper,
-    title: inferTitle(paragraphs, paper.filename),
+    title: inferSegmentedPaperTitle(paper, paragraphs, structureMap, paperMemory),
     status: "ready",
     segmentationMode: "ai",
     structureMap,
@@ -9453,6 +10024,7 @@ async function segmentPageChunkWithAi(paper, pages, settings, options = {}) {
         "不要把图注、表格单元格、图片里的文字、公式块、代码块单独切成正文段落；正文里提到的 Figure/Table/Eq 引用要保留。",
         "如果一段只有链接、图片链接、数据集链接、脚注编号或联系信息，直接省略，不要输出为 paragraph。",
         "跨页或跨栏的同一自然段要合并成一个 paragraph，并正确设置 continuesFromPrevious / continuesToNext。",
+        SEGMENTATION_READING_SKILL,
         "只输出合法 JSON，不要使用 Markdown 代码块。",
       ].join("\n"),
     },
@@ -11458,15 +12030,57 @@ async function loadPaper(paperId) {
     : await readJsonFileWithRecovery(getPaperPath(paperId));
   const upgradedArtifacts = upgradePaperArtifacts(paper);
   const upgradedContext = upgradePaperContextProfile(paper);
+  const upgradedTitle = upgradePaperTitleFromPlanning(paper);
+  const upgradedSourceBoxes = upgradePaperParagraphSourceBoxes(paper);
   const upgradedSourceMarkdown = upgradePaperSourceMarkdown(paper);
   const upgradedRecoverableBlocks = upgradePaperRecoverableFilteredParagraphs(paper);
-  if (upgradedArtifacts || upgradedContext || upgradedSourceMarkdown || upgradedRecoverableBlocks) {
+  if (upgradedArtifacts || upgradedContext || upgradedTitle || upgradedSourceBoxes || upgradedSourceMarkdown || upgradedRecoverableBlocks) {
     await savePaper(paper);
   }
   enrichPaperParagraphLocations(paper);
   attachPaperVisualQa(paper);
   attachSegmentationPlanningSnapshot(paper);
   return paper;
+}
+
+function upgradePaperTitleFromPlanning(paper) {
+  if (!isLikelyFilenameTitle(paper?.title, paper?.filename)) {
+    return false;
+  }
+
+  const title = inferSegmentedPaperTitle(paper, paper.paragraphs || [], paper.structureMap, paper.paperMemory);
+  if (!title || title === paper.title) {
+    return false;
+  }
+
+  paper.title = title;
+  return true;
+}
+
+function upgradePaperParagraphSourceBoxes(paper) {
+  if (!Array.isArray(paper?.paragraphs) || !Array.isArray(paper?.extractionPages) || !paper.extractionPages.length) {
+    return false;
+  }
+
+  let changed = false;
+  for (const paragraph of paper.paragraphs) {
+    if (paragraph.sourceBox) {
+      continue;
+    }
+
+    const sourceText = normalizeParagraph(paragraph?.sourceText || "");
+    if (!sourceText) {
+      continue;
+    }
+
+    const sourceBox = findSourceBoxForParagraph(paper, paragraph, sourceText);
+    if (sourceBox) {
+      paragraph.sourceBox = sourceBox;
+      changed = true;
+    }
+  }
+
+  return changed;
 }
 
 function upgradePaperSourceMarkdown(paper) {
@@ -11528,19 +12142,157 @@ function isAutoRecoverableFilteredParagraph(paragraph) {
 }
 
 function findSourceBlockForParagraph(paper, paragraph, sourceText) {
+  return findSourceBlocksForParagraph(paper, paragraph, sourceText)[0]?.block || null;
+}
+
+function findSourceBoxForParagraph(paper, paragraph, sourceText) {
+  return mergeSourceBlockBoxes(findSourceBlocksForParagraph(paper, paragraph, sourceText));
+}
+
+function findSourceBlocksForParagraph(paper, paragraph, sourceText) {
   const pages = Array.isArray(paper?.extractionPages) ? paper.extractionPages : [];
   const pageNumber = Number(paragraph?.pageNumber || 0);
-  const candidates = pages
-    .filter((page) => !pageNumber || Number(page.pageNumber || 0) === pageNumber)
-    .flatMap((page) => Array.isArray(page.blocks) ? page.blocks : []);
-  const normalizedSource = normalizeParagraph(sourceText);
-  return candidates.find((block) =>
-    normalizeParagraph(normalizeSegmentationReadableBlockText(block?.text || "")) === normalizedSource) ||
-    candidates.find((block) => {
-      const blockText = normalizeParagraph(normalizeSegmentationReadableBlockText(block?.text || ""));
-      return blockText.length > 40 && (normalizedSource.startsWith(blockText) || blockText.startsWith(normalizedSource));
-    }) ||
-    null;
+  const pageEndNumber = Math.max(pageNumber, Number(paragraph?.pageEndNumber || pageNumber || 0));
+  const scopedPages = pages.filter((page) => {
+    const current = Number(page.pageNumber || 0);
+    if (!pageNumber || !current) {
+      return true;
+    }
+    return current >= pageNumber && current <= pageEndNumber;
+  });
+  const candidates = scopedPages.flatMap((page) =>
+    (Array.isArray(page.blocks) ? page.blocks : [])
+      .map((block, index) => {
+        const box = pickBlockBox(block);
+        const text = normalizeSourceBlockMatchText(block?.text || "");
+        return {
+          block,
+          box,
+          index,
+          text,
+          pageNumber: Number(page.pageNumber || 0),
+          pageWidth: Number(page.width || 0) || null,
+          pageHeight: Number(page.height || 0) || null,
+        };
+      })
+      .filter((item) => item.box && item.text));
+  const normalizedSource = normalizeSourceBlockMatchText(sourceText);
+  if (!normalizedSource || !candidates.length) {
+    return [];
+  }
+
+  const exact = candidates.find((item) => item.text === normalizedSource);
+  if (exact) {
+    return [exact];
+  }
+
+  const directMatches = candidates.filter((item) =>
+    item.text.length >= 28 &&
+      (normalizedSource.includes(item.text) || item.text.includes(normalizedSource)));
+  if (directMatches.length) {
+    return selectSourceBlockMatchPage(directMatches, pageNumber);
+  }
+
+  const scored = candidates
+    .map((item) => ({
+      ...item,
+      matchScore: scoreSourceBlockMatch(normalizedSource, item.text),
+    }))
+    .filter((item) => item.matchScore >= 0.62)
+    .sort((a, b) => b.matchScore - a.matchScore);
+  if (!scored.length) {
+    return [];
+  }
+
+  return selectSourceBlockMatchPage(scored.slice(0, 4), pageNumber);
+}
+
+function normalizeSourceBlockMatchText(text) {
+  return normalizeParagraph(normalizeSegmentationReadableBlockText(text || ""))
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function selectSourceBlockMatchPage(matches, preferredPageNumber = 0) {
+  const pageScores = new Map();
+  for (const item of matches) {
+    const page = Number(item.pageNumber || 0);
+    const current = pageScores.get(page) || { page, count: 0, textLength: 0, score: 0 };
+    current.count += 1;
+    current.textLength += item.text.length;
+    current.score += Number(item.matchScore || 1);
+    pageScores.set(page, current);
+  }
+  const bestPage = [...pageScores.values()].sort((a, b) => {
+    if (preferredPageNumber && a.page === preferredPageNumber && b.page !== preferredPageNumber) {
+      return -1;
+    }
+    if (preferredPageNumber && b.page === preferredPageNumber && a.page !== preferredPageNumber) {
+      return 1;
+    }
+    return b.score - a.score || b.textLength - a.textLength || b.count - a.count;
+  })[0]?.page;
+  return matches
+    .filter((item) => Number(item.pageNumber || 0) === bestPage)
+    .sort((a, b) => Number(a.box?.y || 0) - Number(b.box?.y || 0) || Number(a.box?.x || 0) - Number(b.box?.x || 0));
+}
+
+function scoreSourceBlockMatch(sourceText, blockText) {
+  if (!sourceText || !blockText || blockText.length < 36) {
+    return 0;
+  }
+
+  const sourceWords = new Set(extractSourceMatchTokens(sourceText));
+  const blockWords = extractSourceMatchTokens(blockText);
+  if (!sourceWords.size || !blockWords.length) {
+    return 0;
+  }
+
+  let shared = 0;
+  for (const word of blockWords) {
+    if (sourceWords.has(word)) {
+      shared += 1;
+    }
+  }
+  return shared / Math.max(1, Math.min(sourceWords.size, blockWords.length));
+}
+
+function extractSourceMatchTokens(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}_]+/gu, " ")
+    .split(/\s+/)
+    .filter((token) => token.length >= 3)
+    .slice(0, 120);
+}
+
+function mergeSourceBlockBoxes(matches) {
+  if (!Array.isArray(matches) || !matches.length) {
+    return null;
+  }
+
+  const first = matches[0];
+  const boxes = matches
+    .filter((item) => Number(item.pageNumber || 0) === Number(first.pageNumber || 0))
+    .map((item) => item.box)
+    .filter(Boolean);
+  if (!boxes.length) {
+    return null;
+  }
+
+  const x1 = Math.min(...boxes.map((box) => box.x));
+  const y1 = Math.min(...boxes.map((box) => box.y));
+  const x2 = Math.max(...boxes.map((box) => box.x + box.width));
+  const y2 = Math.max(...boxes.map((box) => box.y + box.height));
+  return {
+    x: roundCoordinate(x1),
+    y: roundCoordinate(y1),
+    width: roundCoordinate(x2 - x1),
+    height: roundCoordinate(y2 - y1),
+    pageNumber: first.pageNumber || null,
+    pageWidth: first.pageWidth || null,
+    pageHeight: first.pageHeight || null,
+  };
 }
 
 function upgradePaperContextProfile(paper) {

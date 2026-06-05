@@ -47,8 +47,25 @@ const riskyPaper = {
       id: "hidden",
       kind: "paragraph",
       sectionId: "s1",
-      sourceText: "Hidden figure caption.",
+      pageNumber: 2,
+      sourceText: "Code and datasets are available at https://github.com/example/m2xfp.",
       analysisEligible: false,
+      recoverableFilteredBlock: {
+        reason: "resource-link",
+        source: "segmentation-input-filter",
+      },
+    },
+    {
+      id: "hidden_formula",
+      kind: "paragraph",
+      sectionId: "s1",
+      pageNumber: 3,
+      sourceText: "x = arg min_theta L(theta)",
+      analysisEligible: false,
+      recoverableFilteredBlock: {
+        reason: "formula",
+        source: "segmentation-input-filter",
+      },
     },
   ],
   pageArtifacts: [
@@ -123,6 +140,11 @@ assert.equal(riskyReport.summary.planningStatus, "partial");
 assert.equal(riskyReport.summary.planningReuseLevel, "weak");
 assert.equal(riskyReport.summary.planningFallback, true);
 assert.equal(riskyReport.metrics.paragraphs.sourceBoxPercent, 25);
+assert.equal(riskyReport.summary.recoverableFilteredParagraphs, 2);
+assert.equal(riskyReport.summary.recoverableResourceLinks, 1);
+assert.equal(riskyReport.summary.recoverableFormulaLike, 1);
+assert.equal(riskyReport.metrics.paragraphs.recoverableSamples[0].paragraphId, "hidden");
+assert.equal(riskyReport.metrics.paragraphs.recoverableSamples[0].restorable, true);
 assert.equal(riskyReport.metrics.planning.planItems, 1);
 assert.equal(riskyReport.metrics.visual.issueArtifacts, 2);
 assert.equal(riskyReport.metrics.formulas.riskCount, 1);
@@ -138,6 +160,7 @@ assert.equal(riskyCodes.has("visual-artifact-issues"), true);
 assert.equal(riskyCodes.has("formula-risk"), true);
 assert.equal(riskyCodes.has("analysis-failed"), true);
 assert.equal(riskyCodes.has("export-errors"), true);
+assert.equal(riskyCodes.has("recoverable-filtered-content"), true);
 assert.ok(riskyReport.actions.some((action) => action.category === "segmentation"));
 
 const cleanPaper = {

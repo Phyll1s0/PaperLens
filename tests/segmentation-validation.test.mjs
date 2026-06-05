@@ -97,6 +97,39 @@ const structureMap = {
 }
 
 {
+  const m2xfpStructureMap = {
+    segmentationPlan: [
+      { id: "sec_motivation", title: "3 Motivation", role: "background", startPage: 4, endPage: 4 },
+      { id: "sec_design", title: "4 M2XFP Analysis and Design", role: "method", startPage: 5, endPage: 5 },
+    ],
+  };
+  const result = validateAndRepairSegmentedParagraphs([
+    paragraph(
+      "p1",
+      "While these methods provide strong representational flexibility, they face two fundamental limitations: runtime decisions and Decoder",
+      4,
+      { continuesToNext: true },
+    ),
+    paragraph(
+      "p2",
+      "complexity. Supporting multiple custom data types demands numerous decoders and format converters in hardware.",
+      5,
+      { continuesFromPrevious: true },
+    ),
+  ], m2xfpStructureMap);
+
+  assert.equal(result.summary.mergedFragments, 1);
+  assert.equal(result.summary.crossPageRepair.candidates, 1);
+  assert.equal(result.summary.crossPageRepair.merged, 1);
+  assert.equal(result.summary.crossPageRepair.reasons["section-mismatch-overridden"], 1);
+  assert.equal(result.paragraphs.length, 1);
+  assert.equal(result.paragraphs[0].pageNumber, 4);
+  assert.equal(result.paragraphs[0].pageEndNumber, 5);
+  assert.match(result.paragraphs[0].sourceText, /Decoder complexity\. Supporting/);
+  assert.equal(result.paragraphs[0].plannedSectionId, "sec_motivation");
+}
+
+{
   const previous = paragraph(
     "p1",
     "The proposed tokenizer first maps each time-series value into a coarse token while preserving",
@@ -212,6 +245,37 @@ const structureMap = {
   assert.deepEqual(result.paragraphs.map((item) => item.id), ["p2"]);
   assert.equal(result.summary.removedNonReading, 1);
   assert.equal(result.summary.qualityAudit.reasons["visual-text"], 1);
+}
+
+{
+  const titleMap = {
+    ...structureMap,
+    paperTitle: "Kronos Forecasting Foundation Models for the Language of Time Series",
+  };
+  const result = validateAndRepairSegmentedParagraphs([
+    paragraph("p1", "Kronos Forecasting Foundation Models for the Language of Time Series", 5),
+    paragraph("p2", "Forecasting Foundation Models for the Language of Time Series", 6),
+    paragraph(
+      "p3",
+      "Kronos models temporal dynamics by combining tokenization and autoregressive prediction into a coherent forecasting pipeline.",
+      6,
+    ),
+    paragraph(
+      "p4",
+      "This body sentence mentions Kronos Forecasting Foundation Models for the Language of Time Series as related work, so it should remain.",
+      6,
+    ),
+  ], titleMap);
+
+  assert.deepEqual(result.paragraphs.map((item) => item.id), ["p3", "p4"]);
+  assert.equal(result.summary.removedNonReading, 2);
+  assert.equal(result.summary.qualityAudit.reasons["paper-title-header"], 2);
+
+  const firstPageAudit = auditSegmentedParagraphNoise(
+    paragraph("p5", titleMap.paperTitle, 1),
+    titleMap,
+  );
+  assert.equal(firstPageAudit.action, "");
 }
 
 {

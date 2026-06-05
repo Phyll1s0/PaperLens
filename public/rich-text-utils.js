@@ -2,6 +2,71 @@ export function normalizeRichTextSource(text) {
   return normalizeBrokenLatexBlocks(String(text || ""));
 }
 
+export function isLikelyInlineMathDollarOpen(text, index) {
+  const source = String(text || "");
+  if (source[index] !== "$" || source[index + 1] === "$" || isEscapedAt(source, index)) {
+    return false;
+  }
+
+  const previous = source[index - 1] || "";
+  const next = source[index + 1] || "";
+  if (!next || /\s/.test(next)) {
+    return false;
+  }
+
+  if (previous && /[A-Za-z0-9\\]/.test(previous)) {
+    return false;
+  }
+
+  if (!/\d/.test(next)) {
+    return true;
+  }
+
+  const close = findClosingInlineMathDollar(source, index + 1);
+  if (close === -1) {
+    return false;
+  }
+
+  return isLikelyNumericInlineMathSource(source.slice(index + 1, close));
+}
+
+function findClosingInlineMathDollar(text, fromIndex) {
+  let index = text.indexOf("$", fromIndex);
+  while (index !== -1) {
+    if (!isEscapedAt(text, index) && isLikelyInlineMathDollarClose(text, index)) {
+      return index;
+    }
+    index = text.indexOf("$", index + 1);
+  }
+  return -1;
+}
+
+function isLikelyInlineMathDollarClose(text, index) {
+  const previous = text[index - 1] || "";
+  const next = text[index + 1] || "";
+  if (!previous || /\s/.test(previous)) {
+    return false;
+  }
+  return !next || !/[A-Za-z0-9]/.test(next);
+}
+
+function isLikelyNumericInlineMathSource(source) {
+  const clean = String(source || "").trim();
+  if (!clean || /^\d+(?:[.,]\d+)?$/.test(clean)) {
+    return false;
+  }
+
+  return /[A-Za-zΑ-Ωα-ω]|\\[A-Za-z]+|[_^{}=<>≤≥≠≈∑∏∫√∞→←↔±×÷∂λμσγαβθΩΔ⋯…+\-*/]/u.test(clean);
+}
+
+function isEscapedAt(text, index) {
+  let slashCount = 0;
+  for (let cursor = index - 1; cursor >= 0 && text[cursor] === "\\"; cursor -= 1) {
+    slashCount += 1;
+  }
+  return slashCount % 2 === 1;
+}
+
 export function buildSourceMarkdown(text, block = {}) {
   const source = normalizeRichTextSource(String(text || "").replace(/\s+/g, " ").trim());
   if (!source || /^\*\*[^*]+?\*\*/.test(source)) {

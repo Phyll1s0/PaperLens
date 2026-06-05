@@ -19,9 +19,26 @@ function main() {
   ensureDirectories();
   ensureEnvFile();
   checkCommand("npm", ["--version"], "npm");
-  checkCommand("docker", ["--version"], "Docker");
-  checkCommand("pdftotext", ["-v"], "Poppler pdftotext");
-  checkCommand("pdftoppm", ["-v"], "Poppler pdftoppm");
+  checkCommand("pdftotext", ["-v"], "Poppler pdftotext", {
+    optional: true,
+    missing: "optional; improves text extraction and layout fidelity",
+  });
+  checkCommand("pdftoppm", ["-v"], "Poppler pdftoppm", {
+    optional: true,
+    missing: "optional; enables high-quality page images and visual crops",
+  });
+  checkCommand("ocrmypdf", ["--version"], "OCRmyPDF", {
+    optional: true,
+    missing: "optional; only needed for scanned PDFs",
+  });
+  checkCommand("tesseract", ["--version"], "Tesseract OCR", {
+    optional: true,
+    missing: "optional; only needed for OCR",
+  });
+  checkCommand("docker", ["--version"], "Docker", {
+    optional: true,
+    missing: "optional; only needed for Docker/NAS/server usage",
+  });
   checkCommand("claude", ["--version"], "Claude Code CLI", { optional: true });
   printSummary();
 }
@@ -95,7 +112,11 @@ function checkCommand(command, versionArgs, label, options = {}) {
     label,
     ok: result.status === 0,
     optional: Boolean(options.optional),
-    note: result.status === 0 ? output || "available" : options.optional ? "optional; only needed for Claude Code 本机配置" : "not found or not configured",
+    note: result.status === 0
+      ? output || "available"
+      : options.optional
+        ? options.missing || "optional; only needed for advanced usage"
+        : "not found or not configured",
   });
 }
 
@@ -106,6 +127,11 @@ function printSummary() {
     console.log(`${prefix} ${check.label}: ${check.note}`);
   }
 
+  console.log("");
+  console.log("For most first-time users:");
+  console.log("  Required: Node.js 20+, npm, and one model API Key.");
+  console.log("  Optional: Poppler for better PDF layout/images, OCRmyPDF/Tesseract for scanned PDFs, Docker for always-on usage.");
+  console.log("  Claude Code CLI is only needed for the \"Claude Code 本机配置\" Provider; Kimi Code Direct does not need it.");
   console.log("");
   console.log("Next:");
   console.log("  npm run dev");

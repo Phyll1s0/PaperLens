@@ -1,4 +1,8 @@
-import { normalizeFormulaArtifactLatex, normalizeRichTextSource } from "./rich-text-utils.js";
+import {
+  isLikelyInlineMathDollarOpen,
+  normalizeFormulaArtifactLatex,
+  normalizeRichTextSource,
+} from "./rich-text-utils.js";
 import katex from "/vendor/katex/katex.mjs";
 
 const state = {
@@ -14,6 +18,7 @@ const state = {
   artifactEditBusyId: null,
   pipelineBusy: false,
   jobHistory: [],
+  recentPaperCount: 0,
   pipelineQuality: null,
   exportQa: null,
   segmentationDebug: null,
@@ -40,6 +45,7 @@ const state = {
     currentBatchSize: 0,
     strategy: null,
     budgetEstimate: null,
+    timeEstimate: null,
     startedAt: 0,
     timer: null,
     pollInFlight: false,
@@ -57,6 +63,7 @@ const state = {
     completed: 0,
     failed: 0,
     total: 0,
+    timeEstimate: null,
     startedAt: 0,
     timer: null,
     pollInFlight: false,
@@ -126,6 +133,8 @@ const els = {
   historyPanel: document.querySelector("#historyPanel"),
   historyCountBadge: document.querySelector("#historyCountBadge"),
   historyPanelSummary: document.querySelector("#historyPanelSummary"),
+  paperListSummary: document.querySelector("#paperListSummary"),
+  jobHistorySummary: document.querySelector("#jobHistorySummary"),
   compactPaperTitle: document.querySelector("#compactPaperTitle"),
   compactPaperStats: document.querySelector("#compactPaperStats"),
   paperList: document.querySelector("#paperList"),
@@ -149,6 +158,7 @@ const els = {
   pipelineQualityButton: document.querySelector("#pipelineQualityButton"),
   exportQaButton: document.querySelector("#exportQaButton"),
   segmentationDebugButton: document.querySelector("#segmentationDebugButton"),
+  repairSegmentationButton: document.querySelector("#repairSegmentationButton"),
   rerunAnalyzeButton: document.querySelector("#rerunAnalyzeButton"),
   stopAutoButton: document.querySelector("#stopAutoButton"),
   jobHistory: document.querySelector("#jobHistory"),
@@ -245,6 +255,7 @@ function bindEvents() {
   els.pipelineQualityButton.addEventListener("click", runPipelineQualityReport);
   els.exportQaButton.addEventListener("click", runExportQa);
   els.segmentationDebugButton.addEventListener("click", runSegmentationDebug);
+  els.repairSegmentationButton.addEventListener("click", repairSegmentationLocally);
   els.rerunAnalyzeButton.addEventListener("click", rerunFullPipeline);
   els.stopAutoButton.addEventListener("click", stopAutoAnalyze);
   els.providerSelect.addEventListener("change", () => {
@@ -726,6 +737,21 @@ function renderProviderGuide(diagnostics) {
   }
   fragment.append(chips);
 
+  if (Array.isArray(guide.steps) && guide.steps.length) {
+    const steps = document.createElement("ol");
+    steps.className = "provider-guide-steps";
+    for (const step of guide.steps) {
+      const item = document.createElement("li");
+      const title = document.createElement("strong");
+      title.textContent = step.title;
+      const text = document.createElement("span");
+      text.textContent = step.text;
+      item.append(title, text);
+      steps.append(item);
+    }
+    fragment.append(steps);
+  }
+
   const list = document.createElement("ul");
   list.className = "provider-guide-list";
   for (const item of guide.items) {
@@ -782,8 +808,40 @@ function getProviderGuide(settings, diagnostics) {
     title: providerLabel,
     summary: getProviderGuideSummary(settings, diagnostics),
     chips,
+    steps: getProviderGuideSteps(settings, diagnostics, { keyRequired, isClaudeProvider }),
     items,
   };
+}
+
+function getProviderGuideSteps(settings, diagnostics, context = {}) {
+  const providerName = PROVIDERS[settings.provider]?.label || "自定义 Provider";
+  const keyStep = context.keyRequired
+    ? settings.provider === "claude-kimi-agent"
+      ? "粘贴 Kimi Code Console 生成的完整 sk-kimi- Key；列表页里 sk-ki... 的脱敏值不能用。"
+      : "粘贴该 Provider 的完整 API Key；测试成功后后端只保存本地 key id。"
+    : "不用填页面 API Key；请先确认运行 PaperLens 的那台机器已经配置好 Claude Code。";
+  const proxyText = diagnostics.runtime?.isDocker
+    ? "需要代理时，Docker 通常填 http://host.docker.internal:端口；不要填容器内的 127.0.0.1。"
+    : "需要代理时，填本机代理地址，例如 http://127.0.0.1:7897；不同用户按自己的端口填写。";
+
+  return [
+    {
+      title: "选择入口",
+      text: `当前是 ${providerName}。普通 API Key 用户优先用 Kimi Code Direct、DeepSeek、OpenAI 或自定义 OpenAI-compatible。`,
+    },
+    {
+      title: "填写 Key",
+      text: keyStep,
+    },
+    {
+      title: "代理可选",
+      text: proxyText,
+    },
+    {
+      title: "测试后再上传",
+      text: "先点“测试连接”。成功后再上传 PDF；长任务会进入后端队列，刷新页面后也能同步进度。",
+    },
+  ];
 }
 
 function getKeyGuideStatus(settings, diagnostics, keyRequired) {
@@ -926,7 +984,7 @@ function getProviderSpecificGuideItems(settings, diagnostics, context) {
     });
     items.push({
       status: "neutral",
-      text: "如果出现额度或频率限制，请在 Kimi Code 控制台检查会员权益、5 小时频率窗口和 Key 状态。",
+      text: "如果出现额度或频率限制，请在 Kimi Code 控制台检查会员权益、5 小时频率窗口和 Key 状态；这个通道不会受到本机 Claude Code budget 配置影响。",
     });
   } else if (settings.provider === "claude-local") {
     items.push({
@@ -949,6 +1007,10 @@ function getProviderSpecificGuideItems(settings, diagnostics, context) {
     items.push({
       status: settings.baseUrl.includes("deepseek.com") ? "ok" : "warn",
       text: "DeepSeek 推荐 Base URL 为 https://api.deepseek.com，模型可用 deepseek-v4-flash 或 deepseek-v4-pro。",
+    });
+    items.push({
+      status: "neutral",
+      text: "如果测试连接成功但长任务很慢，可以优先用“快速”模式试跑，再切回“精读”处理正式论文。",
     });
   } else if (settings.provider === "custom") {
     items.push({
@@ -1156,6 +1218,8 @@ async function loadRecentPapers() {
     const data = await readResponse(response);
     renderRecentPapers(data.papers || []);
   } catch (error) {
+    state.recentPaperCount = 0;
+    updateHistorySummary();
     els.paperList.textContent = "";
   }
 }
@@ -1190,6 +1254,9 @@ async function openPaper(paperId) {
 }
 
 function renderRecentPapers(papers) {
+  state.recentPaperCount = papers.length;
+  updateHistorySummary();
+
   if (!papers.length) {
     els.paperList.textContent = state.libraryQuery || state.favoriteOnly ? "没有匹配论文" : "暂无论文";
     return;
@@ -1680,7 +1747,10 @@ function formatActiveServiceJob(job = {}) {
   const done = Number(job.completed || 0) + Number(job.failed || 0);
   const total = Number(job.total || 0);
   const title = job.paperTitle ? `${truncateServiceText(job.paperTitle, 18)} · ` : "";
-  return `${title}${getJobStatusText(job.status)} ${done}/${total}`;
+  const estimate = normalizeJobTimeEstimate(job.timeEstimate);
+  const eta = estimate?.remainingSeconds ? ` · 剩余 ${formatDuration(estimate.remainingSeconds)}` : "";
+  const pace = estimate?.slow ? " · 慢于预期" : "";
+  return `${title}${getJobStatusText(job.status)} ${done}/${total}${eta}${pace}`;
 }
 
 function truncateServiceText(text, maxLength) {
@@ -1989,6 +2059,38 @@ async function runSegmentationDebug() {
   } catch (error) {
     setStatus(error.message, true);
   } finally {
+    updateAutoButtons();
+  }
+}
+
+async function repairSegmentationLocally() {
+  if (!state.paper || state.maintenanceBusy || state.pipelineBusy || state.autoAnalyze.running || state.segmentationJob.running) {
+    return;
+  }
+
+  state.maintenanceBusy = true;
+  updateAutoButtons();
+  setStatus("正在本地修复分段");
+
+  try {
+    const response = await apiFetch(`/api/papers/${encodeURIComponent(state.paper.id)}/segmentation/repair`, {
+      method: "POST",
+    }, "本地修复分段");
+    const result = await readResponse(response);
+    state.paper = result.paper || state.paper;
+    state.pipelineQuality = null;
+    state.exportQa = null;
+    state.segmentationDebug = null;
+    rememberManualEditAffectedParagraphs(result.changedParagraphIds);
+    renderPaperPreservingViewport();
+    await loadRecentPapers();
+    const affectedCount = Array.isArray(result.changedParagraphIds) ? result.changedParagraphIds.length : 0;
+    const suffix = affectedCount ? ` 可只补跑受影响 ${affectedCount} 段。` : "";
+    setStatus(`${result.message || "本地分段修复完成。"}${suffix}`);
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    state.maintenanceBusy = false;
     updateAutoButtons();
   }
 }
@@ -2367,6 +2469,7 @@ function applySegmentationJob(job) {
   state.segmentationJob.completed = Number(job.completed || 0);
   state.segmentationJob.failed = Number(job.failed || 0);
   state.segmentationJob.total = Number(job.total || 0);
+  state.segmentationJob.timeEstimate = normalizeJobTimeEstimate(job.timeEstimate);
   state.segmentationJob.startedAt = Date.parse(job.startedAt || job.createdAt) || Date.now();
   state.segmentationJob.lastProgressKey = getJobProgressKey(job);
 
@@ -2392,6 +2495,7 @@ function resetSegmentationJobState() {
     completed: 0,
     failed: 0,
     total: 0,
+    timeEstimate: null,
     startedAt: 0,
     pollInFlight: false,
     lastProgressKey: "",
@@ -2523,8 +2627,9 @@ function updateSegmentationStatus() {
   const strategyLabel = state.segmentationJob.strategy
     ? `${formatClientSegmentationRetryStrategyLabel(state.segmentationJob.strategy)} · `
     : "";
+  const etaLabel = formatJobEtaStatus(state.segmentationJob.timeEstimate, elapsed);
   const stopLabel = state.segmentationJob.stopRequested ? " · 正在停止" : "";
-  setStatus(`AI 分段队列 ${progress} · ${strategyLabel}已用 ${elapsed}s · ${state.segmentationJob.message || "处理中"}${stopLabel}`, state.segmentationJob.failed > 0);
+  setStatus(`AI 分段队列 ${progress} · ${strategyLabel}${etaLabel} · ${state.segmentationJob.message || "处理中"}${stopLabel}`, state.segmentationJob.failed > 0 || state.segmentationJob.timeEstimate?.slow);
 }
 
 function clientSleep(ms) {
@@ -2601,6 +2706,7 @@ function applyAnalysisJob(job) {
   state.autoAnalyze.currentBatchSize = Number(job.currentBatchSize || 0);
   state.autoAnalyze.strategy = job.strategy || null;
   state.autoAnalyze.budgetEstimate = normalizeAnalysisBudgetEstimate(job.budgetEstimate);
+  state.autoAnalyze.timeEstimate = normalizeJobTimeEstimate(job.timeEstimate);
   state.autoAnalyze.startedAt = Date.parse(job.startedAt || job.createdAt) || Date.now();
   state.autoAnalyze.lastProgressKey = getJobProgressKey(job);
 
@@ -2627,6 +2733,7 @@ function resetAnalysisJobState() {
     currentBatchSize: 0,
     strategy: null,
     budgetEstimate: null,
+    timeEstimate: null,
     startedAt: 0,
     pollInFlight: false,
     lastProgressKey: "",
@@ -2734,16 +2841,7 @@ function renderJobHistory() {
     return;
   }
 
-  const count = state.paper ? state.jobHistory.length : 0;
-  if (els.historyCountBadge) {
-    els.historyCountBadge.textContent = String(count);
-    els.historyCountBadge.classList.toggle("empty", count === 0);
-  }
-  if (els.historyPanelSummary) {
-    els.historyPanelSummary.textContent = state.paper
-      ? count ? `${count} 条任务记录` : "暂无任务记录"
-      : "未载入论文";
-  }
+  updateHistorySummary();
 
   if (!state.paper || !state.jobHistory.length) {
     const empty = document.createElement("p");
@@ -2759,12 +2857,14 @@ function renderJobHistory() {
     item.className = `job-history-item ${job.status}`;
 
     const summary = document.createElement("span");
+    const durationLabel = formatJobDurationLabel(job);
     summary.textContent = [
       getJobTypeLabel(job.type),
       getJobStatusText(job.status),
       `${Number(job.completed || 0) + Number(job.failed || 0)}/${job.total || 0}`,
       `失败 ${job.failed || 0}`,
-    ].join(" · ");
+      durationLabel,
+    ].filter(Boolean).join(" · ");
     item.append(summary);
 
     if (!isActiveRetryableJob(job) && Number(job.failed || 0) > 0 && (job.type === "analysis" || job.type === "segmentation")) {
@@ -2780,6 +2880,32 @@ function renderJobHistory() {
   }
 
   els.jobHistory.replaceChildren(fragment);
+}
+
+function updateHistorySummary() {
+  const paperCount = Number(state.recentPaperCount || 0);
+  const jobCount = state.paper ? state.jobHistory.length : 0;
+  const total = paperCount + jobCount;
+  const paperLabel = state.libraryQuery || state.favoriteOnly
+    ? paperCount ? `${paperCount} 篇匹配论文` : "无匹配论文"
+    : paperCount ? `${paperCount} 篇最近论文` : "暂无论文";
+  const jobLabel = state.paper
+    ? jobCount ? `${jobCount} 条任务` : "暂无任务"
+    : "未载入论文";
+
+  if (els.historyCountBadge) {
+    els.historyCountBadge.textContent = String(total);
+    els.historyCountBadge.classList.toggle("empty", total === 0);
+  }
+  if (els.historyPanelSummary) {
+    els.historyPanelSummary.textContent = `${paperLabel} · ${jobLabel}`;
+  }
+  if (els.paperListSummary) {
+    els.paperListSummary.textContent = paperLabel;
+  }
+  if (els.jobHistorySummary) {
+    els.jobHistorySummary.textContent = jobLabel;
+  }
 }
 
 function syncCompactPaperSummary(title, stats) {
@@ -3196,7 +3322,7 @@ function buildClientVisualQa(paper) {
         issueTypes.push("oversized");
       }
       const formulaFields = getClientFormulaRenderFields(artifact);
-      if (artifact.type === "formula" && formulaFields.latexConfidence === "low") {
+      if (artifact.type === "formula" && formulaFields.renderMode === "image-latex") {
         issueTypes.push("low-confidence-formula");
       }
       if (hasClientArtifactTypeConflict(artifact)) {
@@ -3281,7 +3407,7 @@ function getVisualQaCategories(summary = {}) {
     { type: "missing-crop", label: "缺裁剪", count: summary.missingCrops || 0 },
     { type: "missing-asset", label: "页图缺失", count: summary.missingAssets || 0 },
     { type: "low-confidence", label: "低置信", count: summary.lowConfidence || 0 },
-    { type: "low-confidence-formula", label: "公式低置信", count: summary.lowConfidenceFormulas || 0 },
+    { type: "low-confidence-formula", label: "公式待核对", count: summary.lowConfidenceFormulas || 0 },
     { type: "oversized", label: "过大", count: summary.oversized || 0 },
     { type: "type-conflict", label: "类型冲突", count: summary.typeConflicts || 0 },
     { type: "formula", label: "公式", count: summary.formulas || 0 },
@@ -3969,7 +4095,9 @@ function renderVisualQaItem(item) {
   context.textContent = formatVisualQaItemContext(item);
   body.append(title, context);
 
-  if (item.textPreview) {
+  if (artifact?.type === "formula" && hasArtifactCrop(artifact)) {
+    body.append(renderVisualQaFormulaCompare(artifact, item));
+  } else if (item.textPreview) {
     const preview = document.createElement("p");
     preview.className = "visual-qa-preview";
     preview.textContent = item.textPreview;
@@ -4014,6 +4142,44 @@ function renderVisualQaItem(item) {
     row.append(actions);
   }
   return row;
+}
+
+function renderVisualQaFormulaCompare(artifact, item = {}) {
+  const compare = document.createElement("div");
+  compare.className = "visual-qa-formula-compare";
+
+  const cropPreview = document.createElement("button");
+  cropPreview.type = "button";
+  cropPreview.className = "visual-qa-formula-crop";
+  cropPreview.title = "放大查看公式裁剪";
+  cropPreview.addEventListener("click", () => openArtifactViewer(artifact));
+  cropPreview.append(renderCropImage(artifact, { preferCropUrl: true }));
+
+  const textPanel = document.createElement("div");
+  textPanel.className = "visual-qa-formula-text";
+  const label = document.createElement("span");
+  label.textContent = formatFormulaQaTextLabel(item);
+  const code = document.createElement("code");
+  code.textContent = String(artifact.latex || artifact.text || item.textPreview || "").replace(/\s+/g, " ").trim() || "未识别到公式文本";
+  textPanel.append(label, code);
+  if (item.formulaLatexRisk) {
+    const risk = document.createElement("small");
+    risk.textContent = `风险：${item.formulaLatexRisk}`;
+    textPanel.append(risk);
+  }
+
+  compare.append(cropPreview, textPanel);
+  return compare;
+}
+
+function formatFormulaQaTextLabel(item = {}) {
+  if (item.renderMode === "image") {
+    return "仅图片";
+  }
+  if (item.renderMode === "image-latex") {
+    return item.latexConfidence === "low" ? "低置信识别文本" : "图片优先识别文本";
+  }
+  return "可渲染 LaTeX";
 }
 
 function getActiveVisualQaFilter(result) {
@@ -4075,7 +4241,7 @@ function getVisualQaSummaryItems(summary = {}) {
     { label: "代码", value: summary.codeBlocks || 0 },
     { label: "缺裁剪", value: summary.missingCrops || 0 },
     { label: "低置信", value: summary.lowConfidence || 0 },
-    { label: "公式低置信", value: summary.lowConfidenceFormulas || 0 },
+    { label: "公式待核对", value: summary.lowConfidenceFormulas || 0 },
     { label: "过大", value: summary.oversized || 0 },
     { label: "拆分", value: summary.splitCandidates || 0 },
     { label: "类型冲突", value: summary.typeConflicts || 0 },
@@ -4101,6 +4267,9 @@ function formatVisualQaItemContext(item) {
   }
   if (item.cropQuality?.confidence) {
     parts.push(`置信 ${formatVisualQaConfidence(item.cropQuality.confidence)}`);
+  }
+  if (Number.isFinite(Number(item.cropQuality?.score))) {
+    parts.push(`质量 ${Math.round(Number(item.cropQuality.score))}/100`);
   }
   if (item.cropQuality?.oversized) {
     parts.push("区域偏大");
@@ -4132,7 +4301,7 @@ function getVisualQaTypeLabel(type) {
     "missing-crop": "缺裁剪",
     "missing-asset": "页图缺失",
     "low-confidence": "低置信",
-    "low-confidence-formula": "公式低置信",
+    "low-confidence-formula": "公式待核对",
     oversized: "过大",
     "type-conflict": "类型冲突",
     "figure-text": "图中文字",
@@ -4170,7 +4339,10 @@ function formatFormulaRenderState(item = {}) {
   if (item.renderMode === "image") {
     return "仅图片";
   }
-  if (item.renderMode === "image-latex" || confidence === "low") {
+  if (item.renderMode === "image-latex") {
+    return confidence === "low" ? "图片优先 · 低置信文本" : "图片优先 · 文本核对";
+  }
+  if (confidence === "low") {
     return "低置信 LaTeX";
   }
   if (confidence === "high" || confidence === "medium") {
@@ -4239,7 +4411,21 @@ function inferClientFormulaRenderMode(artifact, text, latexConfidence) {
   if (latexConfidence === "low") {
     return hasCrop ? "image-latex" : "latex";
   }
+  if (latexConfidence === "medium" && hasCrop && isClientAutoExtractedFormulaText(artifact)) {
+    return "image-latex";
+  }
   return "latex";
+}
+
+function isClientAutoExtractedFormulaText(artifact = {}) {
+  const source = artifact.latexSource || "";
+  if (source === "pdf-text" || source === "ocr-text") {
+    return true;
+  }
+  if (source === "manual" || artifact.manualEditedAt || artifact.manualTextEditedAt || artifact.manualArtifactOverride) {
+    return false;
+  }
+  return !artifact.modelGenerated;
 }
 
 function isClientBrokenFormulaText(text) {
@@ -4408,6 +4594,11 @@ function renderPipelineQualityPanel(result) {
   }
   panel.append(metrics);
 
+  const recoverableAudit = renderPipelineRecoverableAudit(result);
+  if (recoverableAudit) {
+    panel.append(recoverableAudit);
+  }
+
   const checks = Array.isArray(result.checks) ? result.checks : [];
   const list = document.createElement("div");
   list.className = "pipeline-quality-checks";
@@ -4424,6 +4615,106 @@ function renderPipelineQualityPanel(result) {
   }
 
   return panel;
+}
+
+function renderPipelineRecoverableAudit(result) {
+  const paragraphMetrics = result?.metrics?.paragraphs || {};
+  const total = Number(paragraphMetrics.recoverableFiltered || 0);
+  if (!total) {
+    return null;
+  }
+
+  const wrap = document.createElement("div");
+  wrap.className = "pipeline-recoverable-audit";
+
+  const header = document.createElement("div");
+  header.className = "pipeline-recoverable-audit-header";
+  const title = document.createElement("strong");
+  title.textContent = "已过滤可恢复";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary-button export-qa-locate";
+  button.textContent = "分段调试";
+  button.addEventListener("click", () => runSegmentationDebug());
+  header.append(title, button);
+  wrap.append(header);
+
+  const chips = document.createElement("div");
+  chips.className = "pipeline-recoverable-chips";
+  for (const item of getPipelineRecoverableSummaryItems(paragraphMetrics)) {
+    const chip = document.createElement("span");
+    chip.textContent = `${item.label} ${item.value}`;
+    chips.append(chip);
+  }
+  wrap.append(chips);
+
+  const samples = Array.isArray(paragraphMetrics.recoverableSamples)
+    ? paragraphMetrics.recoverableSamples.filter((sample) => sample?.preview)
+    : [];
+  if (samples.length) {
+    const list = document.createElement("div");
+    list.className = "pipeline-recoverable-samples";
+    for (const sample of samples.slice(0, 4)) {
+      list.append(renderPipelineRecoverableSample(sample));
+    }
+    wrap.append(list);
+  }
+
+  return wrap;
+}
+
+function renderPipelineRecoverableSample(sample) {
+  const row = document.createElement("div");
+  row.className = "pipeline-recoverable-sample";
+
+  const marker = document.createElement("span");
+  marker.textContent = formatPipelineRecoverableReason(sample.reason);
+  row.append(marker);
+
+  const preview = document.createElement("p");
+  preview.textContent = sample.preview || "";
+  row.append(preview);
+
+  if (sample.paragraphId) {
+    const actions = document.createElement("div");
+    actions.className = "pipeline-recoverable-actions";
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary-button export-qa-locate";
+    button.textContent = "定位";
+    button.addEventListener("click", () => revealAndScrollToParagraph(sample.paragraphId));
+    actions.append(button);
+
+    if (canRestorePipelineRecoverableSample(sample)) {
+      const restoreButton = document.createElement("button");
+      restoreButton.type = "button";
+      restoreButton.className = "secondary-button export-qa-locate";
+      restoreButton.textContent = state.paragraphEditBusyId === sample.paragraphId ? "恢复中" : "恢复";
+      restoreButton.title = "恢复为正文段落，并标记为待补跑。";
+      restoreButton.disabled = Boolean(state.paragraphEditBusyId) ||
+        state.autoAnalyze.running ||
+        state.segmentationJob.running ||
+        state.pipelineBusy ||
+        state.maintenanceBusy;
+      restoreButton.addEventListener("click", () => {
+        editParagraph(sample.paragraphId, { action: "restore" });
+      });
+      actions.append(restoreButton);
+    }
+
+    row.append(actions);
+  }
+
+  return row;
+}
+
+function canRestorePipelineRecoverableSample(sample) {
+  const paragraph = sample?.paragraphId ? getParagraphById(sample.paragraphId) : null;
+  if (paragraph) {
+    return Boolean(paragraph.kind === "paragraph" && !isReadingParagraph(state.paper, paragraph));
+  }
+  return Boolean(sample?.restorable && sample?.paragraphId);
 }
 
 function renderPipelineQualityCheck(check) {
@@ -4534,6 +4825,10 @@ function getPipelineQualityMetricItems(result) {
       value: `${metrics.paragraphs?.sourceBoxPercent || 0}%`,
     },
     {
+      label: "可恢复",
+      value: formatPipelineRecoverableMetric(metrics.paragraphs),
+    },
+    {
       label: "讲解",
       value: `${metrics.analysis?.complete || 0}/${metrics.analysis?.total || 0}`,
     },
@@ -4550,6 +4845,51 @@ function getPipelineQualityMetricItems(result) {
       value: getPipelineQualityExportLabel(metrics.export?.status),
     },
   ];
+}
+
+function formatPipelineRecoverableMetric(paragraphs = {}) {
+  const total = Number(paragraphs.recoverableFiltered || 0);
+  if (!total) {
+    return "0";
+  }
+  const parts = [
+    paragraphs.recoverableResourceLinks ? `链接 ${paragraphs.recoverableResourceLinks}` : "",
+    paragraphs.recoverableFormulaLike ? `公式 ${paragraphs.recoverableFormulaLike}` : "",
+    paragraphs.recoverableVisualText ? `图表 ${paragraphs.recoverableVisualText}` : "",
+  ].filter(Boolean);
+  return parts.length ? `${total} · ${parts.join("/")}` : `${total}`;
+}
+
+function getPipelineRecoverableSummaryItems(paragraphs = {}) {
+  return [
+    { label: "总计", value: paragraphs.recoverableFiltered || 0 },
+    { label: "链接", value: paragraphs.recoverableResourceLinks || 0 },
+    { label: "公式", value: paragraphs.recoverableFormulaLike || 0 },
+    { label: "图表/代码", value: paragraphs.recoverableVisualText || 0 },
+  ];
+}
+
+function formatPipelineRecoverableReason(reason) {
+  const value = String(reason || "").toLowerCase();
+  if (value.includes("resource-link")) {
+    return "链接";
+  }
+  if (value.includes("formula") || value.includes("math") || value.includes("equation")) {
+    return "公式";
+  }
+  if (value.includes("caption")) {
+    return "图注";
+  }
+  if (value.includes("table")) {
+    return "表格";
+  }
+  if (value.includes("code")) {
+    return "代码";
+  }
+  if (value.includes("bibliography")) {
+    return "参考";
+  }
+  return "过滤";
 }
 
 function formatPipelinePlanningMetric(planning = {}) {
@@ -5888,6 +6228,10 @@ function renderPageArtifact(artifact) {
     ? ` · ${formatFormulaRenderState(getClientFormulaRenderFields(artifact))}`
     : "";
   meta.textContent = artifact.hidden ? `已隐藏 · ${labelText}${formulaState}` : `${labelText}${formulaState}`;
+  const qualityBadge = renderArtifactCropQualityBadge(artifact);
+  if (qualityBadge) {
+    meta.append(qualityBadge);
+  }
   header.append(meta, renderArtifactActions(artifact));
 
   const body = document.createElement("div");
@@ -5911,6 +6255,58 @@ function renderPageArtifact(artifact) {
   return card;
 }
 
+function renderArtifactCropQualityBadge(artifact) {
+  const quality = artifact?.cropQuality || {};
+  if (!hasArtifactCrop(artifact) || !quality || !Object.keys(quality).length) {
+    return null;
+  }
+
+  const badge = document.createElement("span");
+  const score = Number.isFinite(Number(quality.score)) ? Number(quality.score) : null;
+  const confidence = quality.confidence || "unknown";
+  badge.className = `artifact-quality-badge ${confidence}`;
+  if (quality.oversized) {
+    badge.classList.add("is-oversized");
+  }
+  const parts = [];
+  if (score !== null) {
+    parts.push(`裁剪 ${Math.max(0, Math.min(100, Math.round(score)))}/100`);
+  } else {
+    parts.push(`裁剪 ${formatVisualQaConfidence(confidence)}`);
+  }
+  if (quality.oversized) {
+    parts.push("偏大");
+  }
+  if (artifact.splitCandidate) {
+    parts.push("拆分");
+  }
+  badge.textContent = parts.join(" · ");
+  badge.title = formatArtifactCropQualityTitle(artifact);
+  return badge;
+}
+
+function formatArtifactCropQualityTitle(artifact = {}) {
+  const crop = artifact.crop || {};
+  const quality = artifact.cropQuality || {};
+  const parts = [];
+  if (Number(crop.width) > 0 && Number(crop.height) > 0) {
+    parts.push(`裁剪区域 ${formatCropNumber(crop.width)}×${formatCropNumber(crop.height)}`);
+  }
+  if (Number.isFinite(Number(quality.score))) {
+    parts.push(`质量分 ${Math.round(Number(quality.score))}/100`);
+  }
+  if (quality.confidence) {
+    parts.push(`置信 ${formatVisualQaConfidence(quality.confidence)}`);
+  }
+  if (quality.areaRatio) {
+    parts.push(`面积 ${Math.round(Number(quality.areaRatio) * 100)}%`);
+  }
+  if (quality.oversized) {
+    parts.push("区域偏大，建议放大检查或手动裁剪");
+  }
+  return parts.join(" · ") || "裁剪质量";
+}
+
 function getArtifactDisplayMarkdown(artifact) {
   if (artifact?.type !== "formula") {
     return artifact?.text || "";
@@ -5926,7 +6322,10 @@ function getArtifactDisplayMarkdown(artifact) {
     return "";
   }
   if (fields.renderMode === "image-latex" || fields.latexConfidence === "low") {
-    return `> 识别文本（低置信，仅供核对）\n>\n> \`${escapeInlineCode(source)}\``;
+    const label = fields.latexConfidence === "low"
+      ? "识别文本（低置信，仅供核对）"
+      : "识别文本（图片优先，供核对）";
+    return `> ${label}\n>\n> \`${escapeInlineCode(source)}\``;
   }
   if (hasMathDelimiters(source)) {
     return source;
@@ -7903,7 +8302,22 @@ function pushTextSegment(segments, text) {
 
 function hasMathDelimiters(text) {
   const source = String(text || "");
-  return /\$\$|\\\(|\\\[|\\begin\{[^}]+}/.test(source) || /(^|[^\\])\$[^$\s\d]/.test(source);
+  if (/\$\$|\\\(|\\\[|\\begin\{[^}]+}/.test(source)) {
+    return true;
+  }
+
+  let index = source.indexOf("$");
+  while (index !== -1) {
+    if (isLikelyInlineDollar(source, index)) {
+      const close = findClosingMathDelimiter(source, { open: "$", close: "$", display: false }, index + 1);
+      if (close !== -1 && isRenderableMathSource(source.slice(index + 1, close).trim(), false)) {
+        return true;
+      }
+    }
+    index = source.indexOf("$", index + 1);
+  }
+
+  return false;
 }
 
 function findNextMathDelimiter(text, fromIndex) {
@@ -7942,21 +8356,7 @@ function findNextDelimiterOpen(text, delimiter, fromIndex) {
 }
 
 function isLikelyInlineDollar(text, index) {
-  if (text[index + 1] === "$") {
-    return false;
-  }
-
-  const previous = text[index - 1] || "";
-  const next = text[index + 1] || "";
-  if (!next || /\s/.test(next) || /\d/.test(next)) {
-    return false;
-  }
-
-  if (previous && /[A-Za-z0-9\\]/.test(previous)) {
-    return false;
-  }
-
-  return true;
+  return isLikelyInlineMathDollarOpen(text, index);
 }
 
 function findClosingMathDelimiter(text, delimiter, fromIndex) {
@@ -8463,6 +8863,9 @@ function renderAnalysisDashboard() {
   const estimateSeconds = activeOrKnownJob && strategy.estimatedRemainingSeconds != null
     ? Number(strategy.estimatedRemainingSeconds)
     : estimateAnalysisSeconds(targetCount, strategy);
+  const timeEstimate = activeOrKnownJob ? state.autoAnalyze.timeEstimate : null;
+  const remainingSeconds = timeEstimate?.remainingSeconds ?? estimateSeconds;
+  const estimatedTotalSeconds = timeEstimate?.totalSeconds || timeEstimate?.estimatedTotalSeconds || estimateSeconds;
   const budgetEstimate = activeOrKnownJob && state.autoAnalyze.budgetEstimate
     ? state.autoAnalyze.budgetEstimate
     : buildClientAnalysisBudgetEstimate(
@@ -8481,7 +8884,7 @@ function renderAnalysisDashboard() {
   const title = document.createElement("strong");
   title.textContent = "速度与质量";
   const summary = document.createElement("span");
-  summary.textContent = getAnalysisDashboardSummary(profile, strategy, targetCount, estimateSeconds, budgetEstimate);
+  summary.textContent = getAnalysisDashboardSummary(profile, strategy, targetCount, remainingSeconds, budgetEstimate, timeEstimate);
   header.append(title, summary);
   fragment.append(header);
 
@@ -8489,10 +8892,12 @@ function renderAnalysisDashboard() {
   grid.className = "analysis-dashboard-grid";
   for (const item of [
     { label: "模式", value: ANALYSIS_PROFILE_LABELS[profile] || "精读" },
-    { label: "预计", value: targetCount ? formatDuration(estimateSeconds) : "0s" },
+    { label: activeOrKnownJob ? "剩余" : "预计", value: targetCount ? formatDuration(remainingSeconds) : "0s" },
+    { label: "预计总", value: targetCount || activeOrKnownJob ? formatDuration(estimatedTotalSeconds) : "0s" },
     { label: "批次", value: `${strategy.effectiveBatchSize || strategy.batchSize || 1}` },
     { label: "并发", value: `${strategy.concurrency || 1}` },
     { label: "缓存", value: cacheLabel },
+    { label: "速度", value: getTimePaceLabel(timeEstimate) },
     { label: "Token", value: budgetEstimate.totalTokens ? `≈${formatCompactNumber(budgetEstimate.totalTokens)}` : "0" },
     { label: "费用", value: budgetEstimate.estimatedCostUsd ? `≈${formatUsd(budgetEstimate.estimatedCostUsd)}` : "$0.00" },
     { label: "预算", value: getBudgetStatusLabel(budgetEstimate) },
@@ -8741,14 +9146,18 @@ function getBudgetStatusLabel(estimate = {}) {
   return formatUsd(estimate.maxTaskBudgetUsd);
 }
 
-function getAnalysisDashboardSummary(profile, strategy, targetCount, estimateSeconds, budgetEstimate = null) {
+function getAnalysisDashboardSummary(profile, strategy, targetCount, estimateSeconds, budgetEstimate = null, timeEstimate = null) {
   if (!targetCount) {
     return state.paper ? "当前没有待分析段落" : "载入论文后显示预计耗时和队列策略";
   }
 
   const profileLabel = profile === "fast" ? "吞吐优先" : "质量优先";
   const costLabel = budgetEstimate?.estimatedCostUsd ? ` · ≈${formatUsd(budgetEstimate.estimatedCostUsd)}` : "";
-  return `${profileLabel} · ${targetCount} 段 · 约 ${formatDuration(estimateSeconds)} · ${strategy.concurrency || 1} 并发${costLabel}`;
+  const timeLabel = timeEstimate
+    ? `剩余约 ${formatDuration(timeEstimate.remainingSeconds)}`
+    : `约 ${formatDuration(estimateSeconds)}`;
+  const paceLabel = timeEstimate?.slow ? " · 慢于预期" : "";
+  return `${profileLabel} · ${targetCount} 段 · ${timeLabel} · ${strategy.concurrency || 1} 并发${costLabel}${paceLabel}`;
 }
 
 function getAnalysisStrategyLabel(strategy = {}) {
@@ -8760,6 +9169,84 @@ function getAnalysisStrategyLabel(strategy = {}) {
     "openai-compatible": "OpenAI兼容",
   }[strategy.name] || strategy.name || "默认";
   return `${providerLabel}/${ANALYSIS_PROFILE_LABELS[normalizeAnalysisProfile(strategy.profile)]}`;
+}
+
+function normalizeJobTimeEstimate(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  return {
+    version: Number(value.version || 0),
+    source: String(value.source || ""),
+    providerClass: String(value.providerClass || ""),
+    phase: String(value.phase || ""),
+    totalSeconds: Number(value.totalSeconds || 0),
+    estimatedTotalSeconds: Number(value.estimatedTotalSeconds || 0),
+    elapsedSeconds: Number(value.elapsedSeconds || 0),
+    remainingSeconds: Number(value.remainingSeconds || 0),
+    etaAt: String(value.etaAt || ""),
+    progressRatio: Number(value.progressRatio || 0),
+    expectedElapsedSeconds: Number(value.expectedElapsedSeconds || 0),
+    slowRatio: Number(value.slowRatio || 1),
+    slow: Boolean(value.slow),
+    confidence: String(value.confidence || ""),
+    historySamples: Number(value.historySamples || 0),
+    unitSeconds: Number(value.unitSeconds || 0),
+    breakdown: Array.isArray(value.breakdown) ? value.breakdown : [],
+  };
+}
+
+function formatJobEtaStatus(estimate, fallbackElapsedSeconds = 0) {
+  const elapsedSeconds = estimate?.elapsedSeconds || fallbackElapsedSeconds;
+  const parts = [`已用 ${formatDuration(elapsedSeconds)}`];
+  if (estimate?.remainingSeconds > 0) {
+    parts.push(`剩余约 ${formatDuration(estimate.remainingSeconds)}`);
+  }
+  if (estimate?.totalSeconds > 0) {
+    parts.push(`预计总 ${formatDuration(estimate.totalSeconds)}`);
+  }
+  if (estimate?.etaAt) {
+    const date = new Date(estimate.etaAt);
+    if (Number.isFinite(date.getTime())) {
+      parts.push(`约 ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} 完成`);
+    }
+  }
+  if (estimate?.slow) {
+    parts.push(`慢于预期 ${estimate.slowRatio.toFixed(1)}x`);
+  }
+  return parts.join(" · ");
+}
+
+function getTimePaceLabel(estimate) {
+  if (!estimate) {
+    return "待运行";
+  }
+  if (estimate.slow) {
+    return `${estimate.slowRatio.toFixed(1)}x 慢`;
+  }
+  if (estimate.historySamples > 0) {
+    return `历史校准 ${estimate.historySamples}`;
+  }
+  return estimate.confidence === "medium" ? "策略估算" : "粗估";
+}
+
+function formatJobDurationLabel(job = {}) {
+  const estimate = normalizeJobTimeEstimate(job.timeEstimate);
+  if (estimate?.elapsedSeconds) {
+    const total = estimate.totalSeconds || estimate.elapsedSeconds;
+    const remaining = estimate.remainingSeconds ? ` · 剩余 ${formatDuration(estimate.remainingSeconds)}` : "";
+    const pace = estimate.slow ? ` · 慢于预期 ${estimate.slowRatio.toFixed(1)}x` : "";
+    return `${formatDuration(total)}${remaining}${pace}`;
+  }
+
+  const start = Date.parse(job.startedAt || job.createdAt || "");
+  const end = Date.parse(job.completedAt || "");
+  if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+    return formatDuration(Math.round((end - start) / 1000));
+  }
+
+  return "";
 }
 
 function formatDuration(seconds) {
@@ -8829,11 +9316,12 @@ function updateAutoStatus() {
   const batchLabel = state.autoAnalyze.currentBatchSize > 1 ? `，运行中 ${state.autoAnalyze.currentBatchSize} 段` : "";
   const cacheLabel = state.autoAnalyze.cacheHits > 0 ? ` · 缓存 ${state.autoAnalyze.cacheHits}` : "";
   const stopLabel = state.autoAnalyze.stopRequested ? "，正在停止" : "";
+  const etaLabel = formatJobEtaStatus(state.autoAnalyze.timeEstimate, elapsed);
   setStatus([
     `后端分析 ${state.autoAnalyze.completed + state.autoAnalyze.failed}/${state.autoAnalyze.total}`,
     `失败 ${state.autoAnalyze.failed}`,
-    `已用 ${elapsed}s${currentLabel}${batchLabel}${stopLabel}${cacheLabel}`,
-  ].join(" · "), state.autoAnalyze.failed > 0);
+    `${etaLabel}${currentLabel}${batchLabel}${stopLabel}${cacheLabel}`,
+  ].join(" · "), state.autoAnalyze.failed > 0 || state.autoAnalyze.timeEstimate?.slow);
 }
 
 function updateAutoButtons() {
@@ -8855,6 +9343,8 @@ function updateAutoButtons() {
   els.exportQaButton.textContent = "导出检查";
   els.segmentationDebugButton.disabled = !state.paper || busy;
   els.segmentationDebugButton.textContent = "分段调试";
+  els.repairSegmentationButton.disabled = !state.paper || busy || ocrRequired;
+  els.repairSegmentationButton.textContent = state.maintenanceBusy ? "修复中" : "本地修复";
   els.rerunAnalyzeButton.disabled = !state.paper || busy || ocrRequired;
   els.rebuildVisualButton.disabled = !state.paper || busy;
   els.rebuildVisualButton.textContent = state.maintenanceBusy ? "重建中" : "重建图表";
@@ -8884,6 +9374,7 @@ function setBusy(isBusy) {
   els.autoAnalyzeInput.disabled = isBusy;
   els.rebuildAllVisualButton.disabled = isBusy || state.maintenanceBusy;
   els.rebuildVisualButton.disabled = isBusy || state.maintenanceBusy || !state.paper;
+  els.repairSegmentationButton.disabled = isBusy || state.maintenanceBusy || !state.paper;
   els.toggleHiddenParagraphsButton.disabled = isBusy || state.maintenanceBusy || !state.paper;
 }
 

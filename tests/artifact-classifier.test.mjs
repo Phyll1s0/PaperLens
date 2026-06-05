@@ -108,6 +108,16 @@ assert.equal(
 );
 
 assert.equal(
+  isLikelyFormulaBlockText("xmax", { lineCount: 1 }),
+  false,
+);
+
+assert.equal(
+  isLikelyFormulaBlockText("FP4 INT4 E8M0", { lineCount: 1 }),
+  false,
+);
+
+assert.equal(
   isLikelyFormulaBlockText("GPT4TS Task-specific Reference No Fine-tuning epochs: 100, cos: 1, tmax: 10, nL = 6,η = 10−3", { lineCount: 1 }),
   false,
 );

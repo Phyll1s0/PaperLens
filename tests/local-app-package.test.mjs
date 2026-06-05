@@ -41,6 +41,10 @@ try {
   await stat(path.join(output.packageDir, "PaperLens.sh"));
   await stat(path.join(output.packageDir, "scripts", "paperlens-app.mjs"));
   await stat(path.join(output.packageDir, "public", "index.html"));
+  await stat(path.join(output.packageDir, "docs", "README.md"));
+  await stat(path.join(output.packageDir, "docs", "USAGE.md"));
+  await stat(path.join(output.packageDir, "docs", "GETTING_STARTED.md"));
+  await stat(path.join(output.packageDir, "docs", "PDF_STRATEGY.md"));
 
   await assert.rejects(() => stat(path.join(output.packageDir, "data")));
   await assert.rejects(() => stat(path.join(output.packageDir, "uploads")));
@@ -52,6 +56,10 @@ try {
   const startHere = await readFile(path.join(output.packageDir, "README-START-HERE.txt"), "utf8");
   assert.match(startHere, /Node\.js 20/);
   assert.match(startHere, /PaperLens\.command/);
+  assert.match(startHere, /docs\/USAGE\.md/);
+  assert.match(startHere, /docs\/GETTING_STARTED\.md/);
+  assert.match(startHere, /docs\/PDF_STRATEGY\.md/);
+  assert.match(startHere, /docs\/README\.md/);
 
   if (output.archiveCreated) {
     await stat(output.archivePath);

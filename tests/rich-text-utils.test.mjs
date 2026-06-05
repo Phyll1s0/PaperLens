@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   buildSourceMarkdown,
   detectSourceLeadIn,
+  isLikelyInlineMathDollarOpen,
   isLatexShardLine,
   isLikelyBrokenLatexBlock,
   normalizeBareLatexExpression,
@@ -50,6 +51,11 @@ assert.equal(isLatexShardLine("这是中文说明"), false);
 assert.equal(isLatexShardLine("\\{"), true);
 
 assert.equal(normalizeMathUnicodeAlphanumerics("𝑘×𝐵elem+𝐵meta+𝐵scale"), "k×Belem+Bmeta+Bscale");
+assert.equal(isLikelyInlineMathDollarOpen("$0.5P + 0.25P$）", 0), true);
+assert.equal(isLikelyInlineMathDollarOpen("$2^k$ is a power", 0), true);
+assert.equal(isLikelyInlineMathDollarOpen("$X$ is a variable", 0), true);
+assert.equal(isLikelyInlineMathDollarOpen("price $500 today", 6), false);
+assert.equal(isLikelyInlineMathDollarOpen("$20$ is plain numeric", 0), false);
 assert.equal(
   normalizeFormulaArtifactLatex("𝑘×𝐵elem + 𝐵meta + 𝐵scale"),
   "k×B_{\\mathrm{elem}}+B_{\\mathrm{meta}}+B_{\\mathrm{scale}}",

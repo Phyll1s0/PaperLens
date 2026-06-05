@@ -223,6 +223,35 @@ assert.deepEqual(
 );
 
 {
+  const orphanOverrides = collectManualArtifactOverrides([
+    {
+      id: "old-merged-caption",
+      type: "caption",
+      visualType: "figure",
+      label: "Figure 3",
+      text: "Manually tightened merged caption.",
+      pageNumber: 4,
+      crop: manualCrop,
+      cropQuality: manualCropQuality,
+      cropVersion: 9,
+      manualCropEditedAt: "2026-06-05T08:00:00.000Z",
+    },
+  ]);
+  const repaired = applyManualArtifactOverrides(
+    [
+      { id: "artifact_4_11_split_1", type: "caption", label: "Figure 3", text: "Figure 3. Clean split." },
+      { id: "artifact_4_11_split_2", type: "caption", label: "Figure 4", text: "Figure 4. Clean split." },
+    ],
+    orphanOverrides,
+  );
+  const orphan = repaired.find((artifact) => artifact.id === "old-merged-caption");
+
+  assert.equal(orphan?.orphanedManualOverride, true);
+  assert.equal(orphan?.manualCropEditedAt, "2026-06-05T08:00:00.000Z");
+  assert.deepEqual(orphan?.crop, manualCrop);
+}
+
+{
   const qa = buildVisualArtifactQaSummary({
     id: "paper_visual_qa",
     pageArtifacts: [
@@ -373,4 +402,40 @@ assert.deepEqual(
   assert.equal(qa.summary.typeConflicts, 0);
   assert.equal(qa.categories.some((category) => category.type === "figure-text" && category.count === 1), true);
   assert.deepEqual(qa.items[0].issueTypes, []);
+}
+
+{
+  const qa = buildVisualArtifactQaSummary({
+    id: "paper_formula_crop_first",
+    pageArtifacts: [
+      {
+        id: "formula-crop-first",
+        type: "formula",
+        visualType: "formula",
+        text: "WQL = 1 WQLαj. j=1",
+        pageNumber: 2,
+        imagePath: "/assets/fixture/page-002.png",
+        crop: { x: 50, y: 120, width: 240, height: 80, pageWidth: 612, pageHeight: 792 },
+        cropQuality: { confidence: "medium", oversized: false },
+      },
+      {
+        id: "formula-no-crop",
+        type: "formula",
+        visualType: "formula",
+        text: "WQL = 1 WQLαj. j=1",
+        pageNumber: 3,
+      },
+    ],
+  });
+
+  assert.equal(qa.summary.lowConfidenceFormulas, 1);
+  assert.equal(qa.categories.some((category) => category.type === "low-confidence-formula" && category.label === "公式待核对" && category.count === 1), true);
+  const cropFirst = qa.items.find((item) => item.id === "formula-crop-first");
+  assert.equal(cropFirst.latexConfidence, "medium");
+  assert.equal(cropFirst.renderMode, "image-latex");
+  assert.deepEqual(cropFirst.issueTypes, ["low-confidence-formula"]);
+  const noCrop = qa.items.find((item) => item.id === "formula-no-crop");
+  assert.equal(noCrop.latexConfidence, "medium");
+  assert.equal(noCrop.renderMode, "latex");
+  assert.deepEqual(noCrop.issueTypes, ["missing-crop"]);
 }
