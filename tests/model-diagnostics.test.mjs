@@ -108,6 +108,47 @@ assert.equal(envKimiReport.key.prefix, "sk-kimi");
 assert.equal(envKimiReport.key.length, envKimiKey.length);
 assert.equal(JSON.stringify(envKimiReport).includes(envKimiKey), false);
 
+const envDeepSeekKey = "sk-" + "deepseek-env-only-test-key-123456";
+const envDeepSeekReport = buildModelDiagnosticReport({
+  provider: "deepseek",
+  baseUrl: "https://api.deepseek.com",
+  model: "deepseek-v4-flash",
+}, {
+  ...paperLens,
+  runtime,
+  diagnostics: {
+    endpoint: "https://api.deepseek.com/chat/completions",
+    model: "deepseek-v4-flash",
+    keyPresent: true,
+    keySource: "env",
+    keyEnv: true,
+    keyPrefix: "sk",
+    keyLength: envDeepSeekKey.length,
+    keyFormatOk: true,
+    proxyPresent: false,
+    proxySource: "none",
+    proxyAppliedToAgent: false,
+    proxyTransport: { mode: "direct" },
+  },
+  environmentKey: {
+    configured: true,
+    provider: "deepseek",
+    keyPrefix: "sk",
+    keyLength: envDeepSeekKey.length,
+    keyFormatOk: true,
+    expectedPrefix: "sk",
+  },
+  env: {
+    PAPERLENS_DEEPSEEK_API_KEY: envDeepSeekKey,
+  },
+});
+
+assert.equal(envDeepSeekReport.key.present, true);
+assert.equal(envDeepSeekReport.key.source, "env");
+assert.equal(envDeepSeekReport.key.prefix, "sk");
+assert.equal(envDeepSeekReport.key.expectedPrefix, "sk");
+assert.equal(JSON.stringify(envDeepSeekReport).includes(envDeepSeekKey), false);
+
 const savedKeyReport = buildModelDiagnosticReport({
   provider: "deepseek",
   baseUrl: "https://api.deepseek.com",

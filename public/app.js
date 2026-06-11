@@ -589,12 +589,35 @@ function getStoredKeyInfo() {
 }
 
 function getEnvironmentKeyInfoForSettings(settings = getSettings()) {
-  const envKey = state.modelEnv?.kimiApiKey;
-  if (settings.baseUrl === "local:claude-kimi" && envKey?.configured) {
-    return envKey;
+  const apiKeys = Array.isArray(state.modelEnv?.apiKeys) ? state.modelEnv.apiKeys : [];
+  return apiKeys.find((envKey) => (
+    envKey?.configured && environmentKeyMatchesSettings(envKey, settings)
+  )) || null;
+}
+
+function environmentKeyMatchesSettings(envKey, settings = {}) {
+  if (settings.provider && envKey.provider === settings.provider) {
+    return true;
   }
 
-  return null;
+  if (envKey.baseUrl && settings.baseUrl === envKey.baseUrl) {
+    return true;
+  }
+
+  if (settings.provider === "custom" && envKey.provider === "custom") {
+    return true;
+  }
+
+  const hostname = getUrlHostname(settings.baseUrl);
+  return Boolean(hostname && envKey.hostnames?.includes(hostname));
+}
+
+function getUrlHostname(value) {
+  try {
+    return new URL(String(value || "")).hostname;
+  } catch {
+    return "";
+  }
 }
 
 function applySecuredSettings(settings) {
@@ -712,6 +735,7 @@ function updateModelDiagnostics(remoteDiagnostics) {
   const keyLength = settings.apiKey
     ? settings.apiKey.length
     : savedKey?.keyLength || environmentKey?.keyLength || 0;
+  const expectedPrefix = getExpectedKeyPrefixForClientSettings(settings, environmentKey);
   const diagnostics = remoteDiagnostics || {
     provider: settings.provider,
     endpoint,
@@ -722,7 +746,10 @@ function updateModelDiagnostics(remoteDiagnostics) {
     keySource: settings.apiKey ? "page" : settings.apiKeyRef ? "server-ref" : environmentKey ? "env" : "missing",
     keyPrefix,
     keyLength,
-    keyFormatOk: settings.provider !== "claude-kimi-agent" || keyPrefix === "sk-kimi",
+    keyFormatOk: environmentKey
+      ? environmentKey.keyFormatOk
+      : isClientKeyPrefixOk(keyPrefix, expectedPrefix),
+    expectedPrefix,
     proxyPresent: Boolean(settings.proxyUrl),
     proxySource: settings.proxyUrl ? "page" : "none",
     proxyAppliedToAgent: isClaudeProvider,
@@ -774,6 +801,38 @@ function formatKeySourceLabel(diagnostics = {}) {
   }
 
   return "";
+}
+
+function getExpectedKeyPrefixForClientSettings(settings = {}, environmentKey = null) {
+  if (environmentKey?.expectedPrefix) {
+    return environmentKey.expectedPrefix;
+  }
+
+  if (settings.provider === "claude-kimi-agent" || settings.provider === "kimi-code" || settings.baseUrl === "local:claude-kimi") {
+    return "sk-kimi";
+  }
+
+  if (["deepseek", "openai", "kimi-platform"].includes(settings.provider)) {
+    return "sk";
+  }
+
+  return "provider-specific";
+}
+
+function isClientKeyPrefixOk(keyPrefix, expectedPrefix = "provider-specific") {
+  if (!keyPrefix || keyPrefix === "missing") {
+    return true;
+  }
+
+  if (expectedPrefix === "sk-kimi") {
+    return keyPrefix === "sk-kimi";
+  }
+
+  if (expectedPrefix === "sk") {
+    return keyPrefix === "sk" || keyPrefix === "sk-kimi";
+  }
+
+  return true;
 }
 
 function updateModelDrawerSummary(diagnostics = {}, settings = getSettings()) {
@@ -968,7 +1027,7 @@ function getKeyGuideStatus(settings, diagnostics, keyRequired) {
     return {
       status: "warn",
       chip: "Key 格式异常",
-      text: "当前 Provider 需要完整 Kimi Code Key，格式应以 sk-kimi- 开头。",
+      text: getKeyFormatWarningText(diagnostics),
     };
   }
 
@@ -983,6 +1042,18 @@ function getKeyGuideStatus(settings, diagnostics, keyRequired) {
         ? `已使用后端本地保存的 ${diagnostics.keyPrefix} Key，前端不会继续保存明文。`
         : `已检测到 ${diagnostics.keyPrefix} Key，长度 ${diagnostics.keyLength}。`,
   };
+}
+
+function getKeyFormatWarningText(diagnostics = {}) {
+  if (diagnostics.expectedPrefix === "sk-kimi") {
+    return "当前 Provider 需要完整 Kimi Code Key，格式应以 sk-kimi- 开头。";
+  }
+
+  if (diagnostics.expectedPrefix === "sk") {
+    return "当前 Provider 通常需要完整 API Key，格式应以 sk- 开头。";
+  }
+
+  return "当前 Provider 需要完整 API Key；请不要使用控制台列表里的脱敏值。";
 }
 
 function getClaudeCliGuideStatus(settings, diagnostics) {
@@ -1621,17 +1692,41 @@ async function checkServiceVersion() {
 }
 
 function normalizeModelEnvironmentStatus(modelEnv = {}) {
-  const kimiApiKey = modelEnv?.kimiApiKey || null;
+  const rawApiKeys = Array.isArray(modelEnv?.apiKeys)
+    ? modelEnv.apiKeys
+    : [
+      modelEnv?.kimiApiKey,
+      modelEnv?.kimiCodeApiKey,
+      modelEnv?.kimiPlatformApiKey,
+      modelEnv?.deepseekApiKey,
+      modelEnv?.openaiApiKey,
+      modelEnv?.customApiKey,
+    ].filter(Boolean);
+  const apiKeys = rawApiKeys.map(normalizeEnvironmentKeyInfo);
   return {
-    kimiApiKey: {
-      configured: Boolean(kimiApiKey?.configured),
-      source: kimiApiKey?.configured ? "env" : "missing",
-      provider: "claude-kimi-agent",
-      baseUrl: "local:claude-kimi",
-      keyPrefix: kimiApiKey?.keyPrefix || "missing",
-      keyLength: Number(kimiApiKey?.keyLength || 0),
-      keyFormatOk: kimiApiKey?.keyFormatOk !== false,
-    },
+    apiKeys,
+    kimiApiKey: apiKeys.find((item) => item.id === "kimi-direct") || null,
+    kimiCodeApiKey: apiKeys.find((item) => item.id === "kimi-code") || null,
+    kimiPlatformApiKey: apiKeys.find((item) => item.id === "kimi-platform") || null,
+    deepseekApiKey: apiKeys.find((item) => item.id === "deepseek") || null,
+    openaiApiKey: apiKeys.find((item) => item.id === "openai") || null,
+    customApiKey: apiKeys.find((item) => item.id === "custom") || null,
+  };
+}
+
+function normalizeEnvironmentKeyInfo(keyInfo = {}) {
+  return {
+    id: String(keyInfo.id || ""),
+    configured: Boolean(keyInfo.configured),
+    source: keyInfo.configured ? "env" : "missing",
+    provider: String(keyInfo.provider || ""),
+    label: String(keyInfo.label || ""),
+    baseUrl: String(keyInfo.baseUrl || ""),
+    hostnames: Array.isArray(keyInfo.hostnames) ? keyInfo.hostnames : [],
+    keyPrefix: keyInfo.keyPrefix || "missing",
+    keyLength: Number(keyInfo.keyLength || 0),
+    keyFormatOk: keyInfo.keyFormatOk !== false,
+    expectedPrefix: keyInfo.expectedPrefix || "provider-specific",
   };
 }
 
