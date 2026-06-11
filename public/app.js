@@ -92,6 +92,7 @@ const state = {
     publicRisk: false,
     secretsEncrypted: false,
   },
+  modelEnv: null,
 };
 
 const els = {
@@ -587,6 +588,15 @@ function getStoredKeyInfo() {
   }
 }
 
+function getEnvironmentKeyInfoForSettings(settings = getSettings()) {
+  const envKey = state.modelEnv?.kimiApiKey;
+  if (settings.baseUrl === "local:claude-kimi" && envKey?.configured) {
+    return envKey;
+  }
+
+  return null;
+}
+
 function applySecuredSettings(settings) {
   if (!settings) {
     return;
@@ -692,19 +702,24 @@ function updateModelDiagnostics(remoteDiagnostics) {
   const settings = getSettings();
   const endpoint = getChatEndpoint(settings.baseUrl);
   const savedKey = settings.apiKey ? null : getStoredKeyInfo();
+  const environmentKey = settings.apiKey || settings.apiKeyRef || savedKey ? null : getEnvironmentKeyInfoForSettings(settings);
   const isClaudeProvider = settings.baseUrl === "local:claude-config";
   const keyPrefix = settings.apiKey.startsWith("sk-kimi-")
     ? "sk-kimi"
     : settings.apiKey.startsWith("sk-")
       ? "sk"
-      : settings.apiKey ? "unknown" : savedKey?.keyPrefix || "missing";
-  const keyLength = settings.apiKey ? settings.apiKey.length : savedKey?.keyLength || 0;
+      : settings.apiKey ? "unknown" : savedKey?.keyPrefix || environmentKey?.keyPrefix || "missing";
+  const keyLength = settings.apiKey
+    ? settings.apiKey.length
+    : savedKey?.keyLength || environmentKey?.keyLength || 0;
   const diagnostics = remoteDiagnostics || {
     provider: settings.provider,
     endpoint,
     model: settings.model,
-    keyPresent: Boolean(settings.apiKey || settings.apiKeyRef),
+    keyPresent: Boolean(settings.apiKey || settings.apiKeyRef || environmentKey),
     keySaved: Boolean(settings.apiKeyRef && !settings.apiKey),
+    keyEnv: Boolean(environmentKey),
+    keySource: settings.apiKey ? "page" : settings.apiKeyRef ? "server-ref" : environmentKey ? "env" : "missing",
     keyPrefix,
     keyLength,
     keyFormatOk: settings.provider !== "claude-kimi-agent" || keyPrefix === "sk-kimi",
@@ -725,7 +740,7 @@ function updateModelDiagnostics(remoteDiagnostics) {
     `Provider: ${diagnostics.provider || settings.provider}`,
     `Endpoint: ${diagnostics.endpoint}`,
     `Model: ${diagnostics.model}`,
-    `Key: ${diagnostics.keyPresent ? `${diagnostics.keySaved ? "saved " : ""}${diagnostics.keyPrefix}, ${diagnostics.keyLength} chars` : "missing"}`,
+    `Key: ${diagnostics.keyPresent ? `${formatKeySourceLabel(diagnostics)}${diagnostics.keyPrefix}, ${diagnostics.keyLength} chars` : "missing"}`,
   ];
 
   if (settings.provider === "claude-kimi-agent") {
@@ -749,13 +764,27 @@ function updateModelDiagnostics(remoteDiagnostics) {
   renderProviderGuide(diagnostics);
 }
 
+function formatKeySourceLabel(diagnostics = {}) {
+  if (diagnostics.keyEnv || diagnostics.keySource === "env") {
+    return "env ";
+  }
+
+  if (diagnostics.keySaved || diagnostics.keySource === "server-ref") {
+    return "saved ";
+  }
+
+  return "";
+}
+
 function updateModelDrawerSummary(diagnostics = {}, settings = getSettings()) {
   if (!els.modelDrawerSummary) {
     return;
   }
   const providerLabel = PROVIDERS[settings.provider]?.label || settings.provider || "自定义";
   const keyLabel = diagnostics.keyPresent
-    ? diagnostics.keySaved ? "Key 已保存" : "Key 已填写"
+    ? diagnostics.keyEnv || diagnostics.keySource === "env"
+      ? "环境变量 Key 已配置"
+      : diagnostics.keySaved ? "Key 已保存" : "Key 已填写"
     : settings.baseUrl === "local:claude-config" ? "本机认证" : "Key 未填";
   els.modelDrawerSummary.textContent = `${providerLabel} · ${keyLabel}`;
 }
@@ -767,7 +796,8 @@ function syncModelSettingsDrawer(options = {}) {
   const keyInfo = getStoredKeyInfo();
   const providerUsesLocalAuth = els.baseUrlInput.value.trim() === "local:claude-config";
   const hasTypedKey = Boolean(normalizeApiKeyInput(els.apiKeyInput.value));
-  const configured = Boolean(keyInfo || hasTypedKey || providerUsesLocalAuth);
+  const hasEnvironmentKey = Boolean(getEnvironmentKeyInfoForSettings(getSettings()));
+  const configured = Boolean(keyInfo || hasTypedKey || hasEnvironmentKey || providerUsesLocalAuth);
   if (options.configuredDone) {
     state.modelDrawerTouched = false;
     els.modelSettingsDetails.open = false;
@@ -944,10 +974,14 @@ function getKeyGuideStatus(settings, diagnostics, keyRequired) {
 
   return {
     status: "ok",
-    chip: diagnostics.keySaved ? "Key 已安全保存" : "Key 已填写",
-    text: diagnostics.keySaved
-      ? `已使用后端本地保存的 ${diagnostics.keyPrefix} Key，前端不会继续保存明文。`
-      : `已检测到 ${diagnostics.keyPrefix} Key，长度 ${diagnostics.keyLength}。`,
+    chip: diagnostics.keyEnv || diagnostics.keySource === "env"
+      ? "环境变量 Key 已配置"
+      : diagnostics.keySaved ? "Key 已安全保存" : "Key 已填写",
+    text: diagnostics.keyEnv || diagnostics.keySource === "env"
+      ? `已使用 .env 中的 ${diagnostics.keyPrefix} Key，明文只留在后端环境变量中。`
+      : diagnostics.keySaved
+        ? `已使用后端本地保存的 ${diagnostics.keyPrefix} Key，前端不会继续保存明文。`
+        : `已检测到 ${diagnostics.keyPrefix} Key，长度 ${diagnostics.keyLength}。`,
   };
 }
 
@@ -1569,6 +1603,9 @@ async function checkServiceVersion() {
       signal: controller.signal,
     });
     const payload = await response.json().catch(() => ({}));
+    state.modelEnv = normalizeModelEnvironmentStatus(payload.modelEnv);
+    updateModelDiagnostics();
+    syncModelSettingsDrawer();
     renderServiceStatus(getServiceStatus(payload, response.ok));
   } catch {
     renderServiceStatus({
@@ -1581,6 +1618,21 @@ async function checkServiceVersion() {
   } finally {
     window.clearTimeout(timeout);
   }
+}
+
+function normalizeModelEnvironmentStatus(modelEnv = {}) {
+  const kimiApiKey = modelEnv?.kimiApiKey || null;
+  return {
+    kimiApiKey: {
+      configured: Boolean(kimiApiKey?.configured),
+      source: kimiApiKey?.configured ? "env" : "missing",
+      provider: "claude-kimi-agent",
+      baseUrl: "local:claude-kimi",
+      keyPrefix: kimiApiKey?.keyPrefix || "missing",
+      keyLength: Number(kimiApiKey?.keyLength || 0),
+      keyFormatOk: kimiApiKey?.keyFormatOk !== false,
+    },
+  };
 }
 
 function getServiceStatus(payload, responseOk) {
@@ -3654,7 +3706,8 @@ function failPendingChatMessage(paragraphId, pendingId, message) {
 
 function ensureModelSettings(options = {}) {
   const { apiKey, apiKeyRef, model, baseUrl } = getSettings();
-  if (!apiKey && !apiKeyRef && baseUrl !== "local:claude-config") {
+  const environmentKey = getEnvironmentKeyInfoForSettings(getSettings());
+  if (!apiKey && !apiKeyRef && !environmentKey && baseUrl !== "local:claude-config") {
     if (!options.quiet) {
       setStatus("请输入 API Key", true);
     }

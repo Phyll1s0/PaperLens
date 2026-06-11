@@ -68,6 +68,46 @@ assert.match(kimiReport.budget.note, /不使用 Claude Code CLI/);
 assert.equal(JSON.stringify(kimiReport).includes(kimiKey), false);
 assert.deepEqual(kimiReport.recommendations, ["表面配置正常；下一步点击“测试连接”，若失败，把这个诊断包和错误信息一起查看。"]);
 
+const envKimiKey = "sk-" + "kimi-" + "EnvOnlyAbCdEfGhIjKlMnOpQrStUvWxYz123456";
+const envKimiReport = buildModelDiagnosticReport({
+  provider: "claude-kimi-agent",
+  baseUrl: "local:claude-kimi",
+  model: "kimi-for-coding",
+}, {
+  ...paperLens,
+  runtime,
+  diagnostics: {
+    endpoint: "https://api.kimi.com/coding/v1/messages",
+    model: "kimi-for-coding",
+    keyPresent: true,
+    keySource: "env",
+    keyEnv: true,
+    keyPrefix: "sk-kimi",
+    keyLength: envKimiKey.length,
+    keyFormatOk: true,
+    proxyPresent: false,
+    proxySource: "none",
+    proxyAppliedToAgent: false,
+    proxyTransport: { mode: "direct" },
+  },
+  environmentKey: {
+    configured: true,
+    keyPrefix: "sk-kimi",
+    keyLength: envKimiKey.length,
+    keyFormatOk: true,
+  },
+  env: {
+    PAPERLENS_KIMI_API_KEY: envKimiKey,
+  },
+  usesKimiCodeDirect: true,
+});
+
+assert.equal(envKimiReport.key.present, true);
+assert.equal(envKimiReport.key.source, "env");
+assert.equal(envKimiReport.key.prefix, "sk-kimi");
+assert.equal(envKimiReport.key.length, envKimiKey.length);
+assert.equal(JSON.stringify(envKimiReport).includes(envKimiKey), false);
+
 const savedKeyReport = buildModelDiagnosticReport({
   provider: "deepseek",
   baseUrl: "https://api.deepseek.com",
