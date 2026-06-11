@@ -271,6 +271,7 @@ const ANALYSIS_TARGET_MINUTES = readIntegerEnv("PAPERLENS_ANALYSIS_TARGET_MINUTE
 const MAX_WEAK_ANALYSIS_REPAIR_PASSES = readIntegerEnv("PAPERLENS_WEAK_ANALYSIS_REPAIR_PASSES", 1, 0, 3);
 const KIMI_CODE_USE_CLAUDE_CLI = /^(1|true|yes|on)$/i
   .test(String(process.env.PAPERLENS_KIMI_CODE_USE_CLAUDE_CLI || ""));
+const ENV_API_KEY_DEFINITIONS = loadEnvironmentApiKeyDefinitions();
 const KIMI_CODE_DIRECT_MAX_TOKENS = readIntegerEnv("PAPERLENS_KIMI_CODE_MAX_TOKENS", 12_000, 1024, 64_000);
 const ANALYSIS_CACHE_VERSION = 1;
 const ANALYSIS_CACHE_MAX_ENTRIES = 800;
@@ -2503,6 +2504,17 @@ function resolveJobSettings(settings) {
 
 function resolveSettingsForModel(settings) {
   const normalized = normalizeSettings(settings || {});
+  if (!normalized.apiKey && !normalized.apiKeyRef) {
+    const environmentKey = getEnvironmentApiKeyInfoForSettings(normalized);
+    if (environmentKey?.key) {
+      return {
+        ...normalized,
+        apiKey: environmentKey.key,
+        apiKeySource: "env",
+      };
+    }
+  }
+
   if (normalized.apiKey || !normalized.apiKeyRef) {
     return normalized;
   }
@@ -8658,9 +8670,39 @@ async function buildHealthPayload(req = null) {
     },
     deployment: deploymentStatus,
     persistence: buildPersistenceStatus(),
+    modelEnv: buildModelEnvironmentStatus(),
     visualAnalysis: getVisualAnalysisProviderStatus(loadVisualProviderForRuntime()),
     resourceLimits: getResourceLimitsStatus(),
     ...versionStatus,
+  };
+}
+
+function buildModelEnvironmentStatus() {
+  const apiKeys = ENV_API_KEY_DEFINITIONS.map((definition) => serializeEnvironmentKeyInfo(definition));
+  return {
+    apiKeys,
+    kimiApiKey: apiKeys.find((item) => item.id === "kimi-direct") || null,
+    kimiCodeApiKey: apiKeys.find((item) => item.id === "kimi-code") || null,
+    kimiPlatformApiKey: apiKeys.find((item) => item.id === "kimi-platform") || null,
+    deepseekApiKey: apiKeys.find((item) => item.id === "deepseek") || null,
+    openaiApiKey: apiKeys.find((item) => item.id === "openai") || null,
+    customApiKey: apiKeys.find((item) => item.id === "custom") || null,
+  };
+}
+
+function serializeEnvironmentKeyInfo(info) {
+  return {
+    id: info?.id || "",
+    configured: Boolean(info?.configured),
+    source: info?.configured ? "env" : "missing",
+    provider: info?.provider || "",
+    label: info?.label || "",
+    baseUrl: info?.baseUrl || "",
+    hostnames: Array.isArray(info?.hostnames) ? info.hostnames : [],
+    keyPrefix: info?.keyPrefix || "missing",
+    keyLength: info?.keyLength || 0,
+    keyFormatOk: info?.keyFormatOk !== false,
+    expectedPrefix: info?.expectedPrefix || "provider-specific",
   };
 }
 
@@ -12145,13 +12187,19 @@ function normalizeSettings(settings = {}) {
   const analysisProfile = normalizeAnalysisProfile(settings.analysisProfile);
   const normalizedApiKey = normalizeApiKey(apiKey);
   const proxyUrl = normalizeProxyUrl(String(settings.proxyUrl || ""));
+  const environmentKey = !normalizedApiKey && !apiKeyRef
+    ? getEnvironmentApiKeyInfoForSettings({ provider, baseUrl })
+    : "";
+  const environmentApiKey = environmentKey?.key || "";
 
-  if (!normalizedApiKey && !apiKeyRef && baseUrl !== "local:claude-config") {
+  if (!normalizedApiKey && !apiKeyRef && !environmentApiKey && baseUrl !== "local:claude-config") {
     throw badRequest("API Key is required.");
   }
 
-  if (normalizedApiKey && baseUrl === "local:claude-kimi" && !normalizedApiKey.startsWith("sk-kimi-")) {
-    throw badRequest("Kimi Code Key 格式不对：Kimi Code Direct 需要输入以 sk-kimi- 开头的完整 Key。请不要复制控制台列表里的脱敏显示值。");
+  const effectiveApiKey = normalizedApiKey || environmentApiKey;
+  const expectedPrefix = getExpectedKeyPrefixForSettings({ provider, baseUrl }, environmentKey);
+  if (effectiveApiKey && !isApiKeyFormatOk(effectiveApiKey, expectedPrefix)) {
+    throw badRequest(formatApiKeyPrefixError(expectedPrefix));
   }
 
   if (!model) {
@@ -12204,6 +12252,180 @@ function normalizeApiKey(apiKey) {
   return match?.[1] || withoutBearer;
 }
 
+function loadEnvironmentApiKeyDefinitions() {
+  return [
+    {
+      id: "kimi-direct",
+      provider: "claude-kimi-agent",
+      label: "Kimi Code Direct",
+      baseUrl: "local:claude-kimi",
+      envNames: ["PAPERLENS_KIMI_API_KEY", "PAPERLENS_KIMI_CODE_DIRECT_API_KEY", "PAPERLENS_KIMI_CODE_API_KEY"],
+      expectedPrefix: "sk-kimi",
+    },
+    {
+      id: "kimi-code",
+      provider: "kimi-code",
+      label: "Kimi Code",
+      baseUrl: "https://api.kimi.com/coding/v1",
+      hostnames: ["api.kimi.com"],
+      envNames: ["PAPERLENS_KIMI_CODE_API_KEY", "PAPERLENS_KIMI_API_KEY"],
+      expectedPrefix: "sk-kimi",
+    },
+    {
+      id: "kimi-platform",
+      provider: "kimi-platform",
+      label: "Kimi 开放平台",
+      baseUrl: "https://api.moonshot.cn/v1",
+      hostnames: ["api.moonshot.cn"],
+      envNames: ["PAPERLENS_MOONSHOT_API_KEY", "PAPERLENS_KIMI_PLATFORM_API_KEY", "MOONSHOT_API_KEY"],
+      expectedPrefix: "sk",
+    },
+    {
+      id: "deepseek",
+      provider: "deepseek",
+      label: "DeepSeek",
+      baseUrl: "https://api.deepseek.com",
+      hostnames: ["api.deepseek.com"],
+      envNames: ["PAPERLENS_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"],
+      expectedPrefix: "sk",
+    },
+    {
+      id: "openai",
+      provider: "openai",
+      label: "OpenAI",
+      baseUrl: "https://api.openai.com/v1",
+      hostnames: ["api.openai.com"],
+      envNames: ["PAPERLENS_OPENAI_API_KEY", "OPENAI_API_KEY"],
+      expectedPrefix: "sk",
+    },
+    {
+      id: "custom",
+      provider: "custom",
+      label: "自定义 Provider",
+      baseUrl: "",
+      envNames: ["PAPERLENS_CUSTOM_API_KEY", "PAPERLENS_API_KEY"],
+      expectedPrefix: "provider-specific",
+    },
+  ].map((definition) => {
+    const key = getFirstEnvironmentApiKey(definition.envNames);
+    return {
+      hostnames: [],
+      ...definition,
+      key,
+      configured: Boolean(key),
+      keyPrefix: getApiKeyPrefix(key),
+      keyLength: key.length,
+      keyFormatOk: isApiKeyFormatOk(key, definition.expectedPrefix),
+    };
+  });
+}
+
+function getFirstEnvironmentApiKey(envNames = []) {
+  for (const envName of envNames) {
+    const value = normalizeApiKey(process.env[envName] || "");
+    if (value) {
+      return value;
+    }
+  }
+
+  return "";
+}
+
+function getEnvironmentApiKeyInfoForSettings(settings = {}) {
+  const provider = String(settings.provider || "").trim();
+  const baseUrl = String(settings.baseUrl || "").trim();
+  return ENV_API_KEY_DEFINITIONS.find((definition) => (
+    definition.configured && environmentApiKeyMatchesSettings(definition, provider, baseUrl)
+  )) || null;
+}
+
+function environmentApiKeyMatchesSettings(definition, provider, baseUrl) {
+  if (!definition) {
+    return false;
+  }
+
+  if (provider && definition.provider === provider) {
+    return true;
+  }
+
+  if (definition.baseUrl && baseUrl === definition.baseUrl) {
+    return true;
+  }
+
+  if (provider === "custom" && definition.provider === "custom") {
+    return true;
+  }
+
+  const hostname = getUrlHostname(baseUrl);
+  return Boolean(hostname && definition.hostnames?.includes(hostname));
+}
+
+function getUrlHostname(value) {
+  try {
+    return new URL(String(value || "")).hostname;
+  } catch {
+    return "";
+  }
+}
+
+function getExpectedKeyPrefixForSettings(settings = {}, environmentKey = null) {
+  if (environmentKey?.expectedPrefix) {
+    return environmentKey.expectedPrefix;
+  }
+
+  const provider = String(settings.provider || "").trim();
+  const baseUrl = String(settings.baseUrl || "").trim();
+  const definition = ENV_API_KEY_DEFINITIONS.find((item) => (
+    environmentApiKeyMatchesSettings(item, provider, baseUrl)
+  ));
+  return definition?.expectedPrefix || "provider-specific";
+}
+
+function isApiKeyFormatOk(apiKey, expectedPrefix = "provider-specific") {
+  const key = String(apiKey || "");
+  if (!key) {
+    return true;
+  }
+
+  if (expectedPrefix === "sk-kimi") {
+    return key.startsWith("sk-kimi-");
+  }
+
+  if (expectedPrefix === "sk") {
+    return key.startsWith("sk-");
+  }
+
+  return true;
+}
+
+function isApiKeyDescriptorFormatOk({ apiKey = "", keyPrefix = "", expectedPrefix = "provider-specific" } = {}) {
+  if (apiKey) {
+    return isApiKeyFormatOk(apiKey, expectedPrefix);
+  }
+
+  if (expectedPrefix === "sk-kimi") {
+    return keyPrefix === "sk-kimi";
+  }
+
+  if (expectedPrefix === "sk") {
+    return keyPrefix === "sk" || keyPrefix === "sk-kimi";
+  }
+
+  return true;
+}
+
+function formatApiKeyPrefixError(expectedPrefix = "provider-specific") {
+  if (expectedPrefix === "sk-kimi") {
+    return "Kimi Code Key 格式不对：当前 Provider 需要输入以 sk-kimi- 开头的完整 Key。请不要复制控制台列表里的脱敏显示值。";
+  }
+
+  if (expectedPrefix === "sk") {
+    return "API Key 格式不对：当前 Provider 通常需要以 sk- 开头的完整 Key。请不要复制控制台列表里的脱敏显示值。";
+  }
+
+  return "API Key 格式不对：请填写当前 Provider 的完整 Key。";
+}
+
 function normalizeProxyUrl(proxyUrl) {
   const clean = String(proxyUrl || "").trim();
   if (!clean) {
@@ -12224,14 +12446,21 @@ function getSettingsDiagnostics(settings = {}) {
   const apiKeyRef = String(settings.apiKeyRef || "").trim();
   const savedKey = apiKeyRef ? secretStore.keys.get(apiKeyRef) : null;
   const apiKey = normalizeApiKey(String(settings.apiKey || ""));
+  const environmentKeyInfo = !apiKey && !apiKeyRef && !savedKey
+    ? getEnvironmentApiKeyInfoForSettings({ provider, baseUrl })
+    : null;
   let proxyUrl = "";
   try {
     proxyUrl = normalizeProxyUrl(String(settings.proxyUrl || ""));
   } catch {
     proxyUrl = String(settings.proxyUrl || "").trim();
   }
-  const keyPrefix = apiKey ? getApiKeyPrefix(apiKey) : savedKey?.keyPrefix || "missing";
-  const keyLength = apiKey ? apiKey.length : savedKey?.keyLength || 0;
+  const keyPrefix = apiKey
+    ? getApiKeyPrefix(apiKey)
+    : savedKey?.keyPrefix || environmentKeyInfo?.keyPrefix || "missing";
+  const keyLength = apiKey
+    ? apiKey.length
+    : savedKey?.keyLength || environmentKeyInfo?.keyLength || 0;
   const usesKimiCodeDirect = baseUrl === "local:claude-kimi" && !KIMI_CODE_USE_CLAUDE_CLI;
   const isClaudeProvider = baseUrl === "local:claude-config" || (baseUrl === "local:claude-kimi" && !usesKimiCodeDirect);
   const commandPath = isClaudeProvider ? buildCommandPath() : "";
@@ -12256,12 +12485,18 @@ function getSettingsDiagnostics(settings = {}) {
         ? "local claude CLI configured auth"
       : endpoint,
     model,
-    keyPresent: Boolean(apiKey || savedKey),
+    keyPresent: Boolean(apiKey || savedKey || environmentKeyInfo?.configured),
     keyRef: savedKey?.id || "",
     keySaved: Boolean(savedKey && !apiKey),
+    keySource: apiKey ? "page" : savedKey ? "server-ref" : environmentKeyInfo?.configured ? "env" : "missing",
+    keyEnv: Boolean(environmentKeyInfo?.configured),
     keyPrefix,
     keyLength,
-    keyFormatOk: baseUrl !== "local:claude-kimi" || keyPrefix === "sk-kimi",
+    keyFormatOk: isApiKeyDescriptorFormatOk({
+      apiKey: apiKey || environmentKeyInfo?.key || "",
+      keyPrefix,
+      expectedPrefix: getExpectedKeyPrefixForSettings({ provider, baseUrl }, environmentKeyInfo),
+    }),
     claudeCommand: claudeCommand.command,
     claudeCommandSource: claudeCommand.source,
     claudeAvailable: claudeCommand.available,
@@ -12285,6 +12520,9 @@ function buildModelDiagnosticReport(settings = {}) {
   const apiKey = normalizeApiKey(String(settings.apiKey || ""));
   const apiKeyRef = String(settings.apiKeyRef || "").trim();
   const savedKey = apiKeyRef ? secretStore.keys.get(apiKeyRef) : null;
+  const environmentKey = !apiKey && !apiKeyRef && !savedKey
+    ? getEnvironmentApiKeyInfoForSettings({ provider, baseUrl })
+    : null;
   const diagnostics = getSettingsDiagnostics(settings);
   const usesKimiCodeDirect = baseUrl === "local:claude-kimi" && !KIMI_CODE_USE_CLAUDE_CLI;
   const isClaudeProvider = baseUrl === "local:claude-config" || (baseUrl === "local:claude-kimi" && !usesKimiCodeDirect);
@@ -12308,6 +12546,7 @@ function buildModelDiagnosticReport(settings = {}) {
     homeDir: process.env.HOME || "",
     diagnostics,
     savedKey,
+    environmentKey: environmentKey ? serializeEnvironmentKeyInfo(environmentKey) : null,
     keyRefMatches,
     commandPath,
     env: process.env,

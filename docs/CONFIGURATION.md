@@ -18,6 +18,20 @@ Kimi Code Console 的 Key 和 Kimi 开放平台 Key 不通用。使用 Kimi Code
 
 设置 `PAPERLENS_ACCESS_TOKEN` 或 `PAPERLENS_SECRET_KEY` 后，secrets 会加密保存。
 
+也可以把 Key 写在本机 `.env`，页面输入和已保存 key id 仍然优先于环境变量：
+
+```text
+PAPERLENS_KIMI_API_KEY=                 # Kimi Code Direct
+PAPERLENS_KIMI_CODE_API_KEY=            # Kimi Code 普通 endpoint
+PAPERLENS_MOONSHOT_API_KEY=             # Kimi 开放平台
+PAPERLENS_DEEPSEEK_API_KEY=             # DeepSeek
+PAPERLENS_OPENAI_API_KEY=               # OpenAI
+PAPERLENS_CUSTOM_API_KEY=               # 自定义 Provider
+PAPERLENS_API_KEY=                      # 自定义 Provider 通用兜底
+```
+
+兼容常见环境变量：`OPENAI_API_KEY`、`DEEPSEEK_API_KEY`、`MOONSHOT_API_KEY`。环境变量 Key 只在后端使用，页面和诊断包只显示前缀、长度和来源，不返回明文。
+
 ## 代理
 
 页面临时代理：
